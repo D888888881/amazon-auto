@@ -1,0 +1,104 @@
+{% extends 'base.html' %}
+{% load static %}
+{% block extra_head %}
+    <link rel="stylesheet" href="{% static 'css/user_manage.css' %}">
+{% endblock %}
+{% block title %}用户管理 — Amazon 自动化{% endblock %}
+{% block body_class %}page-user{% endblock %}
+{% block main_class %}main--user-manage{% endblock %}
+{% block content %}
+    <div class="um-shell">
+        <header class="um-hero">
+            <div class="um-hero__left">
+                <p class="um-hero__eyebrow">超级管理员</p>
+                <h1 class="um-hero__title">用户管理</h1>
+                <p class="um-hero__lead">仅对普通用户提供「禁用」与「删除」。禁用后用户将无法登录系统。</p>
+            </div>
+            <div class="um-hero__stats" aria-live="polite">
+                <div class="um-stat">
+                    <div class="um-stat__value">{{ active_count }}</div>
+                    <div class="um-stat__label">启用</div>
+                </div>
+                <div class="um-stat">
+                    <div class="um-stat__value">{{ inactive_count }}</div>
+                    <div class="um-stat__label">禁用</div>
+                </div>
+            </div>
+        </header>
+
+        {% if messages %}
+            <ul class="messages um-messages">
+                {% for message in messages %}
+                    <li class="{{ message.tags }}">{{ message }}</li>
+                {% endfor %}
+            </ul>
+        {% endif %}
+
+        <section class="um-panel" aria-labelledby="user-list-title">
+            <div class="um-panel__bar">
+                <h2 class="um-panel__title" id="user-list-title">用户列表</h2>
+                <span class="um-panel__hint">共 {{ users_count }} 个普通账号</span>
+            </div>
+
+            <div class="um-table-scroll">
+                <table class="um-table">
+                    <thead>
+                    <tr>
+                        <th class="um-col-user">用户名</th>
+                        <th class="um-col-email">邮箱</th>
+                        <th class="um-col-status">状态</th>
+                        <th class="um-col-time">加入时间</th>
+                        <th class="um-col-actions">操作</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {% for u in users %}
+                        <tr class="um-row">
+                            <td>
+                                <div class="um-user">
+                                    <span class="um-avatar" aria-hidden="true">{{ u.username|slice:":1"|upper }}</span>
+                                    <span class="um-user__name">{{ u.username }}</span>
+                                </div>
+                            </td>
+                            <td class="um-mono">{{ u.email|default:"—" }}</td>
+                            <td>
+                                {% if u.is_active %}
+                                    <span class="um-badge um-badge--ok">启用</span>
+                                {% else %}
+                                    <span class="um-badge um-badge--no">禁用</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                <time class="um-time"
+                                      datetime="{{ u.date_joined|date:'c' }}">{{ u.date_joined|date:"Y-m-d H:i" }}</time>
+                            </td>
+                            <td class="um-actions">
+                                <form method="post" class="um-inline-form"
+                                      onsubmit="return confirm('{% if u.is_active %}确定禁用用户「{{ u.username }}」吗？{% else %}确定启用用户「{{ u.username }}」吗？{% endif %}');">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="user_id" value="{{ u.id }}">
+                                    <input type="hidden" name="action"
+                                           value="{% if u.is_active %}disable{% else %}enable{% endif %}">
+                                    <button type="submit"
+                                            class="um-btn {% if u.is_active %}um-btn--no{% else %}um-btn--ok{% endif %}">
+                                        {% if u.is_active %}禁用{% else %}启用{% endif %}
+                                    </button>
+                                </form>
+
+                                <form method="post" class="um-inline-form"
+                                      onsubmit="return confirm('确定删除用户「{{ u.username }}」吗？此操作不可恢复。');">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="user_id" value="{{ u.id }}">
+                                    <input type="hidden" name="action" value="delete">
+                                    <button type="submit" class="um-btn um-btn--danger">删除</button>
+                                </form>
+                            </td>
+                        </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </div>
+{% endblock %}
+

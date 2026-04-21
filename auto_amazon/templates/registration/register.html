@@ -1,0 +1,44 @@
+{% extends 'base.html' %}
+{% block title %}注册 — Amazon 自动化{% endblock %}
+{% block content %}
+<div class="auth-page">
+    <div class="auth-card auth-card--wide">
+        <div class="auth-card__head">
+            <h1 class="auth-card__title">创建账号</h1>
+            <p class="auth-card__sub">提交后需<strong>超级管理员审核通过</strong>方可登录（无需邮件验证）。</p>
+        </div>
+        <form method="post" action="{% url 'register' %}" class="auth-form">
+            {% csrf_token %}
+            {% if form.non_field_errors %}
+            <div class="auth-alert auth-alert--error">
+                {% for err in form.non_field_errors %}<span>{{ err }}</span>{% endfor %}
+            </div>
+            {% endif %}
+            <div class="auth-field">
+                <label for="id_username">用户名</label>
+                {{ form.username }}
+                {% if form.username.errors %}<span class="auth-field-error">{{ form.username.errors.0 }}</span>{% endif %}
+            </div>
+            <div class="auth-field">
+                <label for="id_email">邮箱（可选）</label>
+                {{ form.email }}
+                {% if form.email.errors %}<span class="auth-field-error">{{ form.email.errors.0 }}</span>{% endif %}
+            </div>
+            <div class="auth-field">
+                <label for="id_password1">密码</label>
+                {{ form.password1 }}
+                {% if form.password1.errors %}<span class="auth-field-error">{{ form.password1.errors.0 }}</span>{% endif %}
+            </div>
+            <div class="auth-field">
+                <label for="id_password2">确认密码</label>
+                {{ form.password2 }}
+                {% if form.password2.errors %}<span class="auth-field-error">{{ form.password2.errors.0 }}</span>{% endif %}
+            </div>
+            <button type="submit" class="auth-btn auth-btn--primary">提交注册申请</button>
+        </form>
+        <p class="auth-footer">
+            已有账号？<a href="{% url 'login' %}">登录</a>
+        </p>
+    </div>
+</div>
+{% endblock %}

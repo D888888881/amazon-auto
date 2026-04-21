@@ -1,0 +1,20 @@
+{% if payload %}
+<div class="dash-ops-blk" data-ops-json-id="ops-json-{{ row_pk }}-{{ slot }}">
+    <div class="dash-ops-kw" id="ops-kw-{{ row_pk }}-{{ slot }}"></div>
+    <div class="dash-ops-canvas-wrap">
+        <canvas id="ops-canvas-{{ row_pk }}-{{ slot }}" height="140" aria-label="运营难度分布"></canvas>
+    </div>
+    {% if not ops_readonly %}
+    <form method="post" action="{% url 'dashboard_ops_filter' %}" class="dash-ops-filter-form"
+          onsubmit="return confirm('按运营难度 &gt; 10%（忽略「200以上」区间）从 data_origin 筛选并生成新 Excel？');">
+        {% csrf_token %}
+        <input type="hidden" name="row_id" value="{{ row_pk }}">
+        <input type="hidden" name="slot" value="{{ slot }}">
+        <button type="submit" class="dash-btn dash-btn--ops-filter">筛选</button>
+    </form>
+    {% endif %}
+</div>
+<script type="application/json" id="ops-json-{{ row_pk }}-{{ slot }}">{{ payload|safe }}</script>
+{% else %}
+—
+{% endif %}

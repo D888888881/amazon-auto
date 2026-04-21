@@ -1,0 +1,1079 @@
+{% extends 'base.html' %}
+{% block title %}Amazon自动化{% endblock %}
+{% block body_class %}fs-body{% endblock %}
+{% block main_class %}main--fs{% endblock %}
+{% block content %}
+<script type="application/json" id="fs-assign-users">{{ assignable_users_json|safe }}</script>
+<script type="application/json" id="fs-uploader-users">{{ uploader_users_json|safe }}</script>
+<div class="fs-workspace" id="fs-workspace">
+    <button type="button" class="fs-sider-reveal" id="fs-sider-reveal" title="展开文件目录" aria-label="展开文件目录">
+        <span class="fs-sider-reveal__icon">⟩</span>
+        <span class="fs-sider-reveal__text">目录</span>
+    </button>
+
+    <aside class="fs-sider" id="fs-sider">
+        <div class="fs-sider__top">
+            <div class="fs-sider__title">
+                <span class="fs-sider__logo">◇</span>
+                <span>文件库</span>
+            </div>
+            <p class="fs-sider__sub">根目录：<code>media/file</code> · 点击 Excel 将在<strong>新标签页</strong>打开编辑</p>
+            <button type="button" class="fs-sider__collapse" id="fs-toggle-sider" title="收起目录">⟨</button>
+        </div>
+        <div class="fs-sider__scroll">
+            <div class="fs-tree" id="fs-tree" role="tree"></div>
+        </div>
+    </aside>
+
+    <section class="fs-main">
+        <div class="fs-main__browser" id="fs-main-browser">
+            <header class="fs-main__toolbar">
+                <nav class="fs-bc" id="fs-bc" aria-label="面包屑"></nav>
+                <div class="fs-main__actions">
+                    <input type="text" id="fs-asin-search" class="fs-input" placeholder="搜索 ASIN">
+                    <select id="fs-calc-filter" class="fs-input" title="按是否计算筛选">
+                        <option value="all">全部</option>
+                        <option value="yes">已计算</option>
+                        <option value="no">未计算</option>
+                    </select>
+                    <select id="fs-assign-status" class="fs-input" title="按是否已分配筛选">
+                        <option value="all">分配：全部</option>
+                        <option value="yes">已分配</option>
+                        <option value="no">未分配</option>
+                    </select>
+                    <select id="fs-roi-verify-filter" class="fs-input" title="按是否校验筛选">
+                        <option value="all">校验：全部</option>
+                        <option value="yes">是</option>
+                        <option value="no">否</option>
+                    </select>
+                    <label class="fs-page-size-label">更新起
+                        <input type="datetime-local" id="fs-updated-from" class="fs-input">
+                    </label>
+                    <label class="fs-page-size-label">更新止
+                        <input type="datetime-local" id="fs-updated-to" class="fs-input">
+                    </label>
+                    <select id="fs-assignee-filter" class="fs-input" title="按被分配人筛选">
+                        <option value="">被分配人：全部</option>
+                    </select>
+                    <select id="fs-uploader-filter" class="fs-input" title="按导入上传者筛选（仅根目录 ASIN 列表）">
+                        <option value="">上传者：全部</option>
+                    </select>
+                    <label class="fs-page-size-label">每页
+                        <select id="fs-page-size" class="fs-input fs-input--narrow">
+                            <option value="25">25</option>
+                            <option value="50">50</option>
+                            <option value="100">100</option>
+                            <option value="custom">自定义</option>
+                        </select>
+                    </label>
+                    <input type="number" id="fs-page-size-custom" class="fs-input fs-input--narrow" min="1" max="2000" placeholder="自定义" title="选择「自定义」时生效" style="max-width:88px;">
+                    <div id="fs-assign-panel" class="fs-assign-panel" title="勾选左侧 ASIN 文件夹后，选择用户并点击分配" {% if not is_superuser %}hidden{% endif %}>
+                        <span class="fs-assign-panel__label">分配给</span>
+                        <select id="fs-assign-users-select" style="height: 50px" class="fs-input" multiple size="5" title="可多选用户">
+                        </select>
+                        <button type="button" class="fs-btn fs-btn--primary" id="fs-btn-assign">分配选中</button>
+                    </div>
+                    <button type="button" class="fs-btn fs-btn--primary" id="fs-btn-import" title="选择 ZIP 上传：根目录下含多个 B0XXXXXXXX 文件夹">导入 ZIP</button>
+                    <input type="file" id="fs-import-file" accept=".zip,application/zip" hidden>
+                    <span class="fs-import-status" id="fs-import-status" hidden></span>
+                    <button type="button" class="fs-btn" id="fs-btn-download" title="选中一个文件直接下载；多选则打包为 ZIP">下载</button>
+                    <button type="button" class="fs-btn" id="fs-btn-batch-zip">批量下载 ZIP</button>
+                    <button type="button" class="fs-btn fs-btn--danger" id="fs-btn-delete">删除</button>
+                </div>
+            </header>
+            <div class="fs-main__body">
+                <div class="fs-pane" id="pane-folder">
+                    <div class="fs-pane__head">
+                        <h2 class="fs-pane__title" id="folder-title">文件夹</h2>
+                        <span class="fs-pane__meta" id="folder-meta"></span>
+                    </div>
+                    <div class="fs-table-wrap">
+                        <table class="fs-table" id="folder-table">
+                            <thead>
+                                <tr>
+                                    <th class="fs-table__check"><input type="checkbox" id="fs-select-all" title="全选" aria-label="全选当前列表"></th>
+                                    <th class="fs-table__name" style="width: 600px">名称</th>
+                                    <th class="fs-table__type">类型</th>
+                                    <th class="fs-table__size">大小</th>
+                                    <th class="fs-table__size" style="width: 300px">是否计算</th>
+                                    <th class="fs-table__assign">是否已分配</th>
+                                    <th class="fs-table__roi-verify">是否校验</th>
+                                    <th class="fs-table__updated-at">更新时间</th>
+                                    <th class="fs-table__uploaders">上传者</th>
+                                    <th class="fs-table__assignees">分配给</th>
+                                </tr>
+                            </thead>
+                            <tbody id="folder-tbody"></tbody>
+                        </table>
+                        <div class="fs-pagination" id="fs-pagination" hidden></div>
+                        <p class="fs-empty" id="folder-empty" hidden>此文件夹为空</p>
+                    </div>
+                </div>
+                <div class="fs-pane fs-pane--other" id="pane-other" hidden>
+                    <div class="fs-other-card">
+                        <div class="fs-other__icon">📄</div>
+                        <h2 class="fs-other__title" id="other-name">文件</h2>
+                        <p class="fs-other__path" id="other-path"></p>
+                        <p class="fs-other__hint">该类型不支持在线编辑，请选择 .xlsx / .xlsm 文件。</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+</div>
+
+<script>
+(function () {
+  try {
+    var k = 'asin_roi_pack_verified_nav';
+    if (sessionStorage.getItem(k) === '1') {
+      sessionStorage.removeItem(k);
+      var u = new URL(window.location.href);
+      if (!u.searchParams.has('_rv')) {
+        u.searchParams.set('_rv', String(Date.now()));
+        window.location.replace(u.toString());
+        return;
+      }
+    }
+  } catch (e) {}
+  window.addEventListener('pageshow', function (ev) {
+    if (ev.persisted) location.reload();
+  });
+
+  const browseUrl = '{% url "excel_browse" %}';
+  const editorUrl = '{% url "excel_editor" %}';
+  const downloadUrl = '{% url "excel_download" %}';
+  const deleteUrl = '{% url "excel_delete" %}';
+  const batchZipUrl = '{% url "excel_batch_download" %}';
+  const chunkUrl = '{% url "excel_import_chunk" %}';
+  const commitUrl = '{% url "excel_import_commit" %}';
+  const assignUrl = '{% url "excel_assign_folders" %}';
+  const csrftoken = '{{ csrf_token }}';
+  /** 单分片大小（4MB），整包由多请求顺序上传 */
+  const IMPORT_CHUNK_SIZE = 4 * 1024 * 1024;
+
+  /** 避免登录页/报错页 HTML 被当成 JSON 解析 */
+  function readJsonResponse(r) {
+    var ct = (r.headers.get('content-type') || '').toLowerCase();
+    if (ct.indexOf('application/json') < 0 && ct.indexOf('text/json') < 0) {
+      return r.text().then(function (t) {
+        var snip = (t || '').replace(/\s+/g, ' ').trim().slice(0, 180);
+        throw new Error(
+          '服务器返回了非 JSON（HTTP ' + r.status + '），请重新登录后重试。' +
+          (snip.indexOf('<!DOCTYPE') === 0 ? '（多为登录页或服务器错误页）' : '') +
+          (snip ? ' ' + snip : '')
+        );
+      });
+    }
+    return r.text().then(function (t) {
+      if (!t) return {};
+      try {
+        return JSON.parse(t);
+      } catch (e) {
+        throw new Error('响应 JSON 解析失败（HTTP ' + r.status + '）');
+      }
+    });
+  }
+
+  const workspace = document.getElementById('fs-workspace');
+  const treeRoot = document.getElementById('fs-tree');
+  const paneFolder = document.getElementById('pane-folder');
+  const paneOther = document.getElementById('pane-other');
+  const folderTbody = document.getElementById('folder-tbody');
+  const folderEmpty = document.getElementById('folder-empty');
+  const folderTitle = document.getElementById('folder-title');
+  const folderMeta = document.getElementById('folder-meta');
+  const bcEl = document.getElementById('fs-bc');
+  const fsSelectAll = document.getElementById('fs-select-all');
+  const paginationEl = document.getElementById('fs-pagination');
+  const asinSearchEl = document.getElementById('fs-asin-search');
+  const calcFilterEl = document.getElementById('fs-calc-filter');
+  const roiVerifyFilterEl = document.getElementById('fs-roi-verify-filter');
+  const updatedFromEl = document.getElementById('fs-updated-from');
+  const updatedToEl = document.getElementById('fs-updated-to');
+  const assignStatusEl = document.getElementById('fs-assign-status');
+  const assigneeFilterEl = document.getElementById('fs-assignee-filter');
+  const pageSizeEl = document.getElementById('fs-page-size');
+  const pageSizeCustomEl = document.getElementById('fs-page-size-custom');
+  const assignUsersSelectEl = document.getElementById('fs-assign-users-select');
+  const btnAssign = document.getElementById('fs-btn-assign');
+  const uploaderFilterEl = document.getElementById('fs-uploader-filter');
+  const isSuperuser = {% if is_superuser %}true{% else %}false{% endif %};
+
+  function getPageSize() {
+    var v = pageSizeEl ? pageSizeEl.value : '25';
+    if (v === 'custom') {
+      var c = parseInt(pageSizeCustomEl && pageSizeCustomEl.value, 10);
+      if (!isNaN(c) && c > 0) return Math.min(c, 2000);
+      return 25;
+    }
+    var n = parseInt(v, 10);
+    return !isNaN(n) && n > 0 ? n : 25;
+  }
+
+  function labelFromRel(rel) {
+    if (!rel) return 'file';
+    var s = String(rel).replace(/\/+$/, '');
+    var parts = s.split('/');
+    return parts[parts.length - 1] || 'file';
+  }
+
+  var currentFolderRel = '';
+  var currentFolderItems = [];
+  var currentPage = 1;
+  var currentAsinSearch = '';
+  var currentCalcFilter = 'all';
+  var currentRoiVerifyFilter = 'all';
+  var currentUpdatedFromTs = 0;
+  var currentUpdatedToTs = 0;
+  var currentAssignStatus = 'all';
+  var currentAssigneePick = '';
+  var currentUploadedByFilter = '';
+
+  (function initUploaderFilterUsers() {
+    var rawEl = document.getElementById('fs-uploader-users');
+    var sel = document.getElementById('fs-uploader-filter');
+    var list = [];
+    try {
+      if (rawEl && rawEl.textContent) list = JSON.parse(rawEl.textContent);
+    } catch (e) {}
+    if (sel && list.length) {
+      list.forEach(function (u) {
+        var o = document.createElement('option');
+        o.value = u.username;
+        o.textContent = u.username;
+        sel.appendChild(o);
+      });
+    }
+  })();
+
+  (function initAssignableUsers() {
+    var rawEl = document.getElementById('fs-assign-users');
+    var list = [];
+    try {
+      if (rawEl && rawEl.textContent) list = JSON.parse(rawEl.textContent);
+    } catch (e) {}
+    if (assigneeFilterEl) {
+      list.forEach(function (u) {
+        var o = document.createElement('option');
+        o.value = u.username;
+        o.textContent = u.username;
+        assigneeFilterEl.appendChild(o);
+      });
+    }
+    if (assignUsersSelectEl) {
+      list.forEach(function (u) {
+        var o = document.createElement('option');
+        o.value = String(u.id);
+        o.textContent = u.username;
+        assignUsersSelectEl.appendChild(o);
+      });
+    }
+  })();
+
+  function joinPath(dir, name) {
+    if (!dir) return name;
+    return dir.replace(/\/$/, '') + '/' + name;
+  }
+
+  function fmtSize(n) {
+    if (n == null || isNaN(n)) return '—';
+    if (n < 1024) return n + ' B';
+    if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+    return (n / 1048576).toFixed(1) + ' MB';
+  }
+
+  function isExcelExt(ext) {
+    var e = (ext || '').toLowerCase();
+    return e === '.xlsx' || e === '.xlsm';
+  }
+
+  function openExcelInNewTab(rel) {
+    var u = editorUrl + '?path=' + encodeURIComponent(rel);
+    window.open(u, '_blank', 'noopener');
+  }
+
+  function showBrowserPane(mode) {
+    paneFolder.hidden = mode !== 'folder';
+    paneOther.hidden = mode !== 'other';
+  }
+
+  function renderBreadcrumb(rel) {
+    bcEl.innerHTML = '';
+    var parts = [{ label: 'file', path: '' }];
+    if (rel) {
+      var acc = '';
+      rel.split('/').forEach(function (seg) {
+        if (!seg) return;
+        acc = acc ? acc + '/' + seg : seg;
+        parts.push({ label: seg, path: acc });
+      });
+    }
+    parts.forEach(function (p, i) {
+      if (i > 0) {
+        var s = document.createElement('span');
+        s.className = 'fs-bc__sep';
+        s.textContent = '/';
+        bcEl.appendChild(s);
+      }
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'fs-bc__item';
+      btn.textContent = p.label;
+      (function (path) {
+        btn.addEventListener('click', function () {
+          selectFolder(path, p.label);
+        });
+      })(p.path);
+      bcEl.appendChild(btn);
+    });
+  }
+
+  function formatUploaders(arr) {
+    if (!arr || !arr.length) return '—';
+    return arr.filter(Boolean).join('、');
+  }
+
+  function fetchBrowse(path) {
+    path = path == null ? '' : path;
+    var params = [];
+    if (path) params.push('path=' + encodeURIComponent(path));
+    if (!path && currentUploadedByFilter) {
+      params.push('uploaded_by=' + encodeURIComponent(currentUploadedByFilter));
+    }
+    var q = params.length ? '?' + params.join('&') : '';
+    return fetch(browseUrl + q, { credentials: 'same-origin' }).then(function (r) {
+      return readJsonResponse(r);
+    });
+  }
+
+  function renderFolderRows(items, rel) {
+    folderTbody.innerHTML = '';
+    items.forEach(function (it) {
+      var tr = document.createElement('tr');
+      tr.className = 'fs-table__row';
+      var childRel = joinPath(rel, it.name);
+
+      var tdChk = document.createElement('td');
+      tdChk.className = 'fs-table__check';
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.className = 'fs-row-check';
+      cb.setAttribute('data-rel', childRel);
+      cb.setAttribute('data-entry-type', it.type);
+      var canDel = it.can_delete !== false;
+      cb.setAttribute('data-can-delete', canDel ? '1' : '0');
+      if (!canDel) cb.title = '此项为分配资料或非本人导入，无法删除';
+      cb.addEventListener('click', function (e) { e.stopPropagation(); });
+      tdChk.appendChild(cb);
+      tr.appendChild(tdChk);
+
+      if (it.type === 'dir') {
+        var tdName = document.createElement('td');
+        tdName.innerHTML =
+          '<span class="fs-file-ic fs-file-ic--dir">📁</span> ' + escapeHtml(it.name);
+        tr.appendChild(tdName);
+        tr.appendChild(document.createElement('td')).textContent = '文件夹';
+        tr.appendChild(document.createElement('td')).textContent = '—';
+        var tdCalc = document.createElement('td');
+        if (it.is_asin_dir) {
+          var badge = document.createElement('span');
+          badge.className = it.calculated ? 'fs-calc-badge fs-calc-badge--yes' : 'fs-calc-badge fs-calc-badge--no';
+          badge.textContent = it.calculated ? '是' : '否';
+          tdCalc.appendChild(badge);
+        } else {
+          tdCalc.textContent = '—';
+        }
+        tr.appendChild(tdCalc);
+        var tdAss = document.createElement('td');
+        var tdNames = document.createElement('td');
+        if (it.is_asin_dir) {
+          var hasA = (it.assignees && it.assignees.length > 0);
+          tdAss.innerHTML = hasA
+            ? '<span class="fs-calc-badge fs-calc-badge--yes">是</span>'
+            : '<span class="fs-calc-badge fs-calc-badge--no">否</span>';
+          tdNames.textContent = (it.assignees && it.assignees.length) ? it.assignees.join('、') : '—';
+          tdNames.className = 'fs-table__assignees-cell';
+        } else {
+          tdAss.textContent = '—';
+          tdNames.textContent = '—';
+        }
+        tr.appendChild(tdAss);
+        var tdRoiV = document.createElement('td');
+        tdRoiV.className = 'fs-table__roi-verify-cell';
+        if (it.is_asin_dir) {
+          var rv = document.createElement('span');
+          rv.className = it.roi_verified ? 'fs-calc-badge fs-calc-badge--yes' : 'fs-calc-badge fs-calc-badge--no';
+          rv.textContent = it.roi_verified ? '是' : '否';
+          tdRoiV.appendChild(rv);
+        } else {
+          tdRoiV.textContent = '—';
+        }
+        tr.appendChild(tdRoiV);
+        var tdUpd = document.createElement('td');
+        tdUpd.className = 'fs-table__updated-at-cell';
+        tdUpd.textContent = it.updated_at || '—';
+        tr.appendChild(tdUpd);
+        var tdUpl = document.createElement('td');
+        tdUpl.className = 'fs-table__uploaders-cell';
+        tdUpl.textContent = formatUploaders(it.uploaders);
+        tr.appendChild(tdUpl);
+        tr.appendChild(tdNames);
+        tr.style.cursor = 'pointer';
+        tr.addEventListener('click', function () {
+          document.querySelectorAll('.fs-table__row--active').forEach(function (x) {
+            x.classList.remove('fs-table__row--active');
+          });
+          tr.classList.add('fs-table__row--active');
+        });
+        tr.addEventListener('dblclick', function () {
+          selectFolder(childRel, it.name);
+        });
+      } else {
+        var typ = isExcelExt(it.ext) ? 'Excel' : '文件';
+        var tdName2 = document.createElement('td');
+        tdName2.innerHTML =
+          '<span class="fs-file-ic">' + (isExcelExt(it.ext) ? '📊' : '📄') + '</span> ' +
+          escapeHtml(it.name);
+        tr.appendChild(tdName2);
+        var tdType = document.createElement('td');
+        tdType.textContent = typ;
+        tr.appendChild(tdType);
+        var tdSize = document.createElement('td');
+        tdSize.textContent = fmtSize(it.size);
+        tr.appendChild(tdSize);
+        tr.appendChild(document.createElement('td')).textContent = '—';
+        tr.appendChild(document.createElement('td')).textContent = '—';
+        tr.appendChild(document.createElement('td')).textContent = '—';
+        tr.appendChild(document.createElement('td')).textContent = '—';
+        var tdUplF = document.createElement('td');
+        tdUplF.className = 'fs-table__uploaders-cell';
+        tdUplF.textContent = formatUploaders(it.uploaders);
+        tr.appendChild(tdUplF);
+        tr.appendChild(document.createElement('td')).textContent = '—';
+        tr.style.cursor = 'pointer';
+        tr.addEventListener('click', function () {
+          document.querySelectorAll('.fs-table__row--active').forEach(function (x) {
+            x.classList.remove('fs-table__row--active');
+          });
+          tr.classList.add('fs-table__row--active');
+          if (isExcelExt(it.ext)) openExcelInNewTab(childRel);
+          else openOther(childRel, it.name);
+        });
+      }
+      folderTbody.appendChild(tr);
+    });
+  }
+
+  function renderPagination(total) {
+    if (!paginationEl) return;
+    var ps = getPageSize();
+    var totalPages = Math.max(1, Math.ceil(total / ps));
+    if (total <= ps) {
+      paginationEl.hidden = true;
+      paginationEl.innerHTML = '';
+      return;
+    }
+    paginationEl.hidden = false;
+    paginationEl.innerHTML = '';
+
+    var prev = document.createElement('button');
+    prev.type = 'button';
+    prev.className = 'fs-page-btn';
+    prev.textContent = '上一页';
+    prev.disabled = currentPage <= 1;
+    prev.addEventListener('click', function () {
+      if (currentPage > 1) renderFolderPage(currentPage - 1);
+    });
+    paginationEl.appendChild(prev);
+
+    var info = document.createElement('span');
+    info.className = 'fs-page-info';
+    info.textContent = '第 ' + currentPage + ' / ' + totalPages + ' 页';
+    paginationEl.appendChild(info);
+
+    var next = document.createElement('button');
+    next.type = 'button';
+    next.className = 'fs-page-btn';
+    next.textContent = '下一页';
+    next.disabled = currentPage >= totalPages;
+    next.addEventListener('click', function () {
+      if (currentPage < totalPages) renderFolderPage(currentPage + 1);
+    });
+    paginationEl.appendChild(next);
+  }
+
+  function renderFolderPage(page) {
+    currentPage = page || 1;
+    var filtered = currentFolderItems.filter(function (it) {
+      // 「搜索 ASIN」仅作用于根目录下的 ASIN 文件夹列表；进入子目录后子项名称不含 ASIN，不应再按该关键词过滤
+      var kw = currentAsinSearch;
+      if (currentFolderRel === '' && kw && String(it.name || '').toLowerCase().indexOf(kw) < 0) {
+        return false;
+      }
+      if (currentFolderRel === '' && currentCalcFilter !== 'all') {
+        if (!it.is_asin_dir) return false;
+        if (currentCalcFilter === 'yes' && !it.calculated) return false;
+        if (currentCalcFilter === 'no' && it.calculated) return false;
+      }
+      if (currentFolderRel === '' && currentRoiVerifyFilter !== 'all') {
+        if (!it.is_asin_dir) return false;
+        if (currentRoiVerifyFilter === 'yes' && !it.roi_verified) return false;
+        if (currentRoiVerifyFilter === 'no' && it.roi_verified) return false;
+      }
+      if (currentFolderRel === '' && (currentUpdatedFromTs > 0 || currentUpdatedToTs > 0)) {
+        if (!it.is_asin_dir) return false;
+        var ts = Number(it.updated_at_ts || 0);
+        if (currentUpdatedFromTs > 0 && ts < currentUpdatedFromTs) return false;
+        if (currentUpdatedToTs > 0 && ts > currentUpdatedToTs) return false;
+      }
+      if (currentAssignStatus !== 'all' && it.is_asin_dir) {
+        var hasA = (it.assignees && it.assignees.length > 0);
+        if (currentAssignStatus === 'yes' && !hasA) return false;
+        if (currentAssignStatus === 'no' && hasA) return false;
+      }
+      if (currentAssigneePick && it.is_asin_dir) {
+        var names = it.assignees || [];
+        if (names.indexOf(currentAssigneePick) < 0) return false;
+      }
+      return true;
+    });
+    var total = filtered.length;
+    var ps = getPageSize();
+    var totalPages = Math.max(1, Math.ceil(total / ps));
+    if (currentPage > totalPages) currentPage = totalPages;
+    if (currentPage < 1) currentPage = 1;
+    var start = (currentPage - 1) * ps;
+    var pageItems = filtered.slice(start, start + ps);
+    folderEmpty.hidden = pageItems.length > 0;
+    if (fsSelectAll) fsSelectAll.checked = false;
+    renderFolderRows(pageItems, currentFolderRel);
+    folderMeta.textContent = total ? (total + ' 项 · 第 ' + currentPage + '/' + totalPages + ' 页') : '';
+    renderPagination(total);
+  }
+
+  function selectFolder(rel, titleLabel) {
+    currentFolderRel = rel;
+    showBrowserPane('folder');
+    renderBreadcrumb(rel);
+    folderTitle.textContent = titleLabel || 'file';
+    if (fsSelectAll) fsSelectAll.checked = false;
+    fetchBrowse(rel).then(function (data) {
+      if (!data.ok) {
+        folderMeta.textContent = data.error || '加载失败';
+        folderTbody.innerHTML = '';
+        folderEmpty.hidden = false;
+        return;
+      }
+      currentFolderItems = data.items || [];
+      renderFolderPage(1);
+    });
+  }
+
+  function escapeHtml(s) {
+    var d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  function getCheckedSelection() {
+    var dirs = [];
+    var files = [];
+    folderTbody.querySelectorAll('.fs-row-check:checked').forEach(function (cb) {
+      var r = cb.getAttribute('data-rel') || '';
+      var t = cb.getAttribute('data-entry-type') || '';
+      if (t === 'dir') dirs.push(r);
+      else files.push(r);
+    });
+    return { dirs: dirs, files: files };
+  }
+
+  function postZipForPaths(paths) {
+    return fetch(batchZipUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRFToken': csrftoken,
+      },
+      credentials: 'same-origin',
+      body: JSON.stringify({ paths: paths }),
+    }).then(function (r) {
+      var ct = (r.headers.get('content-type') || '').toLowerCase();
+      if (!r.ok) {
+        if (ct.indexOf('application/json') >= 0) {
+          return readJsonResponse(r).then(function (j) {
+            throw new Error((j && j.error) || '打包失败');
+          });
+        }
+        throw new Error('打包失败');
+      }
+      return r.blob();
+    }).then(function (blob) {
+      var a = document.createElement('a');
+      var u = URL.createObjectURL(blob);
+      a.href = u;
+      a.download = 'download.zip';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(u);
+    });
+  }
+
+  function onToolbarDownload() {
+    var sel = getCheckedSelection();
+    if (sel.files.length === 0) {
+      if (sel.dirs.length > 0) {
+        alert('下载仅支持文件，请先勾选文件（文件夹可删除或进入子目录后操作）。');
+      } else {
+        alert('请先勾选要下载的文件。');
+      }
+      return;
+    }
+    if (sel.files.length === 1) {
+      window.location.href = downloadUrl + '?path=' + encodeURIComponent(sel.files[0]);
+      return;
+    }
+    postZipForPaths(sel.files).catch(function (e) {
+      alert(e.message || String(e));
+    });
+  }
+
+  function setImportStatus(text, show) {
+    var el = document.getElementById('fs-import-status');
+    if (!el) return;
+    el.textContent = text || '';
+    el.hidden = !show;
+  }
+
+  function commitStaging(stagingId, overwrite, skipExisting) {
+    return fetch(commitUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRFToken': csrftoken,
+      },
+      credentials: 'same-origin',
+      body: JSON.stringify({
+        staging_id: stagingId,
+        overwrite: !!overwrite,
+        skip_existing: !!skipExisting,
+      }),
+    }).then(function (r) {
+      return readJsonResponse(r).then(function (d) {
+        return { status: r.status, data: d };
+      });
+    }).then(function (o) {
+      if (o.status === 409 && o.data && o.data.need_choice) {
+        var conflicts = o.data.conflicts || [];
+        var n = conflicts.length;
+        var preview = conflicts.slice(0, 20).join('\n');
+        var head =
+          '检测到 ' +
+          n +
+          ' 个路径在服务器上已存在（与 ZIP 冲突）。\n\n' +
+          preview +
+          (n > 20 ? '\n…' : '') +
+          '\n\n[确定] 用 ZIP 覆盖已有文件\n[取消] 下一步（可仅跳过冲突、导入其余）';
+        if (window.confirm(head)) {
+          return commitStaging(stagingId, true, false);
+        }
+        if (
+          window.confirm(
+            '将跳过上述已存在的文件，仅导入 ZIP 中尚未存在的路径。\n（不会删除服务器上已有文件。）\n\n确定继续？'
+          )
+        ) {
+          return commitStaging(stagingId, false, true);
+        }
+        throw new Error('已取消导入');
+      }
+      if (!o.data || !o.data.ok) throw new Error((o.data && o.data.error) || '导入失败');
+      return o.data;
+    });
+  }
+
+  function uploadZipChunks(file) {
+    var total = Math.max(1, Math.ceil(file.size / IMPORT_CHUNK_SIZE));
+    var stagingId = '';
+    function send(i) {
+      setImportStatus('上传分片 ' + (i + 1) + ' / ' + total + ' …', true);
+      var start = i * IMPORT_CHUNK_SIZE;
+      var end = Math.min(start + IMPORT_CHUNK_SIZE, file.size);
+      var blob = file.slice(start, end);
+      var fd = new FormData();
+      fd.append('file', blob, 'chunk.bin');
+      fd.append('chunk_index', String(i));
+      fd.append('total_chunks', String(total));
+      if (stagingId) fd.append('staging_id', stagingId);
+      return fetch(chunkUrl, {
+        method: 'POST',
+        headers: { 'X-CSRFToken': csrftoken },
+        body: fd,
+        credentials: 'same-origin',
+      }).then(function (r) {
+        return readJsonResponse(r).then(function (d) {
+          return { ok: r.ok, data: d };
+        });
+      }).then(function (o) {
+        if (!o.data.ok) throw new Error(o.data.error || '分片上传失败');
+        stagingId = o.data.staging_id;
+        if (o.data.ready) return stagingId;
+        return send(i + 1);
+      });
+    }
+    return send(0);
+  }
+
+  function onToolbarImport() {
+    var inp = document.getElementById('fs-import-file');
+    if (inp) inp.click();
+  }
+
+  function onImportFilePicked(ev) {
+    var inp = ev.target;
+    var file = inp.files && inp.files[0];
+    inp.value = '';
+    if (!file) return;
+    var low = (file.name || '').toLowerCase();
+    if (!low.endsWith('.zip')) {
+      alert('请选择 .zip 文件（请将含多个 ASIN 文件夹的目录打包为 ZIP 后上传）。');
+      return;
+    }
+    setImportStatus('准备上传…', true);
+    uploadZipChunks(file)
+      .then(function (sid) {
+        setImportStatus('校验与解压…', true);
+        return commitStaging(sid, false);
+      })
+      .then(function (data) {
+        var w = data.written != null ? data.written : 0;
+        var sk = data.skipped_existing != null ? data.skipped_existing : 0;
+        var msg = '完成：新写入 ' + w + ' 个文件';
+        if (sk > 0) msg += '，跳过已存在 ' + sk + ' 个';
+        setImportStatus(msg, true);
+        selectFolder(currentFolderRel, folderTitle.textContent);
+        setTimeout(function () {
+          setImportStatus('', false);
+        }, 4000);
+      })
+      .catch(function (e) {
+        alert(e.message || String(e));
+        setImportStatus('', false);
+      });
+  }
+
+  function onToolbarBatchZip() {
+    var sel = getCheckedSelection();
+    if (sel.files.length === 0) {
+      alert(sel.dirs.length ? '请勾选要打包的文件（不支持文件夹）。' : '请先勾选要打包的文件。');
+      return;
+    }
+    postZipForPaths(sel.files).catch(function (e) {
+      alert(e.message || String(e));
+    });
+  }
+
+  function onToolbarDelete() {
+    var sel = getCheckedSelection();
+    var paths = sel.dirs.concat(sel.files);
+    if (paths.length === 0) {
+      alert('请先勾选要删除的文件夹或文件。');
+      return;
+    }
+    var bad = [];
+    folderTbody.querySelectorAll('.fs-row-check:checked').forEach(function (cb) {
+      if (cb.getAttribute('data-can-delete') === '0') bad.push(cb.getAttribute('data-rel') || '');
+    });
+    if (bad.length) {
+      alert('选中含有不可删除项（管理员分配或非本人导入）：\n' + bad.slice(0, 8).join('\n'));
+      return;
+    }
+    if (!window.confirm('确定删除选中的 ' + paths.length + ' 项？此操作不可恢复。')) {
+      return;
+    }
+    fetch(deleteUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRFToken': csrftoken,
+      },
+      credentials: 'same-origin',
+      body: JSON.stringify({ paths: paths }),
+    })
+      .then(function (r) {
+        return readJsonResponse(r);
+      })
+      .then(function (data) {
+        if (!data.ok) throw new Error(data.error || '删除失败');
+        selectFolder(currentFolderRel, folderTitle.textContent);
+      })
+      .catch(function (e) {
+        alert(e.message || String(e));
+      });
+  }
+
+  function openOther(rel, name) {
+    showBrowserPane('other');
+    document.getElementById('other-name').textContent = name;
+    document.getElementById('other-path').textContent = rel;
+  }
+
+  function createFolderNode(rel, label, depth) {
+    var li = document.createElement('li');
+    li.className = 'fs-tree__item';
+    var row = document.createElement('div');
+    row.className = 'fs-tree__row';
+    row.style.paddingLeft = (10 + depth * 16) + 'px';
+    var toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'fs-tree__chev';
+    toggle.setAttribute('aria-expanded', 'false');
+    var icon = document.createElement('span');
+    icon.className = 'fs-tree__icon fs-tree__icon--folder';
+    var nameBtn = document.createElement('button');
+    nameBtn.type = 'button';
+    nameBtn.className = 'fs-tree__label';
+    nameBtn.textContent = label;
+    var ul = document.createElement('ul');
+    ul.className = 'fs-tree__children';
+    ul.hidden = true;
+    toggle.addEventListener('click', function (e) {
+      e.stopPropagation();
+      toggleFolder(li, rel, depth, toggle, ul);
+    });
+    nameBtn.addEventListener('click', function () {
+      document.querySelectorAll('.fs-tree__row--active').forEach(function (x) {
+        x.classList.remove('fs-tree__row--active');
+      });
+      row.classList.add('fs-tree__row--active');
+      selectFolder(rel, label);
+    });
+    row.appendChild(toggle);
+    row.appendChild(icon);
+    row.appendChild(nameBtn);
+    li.appendChild(row);
+    li.appendChild(ul);
+    return li;
+  }
+
+  function createFileNode(rel, name, ext, depth, size) {
+    var li = document.createElement('li');
+    li.className = 'fs-tree__item fs-tree__item--file';
+    var row = document.createElement('div');
+    row.className = 'fs-tree__row';
+    row.style.paddingLeft = (10 + depth * 16) + 'px';
+    var sp = document.createElement('span');
+    sp.className = 'fs-tree__chev fs-tree__chev--spacer';
+    var icon = document.createElement('span');
+    icon.className = 'fs-tree__icon ' + (isExcelExt(ext) ? 'fs-tree__icon--excel' : 'fs-tree__icon--file');
+    var nameBtn = document.createElement('button');
+    nameBtn.type = 'button';
+    nameBtn.className = 'fs-tree__label';
+    nameBtn.textContent = name;
+    nameBtn.title = fmtSize(size);
+    nameBtn.addEventListener('click', function () {
+      document.querySelectorAll('.fs-tree__row--active').forEach(function (x) {
+        x.classList.remove('fs-tree__row--active');
+      });
+      row.classList.add('fs-tree__row--active');
+      if (isExcelExt(ext)) openExcelInNewTab(rel);
+      else openOther(rel, name);
+    });
+    row.appendChild(sp);
+    row.appendChild(icon);
+    row.appendChild(nameBtn);
+    li.appendChild(row);
+    return li;
+  }
+
+  function toggleFolder(li, rel, depth, toggle, ul) {
+    if (!ul.dataset.loaded) {
+      fetchBrowse(rel).then(function (data) {
+        if (!data.ok) return;
+        (data.items || []).forEach(function (it) {
+          var childRel = joinPath(rel, it.name);
+          if (it.type === 'dir') {
+            ul.appendChild(createFolderNode(childRel, it.name, depth + 1));
+          } else {
+            ul.appendChild(createFileNode(childRel, it.name, it.ext, depth + 1, it.size));
+          }
+        });
+        ul.dataset.loaded = '1';
+        ul.hidden = false;
+        toggle.setAttribute('aria-expanded', 'true');
+        toggle.classList.add('fs-tree__chev--open');
+      });
+      return;
+    }
+    ul.hidden = !ul.hidden;
+    toggle.setAttribute('aria-expanded', ul.hidden ? 'false' : 'true');
+    toggle.classList.toggle('fs-tree__chev--open', !ul.hidden);
+  }
+
+  document.getElementById('fs-sider-reveal').addEventListener('click', function () {
+    workspace.classList.remove('fs-workspace--collapsed');
+  });
+
+  document.getElementById('fs-toggle-sider').addEventListener('click', function () {
+    workspace.classList.add('fs-workspace--collapsed');
+  });
+
+  (function init() {
+    var ul = document.createElement('ul');
+    ul.className = 'fs-tree__list';
+    var rootLi = createFolderNode('', 'file', 0);
+    ul.appendChild(rootLi);
+    treeRoot.appendChild(ul);
+    var rootUl = rootLi.querySelector(':scope > .fs-tree__children');
+    var rootToggle = rootLi.querySelector('.fs-tree__chev');
+    var initialRel = '';
+    try {
+      initialRel = new URLSearchParams(window.location.search).get('path') || '';
+      initialRel = initialRel.trim().replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+$/, '');
+    } catch (e) {
+      initialRel = '';
+    }
+    fetchBrowse('').then(function (data) {
+      if (!data.ok) return;
+      (data.items || []).forEach(function (it) {
+        var childRel = joinPath('', it.name);
+        if (it.type === 'dir') {
+          rootUl.appendChild(createFolderNode(childRel, it.name, 1));
+        } else {
+          rootUl.appendChild(createFileNode(childRel, it.name, it.ext, 1, it.size));
+        }
+      });
+      rootUl.dataset.loaded = '1';
+      rootUl.hidden = false;
+      rootToggle.setAttribute('aria-expanded', 'true');
+      rootToggle.classList.add('fs-tree__chev--open');
+    });
+    rootLi.querySelector('.fs-tree__row').classList.add('fs-tree__row--active');
+    if (initialRel) selectFolder(initialRel, labelFromRel(initialRel));
+    else selectFolder('', 'file');
+  })();
+
+  var btnDl = document.getElementById('fs-btn-download');
+  var btnZip = document.getElementById('fs-btn-batch-zip');
+  var btnDel = document.getElementById('fs-btn-delete');
+  var btnImp = document.getElementById('fs-btn-import');
+  var inpImp = document.getElementById('fs-import-file');
+  if (btnDl) btnDl.addEventListener('click', onToolbarDownload);
+  if (btnZip) btnZip.addEventListener('click', onToolbarBatchZip);
+  if (btnDel) btnDel.addEventListener('click', onToolbarDelete);
+  if (btnImp) btnImp.addEventListener('click', onToolbarImport);
+  if (inpImp) inpImp.addEventListener('change', onImportFilePicked);
+  if (fsSelectAll) {
+    fsSelectAll.addEventListener('change', function () {
+      folderTbody.querySelectorAll('.fs-row-check').forEach(function (cb) {
+        cb.checked = fsSelectAll.checked;
+      });
+    });
+  }
+  if (asinSearchEl) {
+    asinSearchEl.addEventListener('input', function () {
+      currentAsinSearch = String(asinSearchEl.value || '').trim().toLowerCase();
+      renderFolderPage(1);
+    });
+  }
+  if (calcFilterEl) {
+    calcFilterEl.addEventListener('change', function () {
+      currentCalcFilter = String(calcFilterEl.value || 'all');
+      renderFolderPage(1);
+    });
+  }
+  if (roiVerifyFilterEl) {
+    roiVerifyFilterEl.addEventListener('change', function () {
+      currentRoiVerifyFilter = String(roiVerifyFilterEl.value || 'all');
+      renderFolderPage(1);
+    });
+  }
+  if (updatedFromEl) {
+    updatedFromEl.addEventListener('change', function () {
+      var t = Date.parse(String(updatedFromEl.value || '').trim());
+      currentUpdatedFromTs = Number.isFinite(t) ? t : 0;
+      renderFolderPage(1);
+    });
+  }
+  if (updatedToEl) {
+    updatedToEl.addEventListener('change', function () {
+      var t = Date.parse(String(updatedToEl.value || '').trim());
+      currentUpdatedToTs = Number.isFinite(t) ? t : 0;
+      renderFolderPage(1);
+    });
+  }
+  if (assignStatusEl) {
+    assignStatusEl.addEventListener('change', function () {
+      currentAssignStatus = assignStatusEl.value || 'all';
+      renderFolderPage(1);
+    });
+  }
+  if (assigneeFilterEl) {
+    assigneeFilterEl.addEventListener('change', function () {
+      currentAssigneePick = String(assigneeFilterEl.value || '');
+      renderFolderPage(1);
+    });
+  }
+  if (uploaderFilterEl) {
+    uploaderFilterEl.addEventListener('change', function () {
+      currentUploadedByFilter = String(uploaderFilterEl.value || '').trim();
+      if (currentFolderRel === '') {
+        selectFolder('', 'file');
+      }
+    });
+  }
+  if (pageSizeEl) {
+    pageSizeEl.addEventListener('change', function () {
+      renderFolderPage(1);
+    });
+  }
+  if (pageSizeCustomEl) {
+    pageSizeCustomEl.addEventListener('change', function () {
+      renderFolderPage(1);
+    });
+  }
+  if (btnAssign && assignUsersSelectEl) {
+    btnAssign.addEventListener('click', function () {
+      if (!isSuperuser) return;
+      var dirs = [];
+      folderTbody.querySelectorAll('.fs-row-check:checked').forEach(function (cb) {
+        if (cb.getAttribute('data-entry-type') === 'dir') {
+          var r = cb.getAttribute('data-rel') || '';
+          var segs = r.split('/');
+          var leaf = segs[segs.length - 1] || '';
+          if (/^B0[A-Z0-9]{8}$/i.test(leaf)) dirs.push(leaf.toUpperCase());
+        }
+      });
+      if (!dirs.length) {
+        alert('请勾选 ASIN 文件夹（名称形如 B0XXXXXXXX）后再分配。');
+        return;
+      }
+      var uids = Array.prototype.slice.call(assignUsersSelectEl.selectedOptions || []).map(function (i) {
+        return Number(i.value);
+      });
+      if (!uids.length) {
+        alert('请至少选择一名用户。');
+        return;
+      }
+      fetch(assignUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrftoken },
+        body: JSON.stringify({ asins: dirs, user_ids: uids }),
+        credentials: 'same-origin',
+      })
+        .then(function (r) {
+          return readJsonResponse(r);
+        })
+        .then(function (data) {
+          if (!data.ok) throw new Error(data.error || '分配失败');
+          alert('已更新 ' + (data.updated != null ? data.updated : dirs.length) + ' 个 ASIN 的分配。');
+          selectFolder(currentFolderRel, folderTitle.textContent);
+        })
+        .catch(function (e) {
+          alert(e.message || String(e));
+        });
+    });
+  }
+})();
+</script>
+{% endblock %}

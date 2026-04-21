@@ -1,0 +1,529 @@
+{% extends 'base.html' %}
+{% load static %}
+{% block title %}首页 — Amazon 自动化{% endblock %}
+{% block extra_head %}
+<link rel="stylesheet" href="{% static 'css/dashboard.css' %}">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+{% endblock %}
+{% block main_class %}main--dashboard{% endblock %}
+{% block content %}
+<div class="dash-page">
+    <header class="dash-hero">
+        <h1 class="dash-hero__title">ASIN 数据看板</h1>
+{#        <p class="dash-hero__sub">广告难度为 <code>ranking_percent</code>。运营难度1/2/3 各对应<strong>一个关键词</strong>下整段 <code>review_interval</code>（区间、平均销量、运营难度为一组）；每列用<strong>柱状图</strong>整体展示该关键词数据，悬停可看各区间运营难度。</p>#}
+    </header>
+
+    {% if messages %}
+    <ul class="messages dash-messages">
+        {% for message in messages %}
+        <li class="{{ message.tags }}">{{ message }}</li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+
+    <form id="dash-batch-form" method="post" action="{% url 'index' %}">
+        {% csrf_token %}
+        <input type="hidden" name="action" id="dash-action" value="">
+    </form>
+
+    <div class="dash-toolbar">
+        <div class="dash-toolbar__actions">
+            <a class="dash-btn dash-btn--primary" href="{% url 'upload' %}">上传与数据</a>
+            <input type="text" name="exchange_rate" form="dash-batch-form" class="dash-rate-input" placeholder="汇率(如6.88)" aria-label="汇率">
+            <button type="submit" form="dash-batch-form" data-action="calc_roi_selected" class="dash-btn" id="dash-batch-roi" disabled>计算ROI</button>
+            <button type="submit" form="dash-batch-form" data-action="calc_ranking_selected" class="dash-btn" id="dash-batch-calc" disabled>计算广告难度</button>
+            <button type="submit" form="dash-batch-form" data-action="delete_batch" class="dash-btn dash-btn--danger" id="dash-batch-delete" disabled>批量删除</button>
+            <button type="button" class="dash-btn" id="dash-export-excel" disabled>导出 Excel</button>
+        </div>
+    </div>
+
+    <form method="get" class="dash-filter-form">
+        <div class="dash-filter-grid">
+            <label>ASIN搜索
+                <input type="text" name="asin_kw" placeholder="输入 ASIN 关键字" value="{{ request.GET.asin_kw }}">
+            </label>
+            <label>去广告毛利率%
+                <input type="number" step="0.01" name="profit_margin_min" placeholder="最小" value="{{ request.GET.profit_margin_min }}">
+                <input type="number" step="0.01" name="profit_margin_max" placeholder="最大" value="{{ request.GET.profit_margin_max }}">
+            </label>
+            <label>去广告投产比%
+                <input type="number" step="0.01" name="ad_removed_roi_min" placeholder="最小" value="{{ request.GET.ad_removed_roi_min }}">
+                <input type="number" step="0.01" name="ad_removed_roi_max" placeholder="最大" value="{{ request.GET.ad_removed_roi_max }}">
+            </label>
+            <label>体量
+                <input type="number" step="1" name="monthly_results_min" placeholder="最小" value="{{ request.GET.monthly_results_min }}">
+                <input type="number" step="1" name="monthly_results_max" placeholder="最大" value="{{ request.GET.monthly_results_max }}">
+            </label>
+            <label>利润额
+                <input type="number" step="0.01" name="profit_per_order_min" placeholder="最小" value="{{ request.GET.profit_per_order_min }}">
+                <input type="number" step="0.01" name="profit_per_order_max" placeholder="最大" value="{{ request.GET.profit_per_order_max }}">
+            </label>
+            <label>(体量*利润额)
+                <input type="number" step="0.01" name="monthly_sales_total_min" placeholder="最小" value="{{ request.GET.monthly_sales_total_min }}">
+                <input type="number" step="0.01" name="monthly_sales_total_max" placeholder="最大" value="{{ request.GET.monthly_sales_total_max }}">
+            </label>
+            <label>采购价
+                <input type="number" step="0.01" name="unit_purchase_min" placeholder="最小" value="{{ request.GET.unit_purchase_min }}">
+                <input type="number" step="0.01" name="unit_purchase_max" placeholder="最大" value="{{ request.GET.unit_purchase_max }}">
+            </label>
+            <label>(采购价+头程)
+                <input type="number" step="0.01" name="head_actual_total_min" placeholder="最小" value="{{ request.GET.head_actual_total_min }}">
+                <input type="number" step="0.01" name="head_actual_total_max" placeholder="最大" value="{{ request.GET.head_actual_total_max }}">
+            </label>
+            <label>分配人
+                <select name="assignee_user">
+                    <option value="">不限</option>
+                    {% for u in assignee_choices %}
+                    <option value="{{ u }}" {% if request.GET.assignee_user == u %}selected{% endif %}>{{ u }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label>是否校验
+                <select name="roi_verified">
+                    <option value="" {% if filters.roi_verified != 'yes' and filters.roi_verified != 'no' %}selected{% endif %}>全部</option>
+                    <option value="yes" {% if filters.roi_verified == 'yes' %}selected{% endif %}>是</option>
+                    <option value="no" {% if filters.roi_verified == 'no' %}selected{% endif %}>否</option>
+                </select>
+            </label>
+            <label>更新时间(起)
+                <input type="datetime-local" name="updated_from" value="{{ filters.updated_from }}">
+            </label>
+            <label>更新时间(止)
+                <input type="datetime-local" name="updated_to" value="{{ filters.updated_to }}">
+            </label>
+            <label>广告难度%
+                <input type="number" step="0.001" name="ranking_percent_min" placeholder="最小" value="{{ request.GET.ranking_percent_min }}">
+                <input type="number" step="0.001" name="ranking_percent_max" placeholder="最大" value="{{ request.GET.ranking_percent_max }}">
+            </label>
+            <label>每页条数
+                <select name="per_page">
+                    <option value="10" {% if per_page == 10 %}selected{% endif %}>10</option>
+                    <option value="20" {% if per_page == 20 %}selected{% endif %}>20</option>
+                    <option value="40" {% if per_page == 40 %}selected{% endif %}>40</option>
+                    <option value="100" {% if per_page == 100 %}selected{% endif %}>100</option>
+                    <option value="custom" {% if request.GET.per_page == 'custom' %}selected{% endif %}>自定义</option>
+                </select>
+                <input type="number" name="per_page_custom" min="1" max="500" placeholder="自定义上限500" value="{{ request.GET.per_page_custom }}">
+            </label>
+        </div>
+        <div class="dash-filter-row">
+            <div class="dash-grade-filter">
+                <span>产品等级：</span>
+                {% for g in 'ABCDE' %}
+                <label><input type="checkbox" name="product_grade" value="{{ g }}" {% if g in filters.selected_grades %}checked{% endif %}> {{ g }}</label>
+                {% endfor %}
+            </div>
+            <div class="dash-ops-filter">
+                <span>运营难度：</span>
+                <select name="ops_slot">
+                    <option value="any" {% if filters.ops_slot == 'any' %}selected{% endif %}>不限</option>
+                    <option value="1" {% if filters.ops_slot == '1' %}selected{% endif %}>运营难度1</option>
+                    <option value="2" {% if filters.ops_slot == '2' %}selected{% endif %}>运营难度2</option>
+                    <option value="3" {% if filters.ops_slot == '3' %}selected{% endif %}>运营难度3</option>
+                </select>
+                <select name="ops_range">
+                    <option value="all" {% if filters.ops_range == 'all' %}selected{% endif %}>不限</option>
+                    <option value="0-5" {% if filters.ops_range == '0-5' %}selected{% endif %}>0%-5%</option>
+                    <option value="5-10" {% if filters.ops_range == '5-10' %}selected{% endif %}>5%-10%</option>
+                    <option value="10-20" {% if filters.ops_range == '10-20' %}selected{% endif %}>10%-20%</option>
+                    <option value="30-100" {% if filters.ops_range == '30-100' %}selected{% endif %}>30%-100%</option>
+                    <option value="custom" {% if filters.ops_range == 'custom' %}selected{% endif %}>自定义</option>
+                </select>
+                <input type="number" step="0.01" name="ops_custom_min" placeholder="自定义最小%" value="{{ request.GET.ops_custom_min }}">
+                <input type="number" step="0.01" name="ops_custom_max" placeholder="自定义最大%" value="{{ request.GET.ops_custom_max }}">
+            </div>
+            <div class="dash-filter-actions">
+                <button type="submit" class="dash-btn dash-btn--primary">筛选</button>
+                <a href="{% url 'index' %}" class="dash-btn">重置</a>
+            </div>
+        </div>
+    </form>
+
+    {% if rows %}
+    <div class="dash-table-wrap">
+        <table class="dash-table">
+            <thead>
+                <tr>
+                    <th class="col-check"><input type="checkbox" id="dash-select-all" title="全选" aria-label="全选"></th>
+                    <th>序号</th>
+                    <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=asin&amp;dir={% if sort == 'asin' and dir == 'asc' %}desc{% else %}asc{% endif %}">ASIN</a></th>
+                    <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=profit_margin&amp;dir={% if sort == 'profit_margin' and dir == 'asc' %}desc{% else %}asc{% endif %}">去广告毛利率</a></th>
+                    <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=ad_removed_roi&amp;dir={% if sort == 'ad_removed_roi' and dir == 'asc' %}desc{% else %}asc{% endif %}">去广告投产比%</a></th>
+
+                    <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=monthly_results&amp;dir={% if sort == 'monthly_results' and dir == 'asc' %}desc{% else %}asc{% endif %}">体量</a></th>
+
+                    <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=profit_per_order&amp;dir={% if sort == 'profit_per_order' and dir == 'asc' %}desc{% else %}asc{% endif %}">利润额￥</a></th>
+                    <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=monthly_sales_total&amp;dir={% if sort == 'monthly_sales_total' and dir == 'asc' %}desc{% else %}asc{% endif %}">(体量*利润额)$</a></th>
+                <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=unit_purchase&amp;dir={% if sort == 'unit_purchase' and dir == 'asc' %}desc{% else %}asc{% endif %}">采购价￥</a></th>
+                    <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=head_actual_total&amp;dir={% if sort == 'head_actual_total' and dir == 'asc' %}desc{% else %}asc{% endif %}">(采购价+头程)￥</a></th>
+                    <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=ranking_percent&amp;dir={% if sort == 'ranking_percent' and dir == 'asc' %}desc{% else %}asc{% endif %}">广告难度%</a></th>
+                    <th class="col-grade"><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=product_grade&amp;dir={% if sort == 'product_grade' and dir == 'asc' %}desc{% else %}asc{% endif %}">产品等级</a></th>
+                    <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=updated_at&amp;dir={% if sort == 'updated_at' and dir == 'asc' %}desc{% else %}asc{% endif %}">更新时间</a></th>
+                    <th>分配人</th>
+                    <th>是否校验</th>
+                    <th>运营难度1</th>
+                    <th>运营难度2</th>
+                    <th>运营难度3</th>
+
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in rows %}
+                <tr>
+                    <td class="col-check"><input type="checkbox" name="row_ids" value="{{ row.pk }}" class="dash-row-check" form="dash-batch-form" aria-label="选择 {{ row.asin }}"{% if row.ops_readonly %} disabled{% endif %}></td>
+                    <td class="col-num">{{ page_obj.start_index|add:forloop.counter0 }}</td>
+                    <td class="col-asin">
+                        <a class="dash-asin-link" href="{% url 'excel_editor' %}?path={{ row.asin|add:'/'|add:row.asin|add:'_ROI-US-pack.xlsx'|urlencode }}" title="在 Excel 编辑器中打开该 ASIN 的 ROI-US-pack 表">{{ row.asin }}</a>
+                    </td>
+                    <td class="col-num col-profit-margin">{% if row.profit_margin is not None %}{{ row.profit_margin|floatformat:2 }}%{% else %}—{% endif %}</td>
+                    <td class="col-num col-ad-roi">{% if row.ad_removed_roi is not None %}{{ row.ad_removed_roi|floatformat:2 }}%{% else %}—{% endif %}</td>
+                    <td class="col-num">{% if row.monthly_results is not None %}{{ row.monthly_results|floatformat:0 }}{% else %}—{% endif %}</td>
+
+                    <td class="col-num col-profit-order">{% if row.profit_per_order is not None %}{{ row.profit_per_order|floatformat:2 }}￥{% else %}—{% endif %}</td>
+                    <td class="col-num">
+                        {% if row.monthly_sales_total is not None %}
+                        {{ row.monthly_sales_total|floatformat:2 }}$
+                        {% else %}—{% endif %}
+                    </td>
+                <td class="col-num">
+                    <input type="number" step="0.01" form="dash-batch-form"
+                           class="dash-cell-input js-up"
+                           name="unit_purchase_{{ row.pk }}"
+                           value="{% if row.unit_purchase is not None %}{{ row.unit_purchase|floatformat:2 }}{% endif %}"
+                           placeholder="采购价"{% if row.ops_readonly %} disabled{% endif %}>
+                </td>
+                    <td class="col-num">
+                        <input type="number" step="0.01" form="dash-batch-form"
+                               class="dash-cell-input js-hd"
+                               name="head_distance_{{ row.pk }}"
+                               value="{% if row.head_distance is not None %}{{ row.head_distance|floatformat:2 }}{% endif %}"
+                               placeholder="头程"{% if row.ops_readonly %} disabled{% endif %}>
+                        <span class="dash-cost-preview js-cost-preview">
+                            {% if row.unit_purchase is not None and row.head_distance is not None %}
+                                {{ row.unit_purchase|floatformat:2 }}+{{ row.head_distance|floatformat:2 }}={% if row.head_actual_total is not None %}{{ row.head_actual_total|floatformat:2 }}{% else %}{{ row.unit_purchase|add:row.head_distance|floatformat:2 }}{% endif %}￥
+                            {% else %}—{% endif %}
+                        </span>
+                    </td>
+                    <td class="col-num col-ranking-percent">{% if row.ranking_percent is not None %}{{ row.ranking_percent|floatformat:3 }}%{% else %}—{% endif %}</td>
+                <td class="col-grade"><span class="dash-grade dash-grade--{{ row.product_grade|lower }}">{{ row.product_grade }}</span></td>
+                    <td class="col-updated-at">{% if row.data_updated_at %}{{ row.data_updated_at|date:'Y-m-d H:i:s' }}{% else %}—{% endif %}</td>
+                    <td class="col-assignees" title="该 ASIN 文件夹当前分配的用户">{{ row.assignee_display }}</td>
+                    <td class="col-roi-verify" title="在 ROI-US-pack 编辑器中点击「确认校验」后为「是」">{% if row.roi_pack_verified %}是{% else %}否{% endif %}</td>
+                    <td class="col-ops-chart">{% include "auto_amazon/_ops_cell.html" with payload=row.ops_difficulty_1 row_pk=row.pk slot=1 ops_readonly=row.ops_readonly %}</td>
+                    <td class="col-ops-chart">{% include "auto_amazon/_ops_cell.html" with payload=row.ops_difficulty_2 row_pk=row.pk slot=2 ops_readonly=row.ops_readonly %}</td>
+                    <td class="col-ops-chart">{% include "auto_amazon/_ops_cell.html" with payload=row.ops_difficulty_3 row_pk=row.pk slot=3 ops_readonly=row.ops_readonly %}</td>
+
+                    <td>
+                        <div class="dash-row-actions">
+                            {% if row.can_open_dir %}
+                            <a class="dash-btn" href="{% url 'excel' %}?path={{ row.asin|urlencode }}" title="打开该 ASIN 的文件目录">目录</a>
+                            {% endif %}
+                            {% if not row.ops_readonly %}
+                            <form method="post" action="{% url 'index' %}" style="display:inline" onsubmit="return confirm('确定删除该条记录？');">
+                                {% csrf_token %}
+                                <input type="hidden" name="action" value="delete_one">
+                                <input type="hidden" name="row_id" value="{{ row.pk }}">
+                                <button type="submit" class="dash-btn">删除</button>
+                            </form>
+                            {% endif %}
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% if page_obj.paginator.num_pages > 1 %}
+    <div class="dash-pagination">
+        {% if page_obj.has_previous %}
+        <a class="dash-btn" href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort={{ sort }}&amp;dir={{ dir }}&amp;page={{ page_obj.previous_page_number }}">上一页</a>
+        {% endif %}
+        {% for p in page_numbers %}
+            {% if p == page_obj.number %}
+            <span class="dash-page-num dash-page-num--active">{{ p }}</span>
+            {% else %}
+            <a class="dash-page-num" href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort={{ sort }}&amp;dir={{ dir }}&amp;page={{ p }}">{{ p }}</a>
+            {% endif %}
+        {% endfor %}
+        {% if page_obj.has_next %}
+        <a class="dash-btn" href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort={{ sort }}&amp;dir={{ dir }}&amp;page={{ page_obj.next_page_number }}">下一页</a>
+        {% endif %}
+    </div>
+    <div class="dash-pagination-meta">第 {{ page_obj.number }} / {{ page_obj.paginator.num_pages }} 页（共 {{ page_obj.paginator.count }} 条）</div>
+    {% endif %}
+    {% else %}
+    <div class="dash-table-wrap dash-empty">
+        <p class="dash-empty__title">暂无数据</p>
+        <p>请前往「上传与数据」执行本地计算。</p>
+    </div>
+    {% endif %}
+</div>
+
+<script>
+(function () {
+  try {
+    var k = 'asin_roi_pack_verified_nav';
+    if (sessionStorage.getItem(k) === '1') {
+      sessionStorage.removeItem(k);
+      var u = new URL(window.location.href);
+      if (!u.searchParams.has('_rv')) {
+        u.searchParams.set('_rv', String(Date.now()));
+        window.location.replace(u.toString());
+        return;
+      }
+    }
+  } catch (e) {}
+  window.addEventListener('pageshow', function (ev) {
+    if (ev.persisted) location.reload();
+  });
+
+  function parseOpsPayload(raw) {
+    if (!raw || !String(raw).trim()) return null;
+    var s = String(raw).trim();
+    if (s.charAt(0) !== '{') return null;
+    var obj = JSON.parse(s);
+    var keys = Object.keys(obj);
+    if (!keys.length) return null;
+    var kw = keys[0];
+    var wrap = obj[kw];
+    if (!wrap || !wrap.review_interval) return null;
+    var ri = wrap.review_interval;
+    var labels = ri['区间'] || [];
+    var sales = ri['平均销量'] || [];
+    var ops = ri['运营难度'] || [];
+    return { keyword: kw, labels: labels, sales: sales, ops: ops };
+  }
+
+  function initOpsCharts() {
+    if (typeof Chart === 'undefined') return;
+    document.querySelectorAll('[data-ops-json-id]').forEach(function (host) {
+      var jid = host.getAttribute('data-ops-json-id');
+      var el = document.getElementById(jid);
+      if (!el) return;
+      var canvas = host.querySelector('canvas');
+      var titleEl = host.querySelector('.dash-ops-kw');
+      var raw = el.textContent || '';
+      var p = parseOpsPayload(raw);
+      if (!p || !canvas) {
+        var cw = host.querySelector('.dash-ops-canvas-wrap');
+        if (cw) cw.style.display = 'none';
+        if (raw && titleEl && raw.indexOf('关键词：') === 0) {
+          titleEl.textContent = '旧格式（请重新计算以生成图表）';
+          var pre = document.createElement('pre');
+          pre.className = 'dash-ops-legacy';
+          pre.style.cssText = 'margin:0;font-size:10px;max-height:140px;overflow:auto;white-space:pre-wrap;word-break:break-all;';
+          pre.textContent = raw;
+          host.appendChild(pre);
+        }
+        return;
+      }
+      if (titleEl) titleEl.textContent = '关键词：' + p.keyword;
+      var n = Math.min(p.labels.length, p.sales.length, p.ops.length);
+      var labels = [];
+      var sales = [];
+      var ops = [];
+      for (var i = 0; i < n; i++) {
+        labels.push(String(p.labels[i]));
+        sales.push(Number(p.sales[i]));
+        ops.push(String(p.ops[i]));
+      }
+      if (!labels.length) return;
+      var ctx = canvas.getContext('2d');
+      new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels: labels,
+          datasets: [{
+            label: '平均销量',
+            data: sales,
+            backgroundColor: 'rgba(37, 99, 235, 0.55)',
+            borderColor: 'rgba(37, 99, 235, 0.95)',
+            borderWidth: 1
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                afterLabel: function (c) {
+                  var i = c.dataIndex;
+                  return ops[i] ? ('运营难度：' + ops[i]) : '';
+                }
+              }
+            }
+          },
+          scales: {
+            x: {
+              ticks: { font: { size: 9 }, maxRotation: 40 },
+              grid: { display: false }
+            },
+            y: {
+              beginAtZero: true,
+              ticks: { font: { size: 9 } },
+              grid: { color: 'rgba(148, 163, 184, 0.2)' }
+            }
+          }
+        }
+      });
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initOpsCharts);
+  } else {
+    initOpsCharts();
+  }
+
+  var selAll = document.getElementById('dash-select-all');
+  var batchBtn = document.getElementById('dash-batch-delete');
+  var calcBtn = document.getElementById('dash-batch-calc');
+  var roiBtn = document.getElementById('dash-batch-roi');
+  var batchForm = document.getElementById('dash-batch-form');
+  var actionInput = document.getElementById('dash-action');
+  var exportBtn = document.getElementById('dash-export-excel');
+  var exportUrl = '{% url "dashboard_export_excel" %}';
+  var checks = document.querySelectorAll('.dash-row-check');
+  function refreshCostPreview(tr) {
+    if (!tr) return;
+    var up = tr.querySelector('.js-up');
+    var hd = tr.querySelector('.js-hd');
+    var out = tr.querySelector('.js-cost-preview');
+    if (!out) return;
+    var upv = up ? Number(up.value) : NaN;
+    var hdv = hd ? Number(hd.value) : NaN;
+    if (isNaN(upv) || isNaN(hdv)) {
+      out.textContent = '—';
+      return;
+    }
+    var sum = upv + hdv;
+    out.textContent = upv.toFixed(2) + '+' + hdv.toFixed(2) + '=' + sum.toFixed(2) + '￥';
+  }
+  var pendingAction = '';
+  function refreshBatch() {
+    var n = 0;
+    checks.forEach(function (c) { if (c.checked) n += 1; });
+    if (batchBtn) batchBtn.disabled = n === 0;
+    if (calcBtn) calcBtn.disabled = n === 0;
+    if (roiBtn) roiBtn.disabled = n === 0;
+    var ne = 0;
+    checks.forEach(function (c) {
+      if (c.checked && !c.disabled) ne += 1;
+    });
+    if (exportBtn) exportBtn.disabled = ne === 0;
+    if (selAll) {
+      selAll.indeterminate = n > 0 && n < checks.length;
+      selAll.checked = checks.length > 0 && n === checks.length;
+    }
+  }
+  if (selAll) {
+    selAll.addEventListener('change', function () {
+      checks.forEach(function (c) { c.checked = selAll.checked; });
+      refreshBatch();
+    });
+  }
+  checks.forEach(function (c) { c.addEventListener('change', refreshBatch); });
+  document.querySelectorAll('.js-up,.js-hd').forEach(function (inp) {
+    inp.addEventListener('input', function () {
+      refreshCostPreview(inp.closest('tr'));
+    });
+    refreshCostPreview(inp.closest('tr'));
+  });
+  [calcBtn, roiBtn, batchBtn].forEach(function (btn) {
+    if (!btn) return;
+    btn.addEventListener('click', function () {
+      pendingAction = btn.getAttribute('data-action') || '';
+      if (actionInput) actionInput.value = pendingAction;
+    });
+  });
+  if (batchForm) {
+    batchForm.addEventListener('submit', function (e) {
+      var sb = e.submitter;
+      var action = '';
+      if (sb) action = sb.getAttribute('data-action') || '';
+      if (!action) action = pendingAction;
+      if (!action && actionInput) action = actionInput.value || '';
+      if (!action) {
+        e.preventDefault();
+        alert('未识别到操作类型，请重新点击按钮。');
+        return;
+      }
+      if (actionInput) actionInput.value = action;
+      var selectedRows = [];
+      checks.forEach(function (c) {
+        if (!c.checked) return;
+        var tr = c.closest('tr');
+        if (tr) selectedRows.push(tr);
+      });
+      var disableAll = function () {
+        if (calcBtn) calcBtn.disabled = true;
+        if (roiBtn) roiBtn.disabled = true;
+        if (batchBtn) batchBtn.disabled = true;
+      };
+      if (action === 'calc_ranking_selected') {
+        selectedRows.forEach(function (tr) {
+          var td = tr.querySelector('.col-ranking-percent');
+          if (td) td.textContent = '计算中';
+        });
+        disableAll();
+        sb.textContent = '计算中...';
+      } else if (action === 'calc_roi_selected') {
+        selectedRows.forEach(function (tr) {
+          var t1 = tr.querySelector('.col-profit-margin');
+          var t2 = tr.querySelector('.col-ad-roi');
+          var t3 = tr.querySelector('.col-profit-order');
+          if (t1) t1.textContent = '计算中';
+          if (t2) t2.textContent = '计算中';
+          if (t3) t3.textContent = '计算中';
+        });
+        disableAll();
+        sb.textContent = '计算中...';
+      } else if (action === 'delete_batch') {
+        if (!window.confirm('确定删除勾选的记录吗？')) {
+          e.preventDefault();
+          return;
+        }
+      }
+    });
+  }
+  if (exportBtn) {
+    exportBtn.addEventListener('click', function () {
+      var ids = [];
+      checks.forEach(function (c) {
+        if (c.checked && !c.disabled) ids.push(c.value);
+      });
+      if (!ids.length) {
+        alert('请先勾选要导出的记录。');
+        return;
+      }
+      var f = document.createElement('form');
+      f.method = 'post';
+      f.action = exportUrl;
+      f.style.display = 'none';
+      var tok = batchForm ? batchForm.querySelector('[name=csrfmiddlewaretoken]') : null;
+      if (tok) {
+        var hi = document.createElement('input');
+        hi.type = 'hidden';
+        hi.name = 'csrfmiddlewaretoken';
+        hi.value = tok.value;
+        f.appendChild(hi);
+      }
+      ids.forEach(function (id) {
+        var inp = document.createElement('input');
+        inp.type = 'hidden';
+        inp.name = 'row_ids';
+        inp.value = id;
+        f.appendChild(inp);
+      });
+      document.body.appendChild(f);
+      f.submit();
+      document.body.removeChild(f);
+    });
+  }
+  refreshBatch();
+})();
+</script>
+{% endblock %}

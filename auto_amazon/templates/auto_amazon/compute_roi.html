@@ -1,0 +1,250 @@
+{% extends 'base.html' %}
+{% block title %}计算ROI — Amazon 自动化{% endblock %}
+{% block main_class %}main--upload{% endblock %}
+{% block content %}
+<div class="upload-page">
+    <header class="upload-hero">
+        <h1 class="upload-hero__title">计算ROI</h1>
+        <p class="upload-hero__desc">默认仅展示未计算 ASIN；勾选“计算已计算过数据”后会同时展示已计算与未计算 ASIN。</p>
+    </header>
+
+    <section class="upload-panel upload-panel--accent">
+        <form method="get" class="upload-form" style="margin-bottom: .8rem;">
+            <div class="upload-field">
+                <label class="upload-field__label">ASIN 搜索</label>
+                <input type="text" name="asin_kw" class="upload-textarea"
+                       style="min-height:auto;height:2.5rem;resize:none;"
+                       value="{{ asin_kw }}" placeholder="输入 ASIN 关键字">
+            </div>
+            <div class="upload-field">
+                <label style="display:flex;align-items:center;gap:.45rem;padding-top:1.8rem;">
+                    <input type="checkbox" name="recompute_existing" value="1" {% if include_recomputed %}checked{% endif %}>
+                    <span>计算已计算过数据（勾选后展示全部 ASIN）</span>
+                </label>
+            </div>
+            <div class="upload-field">
+                <label class="upload-field__label">每页条数</label>
+                <select name="per_page" class="upload-textarea" style="min-height:auto;height:2.5rem;">
+                    <option value="20" {% if per_page == 20 %}selected{% endif %}>20</option>
+                    <option value="50" {% if per_page == 50 %}selected{% endif %}>50</option>
+                    <option value="100" {% if per_page == 100 %}selected{% endif %}>100</option>
+                    <option value="custom" {% if request.GET.per_page == 'custom' %}selected{% endif %}>自定义</option>
+                </select>
+                <input type="number" name="per_page_custom" min="1" max="500" placeholder="自定义上限500"
+                       value="{{ request.GET.per_page_custom }}">
+            </div>
+            <div class="upload-actions">
+                <button type="submit" class="upload-submit">筛选</button>
+                <a class="upload-submit" href="{% url 'compute_roi' %}" style="text-decoration:none;display:inline-flex;align-items:center;justify-content:center;">重置</a>
+            </div>
+        </form>
+
+        <form id="upload-form" method="post" class="upload-form" novalidate
+              data-upload-start="{% url 'upload_start' %}"
+              data-status-url-template="{% url 'upload_job_status' job_id='00000000-0000-0000-0000-000000000000' %}">
+            {% csrf_token %}
+            <input type="hidden" name="recompute_existing" value="{% if include_recomputed %}1{% else %}0{% endif %}">
+            <div class="upload-field">
+                <label class="upload-field__label" for="id_exchange_rate">汇率（必填）</label>
+                <input type="text" name="exchange_rate" id="id_exchange_rate"
+                       class="upload-textarea"
+                       style="min-height:auto;height:2.75rem;resize:none;"
+                       inputmode="decimal" placeholder="例如 6.88" required>
+            </div>
+            <div class="upload-live-hint" style="margin:.5rem 0;">
+                {% if include_recomputed %}
+                展示总数：{{ total_all }}（含已计算与未计算）；
+                {% else %}
+                待计算 ASIN 总数：{{ total_pending }}；
+                {% endif %}
+                当前页：{{ page_obj.number }}/{{ page_obj.paginator.num_pages }}
+            </div>
+            <div style="max-height: 380px; overflow: auto; border: 1px solid #e6e8ee; border-radius: 10px; padding: .6rem;">
+                <label style="display:flex;align-items:center;gap:.5rem;padding:.2rem 0 .5rem;">
+                    <input type="checkbox" id="chk-all-asins">
+                    <span>全选当前页</span>
+                </label>
+                {% for asin in rows %}
+                <label style="display:flex;align-items:center;gap:.5rem;padding:.2rem 0;">
+                    <input type="checkbox" name="asins" value="{{ asin }}" class="chk-asin">
+                    <span>{{ asin }}</span>
+                </label>
+                {% empty %}
+                <p class="upload-live-hint">当前筛选下没有待计算 ASIN。</p>
+                {% endfor %}
+            </div>
+            <div class="upload-actions">
+                <button type="submit" class="upload-submit">执行计算ROI</button>
+            </div>
+        </form>
+    </section>
+
+    {% if page_obj.paginator.num_pages > 1 %}
+    <div class="dash-pagination" style="margin-top:1rem;">
+        {% if page_obj.has_previous %}
+        <a class="dash-btn" href="{% url 'compute_roi' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}page={{ page_obj.previous_page_number }}">上一页</a>
+        {% endif %}
+        <span class="dash-page-num dash-page-num--active">{{ page_obj.number }}</span>
+        <span class="dash-page-num">/ {{ page_obj.paginator.num_pages }}</span>
+        {% if page_obj.has_next %}
+        <a class="dash-btn" href="{% url 'compute_roi' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}page={{ page_obj.next_page_number }}">下一页</a>
+        {% endif %}
+    </div>
+    {% endif %}
+
+    <div id="upload-progress-overlay" class="upload-progress-overlay" hidden aria-hidden="true">
+        <div class="upload-progress-card" role="dialog" aria-labelledby="upload-progress-title">
+            <div class="upload-progress-spinner" id="upload-progress-spinner" aria-hidden="true"></div>
+            <p class="upload-progress-title" id="upload-progress-title">分析任务进行中</p>
+            <p class="upload-progress-elapsed">已等待 <span id="upload-elapsed">0</span> 秒</p>
+            <div class="upload-progress-log" id="upload-progress-log"></div>
+            <p class="upload-progress-hint">请勿关闭本页；完成后会跳转首页，失败时下方会显示原因。</p>
+            <div class="upload-progress-actions">
+                <button type="button" class="upload-progress-close" id="upload-progress-close" hidden>关闭</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+(function () {
+  var all = document.getElementById('chk-all-asins');
+  if (all) {
+    all.addEventListener('change', function () {
+      document.querySelectorAll('.chk-asin').forEach(function (c) { c.checked = all.checked; });
+    });
+  }
+  var form = document.getElementById('upload-form');
+  if (!form) return;
+  var overlay = document.getElementById('upload-progress-overlay');
+  var elapsedEl = document.getElementById('upload-elapsed');
+  var logEl = document.getElementById('upload-progress-log');
+  var spinner = document.getElementById('upload-progress-spinner');
+  var closeBtn = document.getElementById('upload-progress-close');
+  var submitBtn = form.querySelector('.upload-submit');
+  var startUrl = form.getAttribute('data-upload-start');
+  var statusTpl = form.getAttribute('data-status-url-template');
+  var timer = null;
+  var pollTimer = null;
+  function getCookie(name) {
+    var m = document.cookie.match(new RegExp('(^|; )' + name + '=([^;]*)'));
+    return m ? decodeURIComponent(m[2]) : '';
+  }
+  function showOverlay() {
+    overlay.hidden = false;
+    overlay.setAttribute('aria-hidden', 'false');
+    logEl.textContent = '';
+    logEl.className = 'upload-progress-log';
+    closeBtn.hidden = true;
+    if (spinner) spinner.style.display = '';
+    var sec = 0;
+    elapsedEl.textContent = '0';
+    if (timer) clearInterval(timer);
+    timer = setInterval(function () { sec += 1; elapsedEl.textContent = String(sec); }, 1000);
+  }
+  function hideOverlay() {
+    overlay.hidden = true;
+    overlay.setAttribute('aria-hidden', 'true');
+    if (timer) { clearInterval(timer); timer = null; }
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+    submitBtn.disabled = false;
+    submitBtn.removeAttribute('aria-busy');
+  }
+  function statusUrl(jobId) {
+    return statusTpl.replace('00000000-0000-0000-0000-000000000000', jobId);
+  }
+  function poll(jobId) {
+    fetch(statusUrl(jobId), { credentials: 'same-origin' })
+      .then(function (r) { return r.json().then(function (data) { return { ok: r.ok, data: data }; }); })
+      .then(function (o) {
+        var data = o.data;
+        if (!data.ok) {
+          logEl.className = 'upload-progress-log upload-progress-log--error';
+          logEl.textContent = data.error || '状态查询失败';
+          closeBtn.hidden = false;
+          if (spinner) spinner.style.display = 'none';
+          if (timer) clearInterval(timer);
+          return;
+        }
+        logEl.textContent = (data.progress || []).join('\n');
+        logEl.scrollTop = logEl.scrollHeight;
+        if (data.status === 'done') {
+          if (timer) clearInterval(timer);
+          if (spinner) spinner.style.display = 'none';
+          window.location.href = data.redirect || '{% url "index" %}';
+          return;
+        }
+        if (data.status === 'error') {
+          logEl.className = 'upload-progress-log upload-progress-log--error';
+          var err = data.error || '未知错误';
+          if (data.error_detail) err += '\n\n' + data.error_detail;
+          logEl.textContent = err;
+          closeBtn.hidden = false;
+          if (spinner) spinner.style.display = 'none';
+          if (timer) clearInterval(timer);
+          return;
+        }
+        pollTimer = setTimeout(function () { poll(jobId); }, 1200);
+      })
+      .catch(function (e) {
+        logEl.className = 'upload-progress-log upload-progress-log--error';
+        logEl.textContent = '轮询失败：' + (e && e.message ? e.message : String(e));
+        closeBtn.hidden = false;
+        if (spinner) spinner.style.display = 'none';
+        if (timer) clearInterval(timer);
+      });
+  }
+  closeBtn.addEventListener('click', hideOverlay);
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+    if (submitBtn.disabled) return;
+    if (!form.querySelector('input[name="asins"]:checked')) {
+      alert('请先勾选至少一个 ASIN');
+      return;
+    }
+    var csrfEl = form.querySelector('[name=csrfmiddlewaretoken]');
+    var csrf = csrfEl ? csrfEl.value : getCookie('csrftoken');
+    submitBtn.disabled = true;
+    submitBtn.setAttribute('aria-busy', 'true');
+    var fd = new FormData(form);
+    fetch(startUrl, {
+      method: 'POST',
+      body: fd,
+      credentials: 'same-origin',
+      headers: { 'X-CSRFToken': csrf }
+    })
+      .then(function (r) {
+        return r.json().then(function (data) {
+          if (!r.ok) {
+            var er = new Error(data.error || ('请求失败 HTTP ' + r.status));
+            if (data && data.job_id) er.jobId = data.job_id;
+            throw er;
+          }
+          return data;
+        });
+      })
+      .then(function (data) {
+        if (!data.ok) throw new Error(data.error || '启动失败');
+        showOverlay();
+        poll(data.job_id);
+      })
+      .catch(function (err) {
+        submitBtn.disabled = false;
+        submitBtn.removeAttribute('aria-busy');
+        alert(err.message || String(err));
+      });
+  });
+
+  // 支持从看板跳转到本页并直接附带 job_id 查看进度
+  try {
+    var qs = new URLSearchParams(window.location.search || '');
+    var jid = qs.get('job_id');
+    if (jid) {
+      showOverlay();
+      poll(jid);
+    }
+  } catch (e) {}
+})();
+</script>
+{% endblock %}
+

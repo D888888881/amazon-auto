@@ -1,0 +1,35 @@
+{% extends 'base.html' %}
+{% block title %}登录 — Amazon 自动化{% endblock %}
+{% block content %}
+<div class="auth-page">
+    <div class="auth-card">
+        <div class="auth-card__head">
+            <h1 class="auth-card__title">欢迎回来</h1>
+            <p class="auth-card__sub">登录以继续使用 阿方索Amazon自动化</p>
+        </div>
+        {% if messages %}
+        <ul class="messages auth-messages">
+            {% for message in messages %}
+            <li class="{{ message.tags }}">{{ message }}</li>
+            {% endfor %}
+        </ul>
+        {% endif %}
+        <form method="post" action="{% url 'login' %}" class="auth-form">
+            {% csrf_token %}
+            <div class="auth-field">
+                <label for="id_username">用户名</label>
+                <input type="text" name="username" id="id_username" class="auth-input" required autofocus autocomplete="username" placeholder="请输入用户名">
+            </div>
+            <div class="auth-field">
+                <label for="id_password">密码</label>
+                <input type="password" name="password" id="id_password" class="auth-input" required autocomplete="current-password" placeholder="请输入密码">
+            </div>
+            <input type="hidden" name="next" value="{{ next }}">
+            <button type="submit" class="auth-btn auth-btn--primary">登录</button>
+        </form>
+        <p class="auth-footer">
+            还没有账号？<a href="{% url 'register' %}">注册</a>
+        </p>
+    </div>
+</div>
+{% endblock %}

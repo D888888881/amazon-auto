@@ -1,0 +1,730 @@
+{% extends 'base.html' %}
+{% block title %}{{ page_title|default:'Excel' }}{% endblock %}
+{% block body_class %}fs-body{% endblock %}
+{% block main_class %}main--fs{% endblock %}
+{% block content %}
+<div class="fs-excel-studio fs-excel-studio--page" id="excel-editor-root">
+    <header class="fs-studio__titlebar">
+{#        <a href="{% url 'excel' %}" class="fs-studio__back fs-studio__back--link" title="返回文件库">#}
+{#            <span class="fs-studio__back-ic">←</span>#}
+{#            <span>文件库</span>#}
+{#        </a>#}
+        <div class="fs-studio__doc">
+            <span class="fs-studio__doc-ic" aria-hidden="true">📗</span>
+            <div class="fs-studio__doc-meta">
+                <h1 class="fs-studio__doc-name" id="studio-title">加载中…</h1>
+                <p class="fs-studio__doc-sub" id="studio-sheet"></p>
+            </div>
+        </div>
+        <div class="fs-studio__actions">
+            <button type="button" class="fs-studio__mini" id="btn-add-row" title="末尾插入一行">+ 行</button>
+            <button type="button" class="fs-studio__mini" id="btn-add-col" title="末尾插入一列">+ 列</button>
+            <button type="button" class="fs-studio__mini fs-studio__mini--danger" id="btn-del-row" title="删除选中行">删行</button>
+            <button type="button" class="fs-studio__mini fs-studio__mini--danger" id="btn-del-col" title="删除选中列">删列</button>
+            <button type="button" class="fs-studio__mini" id="btn-load-url-images" title="从图片列 URL 加载缩略图" style="display:none;">加载图片</button>
+            <button type="button" class="fs-studio__mini" id="btn-import-data-origin" title="将新 Excel 的数据追加导入到当前 _data_origin.xlsx" style="display:none;">导入数据</button>
+            <input type="file" id="import-data-origin-file" accept=".xlsx,.xlsm" style="display:none;">
+            <button type="button" class="fs-studio__mini" id="btn-recalc-roi" title="按表内数据重算 ROI 指标" style="display:none;">重计算</button>
+            <button type="button" class="fs-studio__mini fs-studio__mini--ok" id="btn-confirm-roi-verify" title="确认已在看板与数据审核中标记为已校验" style="display:none;">确认校验</button>
+            <button type="button" class="fs-studio__save" id="btn-save">保存</button>
+        </div>
+    </header>
+    <div class="fs-studio__ribbon">
+        <span class="fs-studio__hint" id="studio-mode-hint">{% if local_mode %}本地文件 · 保存将下载为新文件{% else %}服务器文件 · 保存保留原格式与图片{% endif %}</span>
+        <span class="fs-studio__path" id="studio-path" title=""></span>
+    </div>
+    {% if local_mode %}
+    <div class="fs-local-bar" id="local-bar">
+        <label class="fs-btn fs-btn--ghost">
+            <input type="file" id="excel-local-file" accept=".xlsx,.xlsm">
+            <span>选择 Excel 打开</span>
+        </label>
+    </div>
+    {% endif %}
+    <p class="fs-studio__msg fs-studio__msg--err" id="excel-error" hidden></p>
+    <p class="fs-studio__msg fs-studio__msg--ok" id="excel-ok" hidden></p>
+    <div class="fs-studio__sheet">
+        <div class="fs-studio__grid-outer" id="grid-outer">
+            <div class="excel-images-layer" id="excel-images-layer" aria-hidden="true"></div>
+            <div class="fs-studio__grid-wrap">
+                <table class="excel-grid excel-grid--studio" id="grid">
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+(function () {
+  document.body.classList.add('fs-excel-studio-open');
+  const csrftoken = '{{ csrf_token }}';
+  const loadMediaUrl = '{% url "excel_load_media" %}';
+  const saveMediaUrl = '{% url "excel_save_media" %}';
+  const recalcRoiMediaUrl = '{% url "excel_recalc_roi_media" %}';
+  const importDataOriginUrl = '{% url "excel_import_data_origin" %}';
+  const confirmRoiVerifyUrl = '{% url "excel_confirm_roi_verify" %}';
+  const loadUrl = '{% url "excel_load" %}';
+  const saveUrl = '{% url "excel_save" %}';
+  const relPath = "{{ rel_path|escapejs }}";
+  const localMode = {% if local_mode %}true{% else %}false{% endif %};
+  const readOnlyExcel = {% if read_only_excel|default:False %}true{% else %}false{% endif %};
+
+  const grid = document.querySelector('#grid tbody');
+  const errEl = document.getElementById('excel-error');
+  const okEl = document.getElementById('excel-ok');
+  const metaEl = document.getElementById('studio-sheet');
+  const titleEl = document.getElementById('studio-title');
+  const pathEl = document.getElementById('studio-path');
+  const imgLayer = document.getElementById('excel-images-layer');
+  const gridWrap = document.querySelector('.fs-studio__grid-wrap');
+  const loadUrlImagesBtn = document.getElementById('btn-load-url-images');
+  const recalcRoiBtn = document.getElementById('btn-recalc-roi');
+  const importDataOriginBtn = document.getElementById('btn-import-data-origin');
+  const importDataOriginInput = document.getElementById('import-data-origin-file');
+  const confirmRoiVerifyBtn = document.getElementById('btn-confirm-roi-verify');
+
+  if (readOnlyExcel && !localMode) {
+    ['btn-add-row', 'btn-add-col', 'btn-del-row', 'btn-del-col', 'btn-save'].forEach(function (id) {
+      var b = document.getElementById(id);
+      if (b) b.disabled = true;
+    });
+    var mh = document.getElementById('studio-mode-hint');
+    if (mh) mh.textContent = '只读查看（由管理员分配的 ASIN 文件，不可保存）';
+  }
+
+  let serverFilePath = null;
+  let selectedRow = -1;
+  let selectedCol = -1;
+  let selectedRows = new Set();
+  let rowAnchor = -1;
+
+  function firstWordFromFileName(name) {
+    var base = (name || '').replace(/\.[^/.]+$/, '').trim();
+    if (!base) return 'Excel';
+    return base.split(/\s+/)[0] || 'Excel';
+  }
+
+  function showErr(msg) {
+    errEl.textContent = msg || '';
+    errEl.hidden = !msg;
+  }
+  function showOk(msg) {
+    okEl.textContent = msg || '';
+    okEl.hidden = !msg;
+    if (msg) setTimeout(function () { okEl.hidden = true; }, 3000);
+  }
+
+  function collectRows() {
+    var out = [];
+    grid.querySelectorAll('tr').forEach(function (tr) {
+      var row = [];
+      tr.querySelectorAll('input').forEach(function (inp) {
+        row.push(inp.value);
+      });
+      out.push(row);
+    });
+    return out;
+  }
+
+  function repaintSelection() {
+    grid.querySelectorAll('tr').forEach(function (r, idx) {
+      r.classList.toggle('excel-row-sel', selectedRows.has(idx));
+    });
+    grid.querySelectorAll('td').forEach(function (c) { c.classList.remove('excel-col-sel'); });
+    if (selectedCol >= 0) {
+      grid.querySelectorAll('tr').forEach(function (r) {
+        var cc = r.children[selectedCol];
+        if (cc) cc.classList.add('excel-col-sel');
+      });
+    }
+  }
+
+  function bindCellSelect() {
+    grid.onclick = function (e) {
+      var td = e.target.closest('td');
+      if (!td) return;
+      var tr = td.parentElement;
+      var row = Array.prototype.indexOf.call(grid.children, tr);
+      var col = Array.prototype.indexOf.call(tr.children, td);
+      selectedRow = row;
+      selectedCol = col;
+      if (e.shiftKey && rowAnchor >= 0) {
+        selectedRows.clear();
+        var lo = Math.min(rowAnchor, row);
+        var hi = Math.max(rowAnchor, row);
+        for (var i = lo; i <= hi; i++) selectedRows.add(i);
+      } else if (e.ctrlKey || e.metaKey) {
+        if (selectedRows.has(row)) selectedRows.delete(row);
+        else selectedRows.add(row);
+        rowAnchor = row;
+      } else {
+        selectedRows.clear();
+        selectedRows.add(row);
+        rowAnchor = row;
+      }
+      repaintSelection();
+    };
+  }
+
+  function renderImages(images) {
+    imgLayer.innerHTML = '';
+    if (!images || !images.length) {
+      imgLayer.setAttribute('aria-hidden', 'true');
+      return;
+    }
+    imgLayer.setAttribute('aria-hidden', 'false');
+    var trs = grid.querySelectorAll('tr');
+    images.forEach(function (im) {
+      var el = document.createElement('img');
+      el.className = 'excel-embed-img';
+      el.alt = '';
+      el.src = 'data:' + im.mime + ';base64,' + im.data;
+      var r = Math.max(0, Number(im.row || 0));
+      var c = Math.max(0, Number(im.col || 0));
+      var tr = trs[r];
+      var td = tr && tr.children ? tr.children[c] : null;
+      // 兼容部分文件坐标轻微偏移到“#”列的情况，向右一列兜底
+      if (td && tr && tr.children && tr.children[c + 1]) {
+        var inp = td.querySelector('input');
+        var val = inp ? String(inp.value || '').trim() : '';
+        if (val === '#' || val === '＃') td = tr.children[c + 1];
+      }
+      var left = td ? (td.offsetLeft + 2) : (c * 88 + 2);
+      var top = tr ? (tr.offsetTop + 1) : (r * 30 + 1);
+      el.style.left = left + 'px';
+      el.style.top = top + 'px';
+      var boxW = td ? td.clientWidth : 88;
+      var boxH = tr ? tr.clientHeight : 30;
+      var w = Number(im.width || 0);
+      var h = Number(im.height || 0);
+      if (w > 0) el.style.maxWidth = Math.min(w, boxW - 6) + 'px';
+      else el.style.maxWidth = Math.max(40, boxW - 6) + 'px';
+      if (h > 0) el.style.maxHeight = Math.min(h, boxH - 4) + 'px';
+      else el.style.maxHeight = Math.max(18, boxH - 4) + 'px';
+      imgLayer.appendChild(el);
+    });
+    syncImageLayerWithScroll();
+  }
+
+  function isAdEfficiencySheet() {
+    var p = String(relPath || '').toLowerCase();
+    return p.indexOf('ad_efficiency_table.xlsx') >= 0;
+  }
+
+  function isSearchSheet() {
+    var p = String(relPath || '').toLowerCase();
+    var name = p.split('/').pop() || '';
+    return name.indexOf('search(') === 0 && name.endsWith('.xlsx');
+  }
+
+  function isDataOriginSheet() {
+    var p = String(relPath || '').toLowerCase();
+    return p.endsWith('_data_origin.xlsx');
+  }
+
+  function isRoiUsPackSheet() {
+    var p = String(relPath || '').toLowerCase();
+    return p.indexOf('roi-us-pack') >= 0 && p.endsWith('.xlsx');
+  }
+
+  function extractImageUrl(raw) {
+    var t = String(raw || '').trim();
+    if (!t) return '';
+    // 去掉常见不可见字符
+    t = t.replace(/[\u200B-\u200D\uFEFF]/g, '');
+    // 去掉 Excel 常见前缀（文本强制符号 / 公式等）
+    t = t.replace(/^'+/, '').trim();
+    t = t.replace(/^=+/, '').trim();
+    if (
+      (t.charAt(0) === '"' && t.charAt(t.length - 1) === '"') ||
+      (t.charAt(0) === "'" && t.charAt(t.length - 1) === "'")
+    ) {
+      t = t.slice(1, -1).trim();
+    }
+    // 兼容 Excel 中常见转义
+    t = t.replace(/\\\//g, '/');
+    // 兼容公式：=HYPERLINK("url","text")
+    var hm = t.match(/HYPERLINK\(\s*"([^"]+)"/i);
+    if (hm && hm[1]) t = hm[1].trim();
+    // 兼容 JSON 片段中包含 URL
+    if (!/^https?:\/\//i.test(t) && t.indexOf('http') >= 0) {
+      var m = t.match(/https?:\/\/[^\s"'>)]+/i);
+      if (m && m[0]) t = m[0];
+    }
+    // 兼容协议相对 URL
+    if (/^\/\//.test(t)) t = 'https:' + t;
+    if (/^https?:\/\//i.test(t) && t.length > 12) return t;
+    // 兜底：任意文本中提取 URL（覆盖前后混杂字符场景）
+    var any = t.match(/https?:\/\/[^\s"'<>)]+/i);
+    if (any && any[0] && any[0].length > 12) return any[0];
+    // 兜底：协议相对 URL
+    var rel = t.match(/\/\/[^\s"'<>)]+/);
+    if (rel && rel[0] && rel[0].length > 6) return 'https:' + rel[0];
+    return '';
+  }
+
+  function findImageColumnIndex(headerTr) {
+  const candidates = candidateImageColumns(headerTr);
+  if (candidates.length === 0) return -1;
+  if (candidates.length === 1) return candidates[0];
+
+  const trs = grid.querySelectorAll('tr');
+  // 从第1行开始检查（跳过表头）
+  for (const colIdx of candidates) {
+    for (let r = 1; r < trs.length; r++) {
+      const td = trs[r].children[colIdx];
+      if (!td) continue;
+      const inp = td.querySelector('input');
+      if (!inp) continue;
+      const url = extractImageUrl(inp.value);
+      if (url) {
+        return colIdx; // 该列至少有一个有效 URL，直接选用
+      }
+    }
+  }
+  // 所有候选列都没有数据，返回第一个候选列（让上层报错“未识别到有效 URL”）
+  return candidates[0];
+}
+
+
+function candidateImageColumns(headerTr) {
+  if (!headerTr || !headerTr.children) return [];
+  const normalize = (s) => String(s || '')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_\-:：()（）\[\]【】]+/g, '');
+  const candidates = [];
+  for (let c = 0; c < headerTr.children.length; c++) {
+    const inp = headerTr.children[c].querySelector('input');
+    const raw = inp ? String(inp.value || '') : '';
+    const txt = normalize(raw);
+    if (!txt) continue;
+    if (
+      txt === '图片' ||
+      txt === 'imageurl' ||
+      txt === '图片链接' ||
+      txt.includes('imageurl') ||
+      txt.includes('图片') ||
+      txt.includes('主图')
+    ) {
+      candidates.push(c);
+    }
+  }
+  return candidates;
+}
+
+
+  function renderUrlImagesForImageColumn() {
+    if (!isAdEfficiencySheet() && !isSearchSheet() && !isDataOriginSheet()) return { ok: false, reason: 'not_sheet' };
+    var trs = grid.querySelectorAll('tr');
+    if (!trs.length) return { ok: false, reason: 'empty' };
+    var header = trs[0];
+    console.log('Finding image column in header:', header);
+    var imgCol = findImageColumnIndex(header);
+    if (imgCol < 0) return { ok: false, reason: 'no_col' };
+
+    var loaded = 0;
+    for (var r = 1; r < trs.length; r++) {
+      var td = trs[r].children[imgCol];
+      if (!td) continue;
+      var inp = td.querySelector('input');
+      if (!inp) continue;
+      var url = extractImageUrl(inp.value || '');
+      if (!url) continue;
+
+      var el = document.createElement('img');
+      el.className = 'excel-embed-img excel-embed-img--url';
+      el.alt = '';
+      el.src = url;
+      el.loading = 'lazy';
+      el.decoding = 'async';
+      el.referrerPolicy = 'no-referrer';
+
+      var left = td.offsetLeft + 2;
+      var top = trs[r].offsetTop + 1;
+      el.style.left = left + 'px';
+      el.style.top = top + 'px';
+      var boxW = td.clientWidth || 88;
+      var boxH = trs[r].clientHeight || 30;
+      el.style.maxWidth = Math.max(36, boxW - 6) + 'px';
+      el.style.maxHeight = Math.max(18, boxH - 4) + 'px';
+      imgLayer.appendChild(el);
+      loaded += 1;
+    }
+    syncImageLayerWithScroll();
+    return { ok: true, loaded: loaded };
+  }
+
+  function syncImageLayerWithScroll() {
+    if (!gridWrap) return;
+    var x = gridWrap.scrollLeft || 0;
+    var y = gridWrap.scrollTop || 0;
+    imgLayer.style.transform = 'translate(' + (-x) + 'px,' + (-y) + 'px)';
+  }
+
+  function renderGrid(rows) {
+    grid.innerHTML = '';
+    rows.forEach(function (row) {
+      var tr = document.createElement('tr');
+      row.forEach(function (cell) {
+        var td = document.createElement('td');
+        var inp = document.createElement('input');
+        inp.type = 'text';
+        if (cell && typeof cell === 'object' && 'v' in cell) {
+          inp.value = cell.v;
+          if (cell.css) inp.style.cssText = cell.css;
+        } else {
+          inp.value = cell != null ? String(cell) : '';
+        }
+        td.appendChild(inp);
+        tr.appendChild(td);
+      });
+      grid.appendChild(tr);
+    });
+    bindCellSelect();
+  }
+
+  function loadFromServer() {
+    showErr('');
+    fetch(loadMediaUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrftoken },
+      body: JSON.stringify({ path: relPath }),
+      credentials: 'same-origin',
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (!data.ok) {
+          showErr(data.error || '加载失败');
+          titleEl.textContent = '加载失败';
+          return;
+        }
+        serverFilePath = relPath;
+        var fname = relPath.split('/').pop() || 'Excel';
+        var firstWord = firstWordFromFileName(fname);
+        titleEl.textContent = firstWord;
+        document.title = firstWord;
+        metaEl.textContent = '工作表：' + data.sheet_name;
+        pathEl.textContent = relPath;
+        pathEl.title = relPath;
+        renderGrid(data.rows || [['']]);
+        renderImages(data.images || []);
+        // Search 表默认自动渲染图片，不再依赖手动按钮
+        if (isSearchSheet()) {
+          renderUrlImagesForImageColumn();
+        }
+        if (recalcRoiBtn) {
+          recalcRoiBtn.style.display = (!localMode && !readOnlyExcel && isRoiUsPackSheet()) ? '' : 'none';
+        }
+        if (importDataOriginBtn) {
+          importDataOriginBtn.style.display = (!localMode && !readOnlyExcel && isDataOriginSheet()) ? '' : 'none';
+        }
+        if (confirmRoiVerifyBtn) {
+          var showV = !localMode && isRoiUsPackSheet();
+          confirmRoiVerifyBtn.style.display = showV ? '' : 'none';
+          if (showV) {
+            var done = !!data.roi_pack_verified;
+            confirmRoiVerifyBtn.disabled = done;
+            confirmRoiVerifyBtn.textContent = done ? '已校验' : '确认校验';
+          }
+        }
+      })
+      .catch(function () {
+        showErr('网络错误');
+        titleEl.textContent = '错误';
+      });
+  }
+
+  function loadLocalFile(file) {
+    showErr('');
+    serverFilePath = null;
+    var fd = new FormData();
+    fd.append('file', file);
+    fetch(loadUrl, {
+      method: 'POST',
+      headers: { 'X-CSRFToken': csrftoken },
+      body: fd,
+      credentials: 'same-origin',
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (!data.ok) {
+          showErr(data.error || '加载失败');
+          return;
+        }
+        var firstWord = firstWordFromFileName(file.name);
+        titleEl.textContent = firstWord;
+        document.title = firstWord;
+        metaEl.textContent = '工作表：' + data.sheet_name + ' · 保存将下载';
+        pathEl.textContent = '本地 · ' + file.name;
+        var lb = document.getElementById('local-bar');
+        if (lb) lb.style.display = 'none';
+        var rows = data.rows || [['']];
+        var wrapped = rows.map(function (r) {
+          return r.map(function (c) { return { v: c, css: '' }; });
+        });
+        renderGrid(wrapped);
+        renderImages([]);
+      })
+      .catch(function () { showErr('网络错误'); });
+  }
+
+  document.getElementById('btn-add-row').addEventListener('click', function () {
+    var n = grid.querySelector('tr') ? grid.querySelector('tr').querySelectorAll('td').length : 1;
+    var tr = document.createElement('tr');
+    for (var i = 0; i < n; i++) {
+      var td = document.createElement('td');
+      var inp = document.createElement('input');
+      inp.type = 'text';
+      td.appendChild(inp);
+      tr.appendChild(td);
+    }
+    grid.appendChild(tr);
+    bindCellSelect();
+  });
+
+  document.getElementById('btn-add-col').addEventListener('click', function () {
+    grid.querySelectorAll('tr').forEach(function (tr) {
+      var td = document.createElement('td');
+      var inp = document.createElement('input');
+      inp.type = 'text';
+      td.appendChild(inp);
+      tr.appendChild(td);
+    });
+    if (!grid.querySelector('tr')) {
+      var tr = document.createElement('tr');
+      var td = document.createElement('td');
+      td.appendChild(document.createElement('input')).type = 'text';
+      tr.appendChild(td);
+      grid.appendChild(tr);
+    }
+    bindCellSelect();
+  });
+
+  document.getElementById('btn-del-row').addEventListener('click', function () {
+    var rows = grid.querySelectorAll('tr');
+    if (!rows.length) return;
+    if (selectedRows.size > 0) {
+      var idxs = Array.from(selectedRows).sort(function (a, b) { return b - a; });
+      idxs.forEach(function (idx) {
+        var rs = grid.querySelectorAll('tr');
+        if (rs[idx]) rs[idx].remove();
+      });
+    } else {
+      var idx = selectedRow >= 0 ? selectedRow : rows.length - 1;
+      if (rows[idx]) rows[idx].remove();
+    }
+    selectedRows.clear();
+    rowAnchor = -1;
+    selectedRow = -1;
+    selectedCol = -1;
+    bindCellSelect();
+  });
+
+  document.getElementById('btn-del-col').addEventListener('click', function () {
+    var first = grid.querySelector('tr');
+    if (!first) return;
+    var n = first.querySelectorAll('td').length;
+    if (n <= 1) return;
+    var idx = selectedCol >= 0 ? selectedCol : n - 1;
+    grid.querySelectorAll('tr').forEach(function (tr) {
+      var tds = tr.querySelectorAll('td');
+      if (tds[idx]) tds[idx].remove();
+    });
+    selectedCol = -1;
+    bindCellSelect();
+  });
+
+  document.getElementById('btn-save').addEventListener('click', function () {
+    if (readOnlyExcel && !localMode) {
+      showErr('只读模式不可保存');
+      return;
+    }
+    showErr('');
+    showOk('');
+    var rows = collectRows();
+    if (!rows.length || !rows[0].length) {
+      showErr('表格为空');
+      return;
+    }
+    if (serverFilePath) {
+      fetch(saveMediaUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRFToken': csrftoken,
+        },
+        body: JSON.stringify({ path: serverFilePath, rows: rows }),
+        credentials: 'same-origin',
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (!data.ok) {
+            showErr(data.error || '保存失败');
+            return;
+          }
+          showOk('已保存（已保留格式与图片）');
+        })
+        .catch(function () { showErr('网络错误'); });
+      return;
+    }
+    fetch(saveUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRFToken': csrftoken,
+      },
+      body: JSON.stringify({ rows: rows }),
+      credentials: 'same-origin',
+    })
+      .then(function (r) {
+        if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || '失败'); });
+        return r.blob();
+      })
+      .then(function (blob) {
+        var a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'edited.xlsx';
+        a.click();
+        URL.revokeObjectURL(a.href);
+        showOk('已下载 edited.xlsx');
+      })
+      .catch(function (e) { showErr(e.message || '保存失败'); });
+  });
+
+  if (localMode) {
+    titleEl.textContent = '请选择 Excel';
+    metaEl.textContent = '';
+    pathEl.textContent = '';
+    document.getElementById('excel-local-file').addEventListener('change', function () {
+      var f = this.files && this.files[0];
+      if (f) loadLocalFile(f);
+    });
+  } else {
+    loadFromServer();
+  }
+
+  if (loadUrlImagesBtn) {
+    if (isAdEfficiencySheet() || isDataOriginSheet()) loadUrlImagesBtn.style.display = '';
+    loadUrlImagesBtn.addEventListener('click', function () {
+      var r = renderUrlImagesForImageColumn();
+      if (!r || !r.ok) {
+        if (r && r.reason === 'no_col') showErr('未识别到图片列（支持：图片 / imageUrl / 商品主图 / 图片链接）');
+        else showErr('未找到可加载的图片');
+        return;
+      }
+      if (r.loaded > 0) showOk('已加载 ' + r.loaded + ' 张图片缩略图');
+      else showErr('图片列存在，但未识别到有效图片 URL');
+    });
+  }
+
+  if (confirmRoiVerifyBtn) {
+    confirmRoiVerifyBtn.addEventListener('click', function () {
+      if (localMode || !serverFilePath || !isRoiUsPackSheet() || confirmRoiVerifyBtn.disabled) return;
+      showErr('');
+      showOk('');
+      confirmRoiVerifyBtn.disabled = true;
+      fetch(confirmRoiVerifyUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrftoken },
+        body: JSON.stringify({ path: serverFilePath }),
+        credentials: 'same-origin',
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (!data.ok) {
+            confirmRoiVerifyBtn.disabled = false;
+            showErr(data.error || '确认失败');
+            return;
+          }
+          confirmRoiVerifyBtn.textContent = '已校验';
+          confirmRoiVerifyBtn.disabled = true;
+          try {
+            sessionStorage.setItem('asin_roi_pack_verified_nav', '1');
+          } catch (e) {}
+          showOk('已确认校验，看板与数据审核将显示「是」');
+        })
+        .catch(function () {
+          confirmRoiVerifyBtn.disabled = false;
+          showErr('网络错误');
+        });
+    });
+  }
+
+  if (recalcRoiBtn) {
+    recalcRoiBtn.addEventListener('click', function () {
+      if (readOnlyExcel && !localMode) return;
+      if (localMode || !serverFilePath || !isRoiUsPackSheet()) return;
+      showErr('');
+      showOk('');
+      recalcRoiBtn.disabled = true;
+      fetch(recalcRoiMediaUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrftoken },
+        body: JSON.stringify({ path: serverFilePath }),
+        credentials: 'same-origin',
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          recalcRoiBtn.disabled = false;
+          if (!data.ok) {
+            showErr(data.error || '重算失败');
+            return;
+          }
+          showOk('已按表内数据重算并保存');
+          loadFromServer();
+        })
+        .catch(function () {
+          recalcRoiBtn.disabled = false;
+          showErr('网络错误');
+        });
+    });
+  }
+
+  if (importDataOriginBtn && importDataOriginInput) {
+    importDataOriginBtn.addEventListener('click', function () {
+      if (localMode || !serverFilePath || !isDataOriginSheet() || readOnlyExcel) return;
+      importDataOriginInput.value = '';
+      importDataOriginInput.click();
+    });
+    importDataOriginInput.addEventListener('change', function () {
+      var f = importDataOriginInput.files && importDataOriginInput.files[0];
+      if (!f) return;
+      showErr('');
+      showOk('');
+      importDataOriginBtn.disabled = true;
+      var fd = new FormData();
+      fd.append('path', serverFilePath);
+      fd.append('file', f);
+      fd.append('skip_header', '1');
+      fetch(importDataOriginUrl, {
+        method: 'POST',
+        headers: { 'X-CSRFToken': csrftoken },
+        body: fd,
+        credentials: 'same-origin',
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          importDataOriginBtn.disabled = false;
+          if (!data.ok) {
+            showErr(data.error || '导入失败');
+            return;
+          }
+          showOk('导入成功，新增 ' + String(data.imported_rows || 0) + ' 行');
+          loadFromServer();
+        })
+        .catch(function () {
+          importDataOriginBtn.disabled = false;
+          showErr('网络错误');
+        });
+    });
+  }
+
+  if (gridWrap) {
+    gridWrap.addEventListener('scroll', syncImageLayerWithScroll, { passive: true });
+  }
+})();
+</script>
+{% endblock %}

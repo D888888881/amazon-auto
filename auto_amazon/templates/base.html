@@ -1,0 +1,40 @@
+
+{% load static %}
+<!DOCTYPE html>
+<html lang="zh-hans">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}Amazon 自动化{% endblock %}</title>
+    <link rel="stylesheet" href="{% static 'css/app.css' %}">
+    {% block extra_head %}{% endblock %}
+    <link rel="shortcut icon" href="{% static 'images/20260401-174406_24x24.ico' %}" type="image/x-icon">
+</head>
+<body class="{% if not user.is_authenticated %}body-guest{% endif %} {% block body_class %}{% endblock %}">
+{% if user.is_authenticated %}
+<header class="site-header">
+    <div class="brand">Amazon 自动化</div>
+    <nav class="nav">
+        <a href="{% url 'index' %}" class="{% if request.resolver_match.url_name == 'index' %}active{% endif %}">首页</a>
+        <a href="{% url 'compute_roi' %}" class="{% if request.resolver_match.url_name == 'compute_roi' or request.resolver_match.url_name == 'upload' %}active{% endif %}">计算ROI</a>
+        {% if user.is_superuser %}
+        <a href="{% url 'fetch_data' %}" class="{% if request.resolver_match.url_name == 'fetch_data' %}active{% endif %}">获取数据</a>
+        {% endif %}
+        <a href="{% url 'excel' %}" class="{% if request.resolver_match.url_name == 'excel' %}active{% endif %}">数据审核</a>
+        {% if user.is_superuser %}
+        <a href="{% url 'pending_registrations' %}" class="{% if request.resolver_match.url_name == 'pending_registrations' %}active{% endif %}">注册审核</a>
+        <a href="{% url 'user_management' %}" class="{% if request.resolver_match.url_name == 'user_management' %}active{% endif %}">用户管理</a>
+        {% endif %}
+        <span class="nav-user" title="当前登录账号">用户：{{ user.username }}{% if user.is_superuser %} <span class="nav-user__role">（超级管理员）</span>{% endif %}</span>
+        <form action="{% url 'logout' %}" method="post" class="nav-logout">
+            {% csrf_token %}
+            <button type="submit" class="link-btn">退出</button>
+        </form>
+    </nav>
+</header>
+{% endif %}
+<main class="main {% block main_class %}{% endblock %}">
+    {% block content %}{% endblock %}
+</main>
+</body>
+</html>

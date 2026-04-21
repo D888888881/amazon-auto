@@ -1,0 +1,229 @@
+{% extends 'base.html' %}
+{% block title %}上传与数据 — Amazon 自动化{% endblock %}
+{% block main_class %}main--upload{% endblock %}
+{% block content %}
+<div class="upload-page">
+    <header class="upload-hero">
+        <h1 class="upload-hero__title">上传与数据</h1>
+        <p class="upload-hero__desc">当前页面分为：计算本地数据、获取数据（暂未开放）。</p>
+    </header>
+
+    {% if messages %}
+    <ul class="messages upload-messages">
+        {% for message in messages %}
+        <li class="{{ message.tags }}">{{ message }}</li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+
+    <section class="upload-panel upload-panel--accent">
+        <div class="upload-panel__head">
+            <span class="upload-panel__badge">A</span>
+            <div>
+                <h2 class="upload-panel__title">计算本地数据</h2>
+                <p class="upload-panel__hint">调用本地分析脚本：`seller_wizard_main(汇率)`。</p>
+            </div>
+        </div>
+
+        <form id="upload-form" method="post" class="upload-form" novalidate
+              data-upload-start="{% url 'upload_start' %}"
+              data-status-url-template="{% url 'upload_job_status' job_id='00000000-0000-0000-0000-000000000000' %}">
+            {% csrf_token %}
+            <div class="upload-field">
+                <label class="upload-field__label" for="id_exchange_rate">汇率（必填）</label>
+                <input type="text" name="exchange_rate" id="id_exchange_rate"
+                       class="upload-textarea"
+                       style="min-height:auto;height:2.75rem;resize:none;"
+                       inputmode="decimal" placeholder="例如 6.88" required>
+            </div>
+            <div class="upload-field" style="margin-top:.35rem;">
+                <label style="display:flex;align-items:center;gap:.45rem;">
+                    <input type="checkbox" name="recompute_existing" value="1">
+                    <span>重新计算已计算过的 ASIN（默认会跳过已存在 ROI-US-pack 的 ASIN）</span>
+                </label>
+            </div>
+            <div class="upload-actions">
+                <button type="submit" class="upload-submit">开始计算</button>
+            </div>
+        </form>
+    </section>
+
+    <section class="upload-panel upload-panel--pair" style="margin-top:1rem;">
+        <div class="upload-panel__head">
+            <span class="upload-panel__badge">B</span>
+            <div>
+                <h2 class="upload-panel__title">获取数据</h2>
+                <p class="upload-panel__hint">功能预留，暂未开放。</p>
+            </div>
+        </div>
+        <p class="upload-live-hint">该功能先空着，后续可接入你的数据源/API。</p>
+    </section>
+
+    <div id="upload-progress-overlay" class="upload-progress-overlay" hidden aria-hidden="true">
+        <div class="upload-progress-card" role="dialog" aria-labelledby="upload-progress-title">
+            <div class="upload-progress-spinner" id="upload-progress-spinner" aria-hidden="true"></div>
+            <p class="upload-progress-title" id="upload-progress-title">分析任务进行中</p>
+            <p class="upload-progress-elapsed">已等待 <span id="upload-elapsed">0</span> 秒</p>
+            <div class="upload-progress-log" id="upload-progress-log"></div>
+            <p class="upload-progress-hint">请勿关闭本页；完成后会跳转首页，失败时下方会显示原因。</p>
+            <div class="upload-progress-actions">
+                <button type="button" class="upload-progress-close" id="upload-progress-close" hidden>关闭</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+(function () {
+  var form = document.getElementById('upload-form');
+  if (!form) return;
+  var overlay = document.getElementById('upload-progress-overlay');
+  var elapsedEl = document.getElementById('upload-elapsed');
+  var logEl = document.getElementById('upload-progress-log');
+  var spinner = document.getElementById('upload-progress-spinner');
+  var closeBtn = document.getElementById('upload-progress-close');
+  var submitBtn = form.querySelector('.upload-submit');
+  var startUrl = form.getAttribute('data-upload-start');
+  var statusTpl = form.getAttribute('data-status-url-template');
+  var timer = null;
+  var pollTimer = null;
+
+  function getCookie(name) {
+    var m = document.cookie.match(new RegExp('(^|; )' + name + '=([^;]*)'));
+    return m ? decodeURIComponent(m[2]) : '';
+  }
+
+  function showOverlay() {
+    overlay.hidden = false;
+    overlay.setAttribute('aria-hidden', 'false');
+    logEl.textContent = '';
+    logEl.className = 'upload-progress-log';
+    closeBtn.hidden = true;
+    if (spinner) spinner.style.display = '';
+    var sec = 0;
+    elapsedEl.textContent = '0';
+    if (timer) clearInterval(timer);
+    timer = setInterval(function () {
+      sec += 1;
+      elapsedEl.textContent = String(sec);
+    }, 1000);
+  }
+
+  function hideOverlay() {
+    overlay.hidden = true;
+    overlay.setAttribute('aria-hidden', 'true');
+    if (timer) { clearInterval(timer); timer = null; }
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+    submitBtn.disabled = false;
+    submitBtn.removeAttribute('aria-busy');
+  }
+
+  function statusUrl(jobId) {
+    return statusTpl.replace('00000000-0000-0000-0000-000000000000', jobId);
+  }
+
+  function poll(jobId) {
+    fetch(statusUrl(jobId), { credentials: 'same-origin' })
+      .then(function (r) {
+        return r.json().then(function (data) { return { ok: r.ok, data: data }; });
+      })
+      .then(function (o) {
+        var data = o.data;
+        if (!data.ok) {
+          logEl.className = 'upload-progress-log upload-progress-log--error';
+          logEl.textContent = data.error || '状态查询失败';
+          closeBtn.hidden = false;
+          if (spinner) spinner.style.display = 'none';
+          if (timer) clearInterval(timer);
+          return;
+        }
+        logEl.textContent = (data.progress || []).join('\n');
+        logEl.scrollTop = logEl.scrollHeight;
+        if (data.status === 'done') {
+          if (timer) clearInterval(timer);
+          if (spinner) spinner.style.display = 'none';
+          window.location.href = data.redirect || '{% url "index" %}';
+          return;
+        }
+        if (data.status === 'error') {
+          logEl.className = 'upload-progress-log upload-progress-log--error';
+          var err = data.error || '未知错误';
+          if (data.error_detail) err += '\n\n' + data.error_detail;
+          logEl.textContent = err;
+          closeBtn.hidden = false;
+          if (spinner) spinner.style.display = 'none';
+          if (timer) clearInterval(timer);
+          return;
+        }
+        pollTimer = setTimeout(function () { poll(jobId); }, 1200);
+      })
+      .catch(function (e) {
+        logEl.className = 'upload-progress-log upload-progress-log--error';
+        logEl.textContent = '轮询失败：' + (e && e.message ? e.message : String(e));
+        closeBtn.hidden = false;
+        if (spinner) spinner.style.display = 'none';
+        if (timer) clearInterval(timer);
+      });
+  }
+
+  closeBtn.addEventListener('click', hideOverlay);
+  window.addEventListener('pageshow', function (ev) {
+    if (ev.persisted) {
+      submitBtn.disabled = false;
+      submitBtn.removeAttribute('aria-busy');
+    }
+  });
+
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+    if (submitBtn.disabled) return;
+    var csrfEl = form.querySelector('[name=csrfmiddlewaretoken]');
+    var csrf = csrfEl ? csrfEl.value : getCookie('csrftoken');
+    submitBtn.disabled = true;
+    submitBtn.setAttribute('aria-busy', 'true');
+    var fd = new FormData(form);
+    fetch(startUrl, {
+      method: 'POST',
+      body: fd,
+      credentials: 'same-origin',
+      headers: { 'X-CSRFToken': csrf }
+    })
+      .then(function (r) {
+        return r.json().then(function (data) {
+          if (!r.ok) {
+            var e = new Error(data.error || ('请求失败 HTTP ' + r.status));
+            if (data && data.job_id) e.jobId = data.job_id;
+            throw e;
+          }
+          return data;
+        });
+      })
+      .then(function (data) {
+        if (!data.ok) throw new Error(data.error || '启动失败');
+        showOverlay();
+        poll(data.job_id);
+      })
+      .catch(function (err) {
+        submitBtn.disabled = false;
+        submitBtn.removeAttribute('aria-busy');
+        var msg = err.message || String(err);
+        alert(msg);
+        if (err.jobId) {
+          showOverlay();
+          poll(err.jobId);
+        }
+      });
+  });
+
+  // 支持从其它页面跳转到本页并直接附带 job_id 查看进度
+  try {
+    var qs = new URLSearchParams(window.location.search || '');
+    var jid = qs.get('job_id');
+    if (jid) {
+      showOverlay();
+      poll(jid);
+    }
+  } catch (e) {}
+})();
+</script>
+{% endblock %}

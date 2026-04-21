@@ -1,0 +1,16 @@
+Django>=5.2,<6
+django-redis>=5.4,<6
+openpyxl>=3.1,<4
+Pillow~=12.1.1
+PyMySQL>=1.1,<2
+
+requests~=2.33.1
+bs4~=0.0.2
+beautifulsoup4~=4.14.3
+playwright~=1.58.0
+aiohttp~=3.13.5
+aiofiles~=25.1.0
+pandas~=2.3.3
+numpy~=2.2.6
+lxml~=6.0.2
+httpx~=0.28.1

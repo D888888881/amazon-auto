@@ -1,0 +1,134 @@
+{% extends 'base.html' %}
+{% load static %}
+{% block extra_head %}
+<link rel="stylesheet" href="{% static 'css/pending.css' %}">
+{% endblock %}
+{% block title %}注册审核 — Amazon 自动化{% endblock %}
+{% block body_class %}page-pending{% endblock %}
+{% block main_class %}main--pending{% endblock %}
+{% block content %}
+<div class="pending-shell">
+    <header class="pending-hero">
+        <div class="pending-hero__text">
+            <p class="pending-hero__eyebrow">超级管理员</p>
+            <h1 class="pending-hero__title">注册审核</h1>
+            <p class="pending-hero__lead">处理新用户注册申请。通过后账号即可登录；拒绝后该账号将无法登录。</p>
+        </div>
+        <div class="pending-hero__stat" aria-live="polite">
+            <span class="pending-hero__stat-value">{{ pending_count }}</span>
+            <span class="pending-hero__stat-label">待处理</span>
+        </div>
+    </header>
+
+    {% if messages %}
+    <ul class="messages pending-toast">
+        {% for message in messages %}
+        <li class="{{ message.tags }}">{{ message }}</li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+
+    {% if pending %}
+    <section class="pending-panel" aria-labelledby="pending-list-heading">
+        <div class="pending-panel__bar">
+            <h2 class="pending-panel__title" id="pending-list-heading">申请列表</h2>
+            <span class="pending-panel__hint">共 {{ pending_count }} 条，按申请时间从早到晚排列</span>
+        </div>
+        <div class="pending-table-scroll">
+            <table class="pending-table">
+                <thead>
+                    <tr>
+                        <th class="pending-table__col-user">用户</th>
+                        <th class="pending-table__col-email">邮箱</th>
+                        <th class="pending-table__col-time">申请时间</th>
+                        <th class="pending-table__col-actions">操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for p in pending %}
+                    <tr class="pending-table__row">
+                        <td>
+                            <div class="pending-user">
+                                <span class="pending-user__avatar" aria-hidden="true">{{ p.user.username|slice:":1"|upper }}</span>
+                                <span class="pending-user__name">{{ p.user.username }}</span>
+                            </div>
+                        </td>
+                        <td class="pending-table__mono">{{ p.user.email|default:"—" }}</td>
+                        <td>
+                            <time class="pending-time" datetime="{{ p.user.date_joined|date:'c' }}">{{ p.user.date_joined|date:"Y-m-d H:i" }}</time>
+                        </td>
+                        <td class="pending-table__actions">
+                            <form method="post" class="pending-inline-form">
+                                {% csrf_token %}
+                                <input type="hidden" name="user_id" value="{{ p.user.id }}">
+                                <button type="submit" name="action" value="approve" class="pending-btn pending-btn--ok">同意</button>
+                            </form>
+                            <form method="post" class="pending-inline-form">
+                                {% csrf_token %}
+                                <input type="hidden" name="user_id" value="{{ p.user.id }}">
+                                <button type="submit" name="action" value="reject" class="pending-btn pending-btn--no">拒绝</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+    {% else %}
+    <div class="pending-empty-card">
+        <div class="pending-empty-card__icon" aria-hidden="true">✓</div>
+        <h2 class="pending-empty-card__title">暂无待审核申请</h2>
+        <p class="pending-empty-card__text">新用户提交注册后，将在此处显示。您可随时返回本页处理。</p>
+    </div>
+    {% endif %}
+
+    <section class="pending-panel pending-panel--history" aria-labelledby="pending-history-heading">
+        <div class="pending-panel__bar">
+            <h2 class="pending-panel__title" id="pending-history-heading">审核记录</h2>
+            <span class="pending-panel__hint">{% if review_history_total %}共 {{ review_history_total }} 条{% if review_history_total > 100 %}，仅展示最新 100 条{% endif %}{% else %}尚无记录{% endif %}</span>
+        </div>
+        {% if review_history %}
+        <div class="pending-table-scroll">
+            <table class="pending-table pending-table--history">
+                <thead>
+                    <tr>
+                        <th class="pending-table__col-user">用户</th>
+                        <th class="pending-table__col-email">邮箱</th>
+                        <th>结果</th>
+                        <th>审核人</th>
+                        <th class="pending-table__col-time">审核时间</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for h in review_history %}
+                    <tr class="pending-table__row">
+                        <td>
+                            <div class="pending-user">
+                                <span class="pending-user__avatar" aria-hidden="true">{{ h.user.username|slice:":1"|upper }}</span>
+                                <span class="pending-user__name">{{ h.user.username }}</span>
+                            </div>
+                        </td>
+                        <td class="pending-table__mono">{{ h.user.email|default:"—" }}</td>
+                        <td>
+                            {% if h.registration_status == 'approved' %}
+                            <span class="pending-badge pending-badge--ok">已通过</span>
+                            {% else %}
+                            <span class="pending-badge pending-badge--no">已拒绝</span>
+                            {% endif %}
+                        </td>
+                        <td class="pending-table__mono">{% if h.reviewed_by %}{{ h.reviewed_by.username }}{% else %}—{% endif %}</td>
+                        <td>
+                            <time class="pending-time" datetime="{{ h.reviewed_at|date:'c' }}">{{ h.reviewed_at|date:"Y-m-d H:i" }}</time>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <p class="pending-history-empty">暂无审核记录（通过或拒绝用户后，将在此显示）。</p>
+        {% endif %}
+    </section>
+</div>
+{% endblock %}

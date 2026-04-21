@@ -1,0 +1,387 @@
+/* 注册审核页专用（在模板中于 app.css 之后加载，避免被其它规则覆盖） */
+
+.main.main--pending {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: clamp(1.25rem, 3vw, 2.5rem);
+  background: linear-gradient(165deg, #f4f6fb 0%, #eef1f8 45%, #f8fafc 100%);
+  min-height: calc(100vh - 3.5rem);
+}
+
+.pending-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.pending-hero {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: 1.5rem;
+  padding: clamp(1.5rem, 3vw, 2rem) clamp(1.25rem, 3vw, 2rem);
+  border-radius: 16px;
+  background: linear-gradient(135deg, #0f172a 0%, #1e293b 48%, #0f172a 100%);
+  color: #f1f5f9;
+  box-shadow:
+    0 4px 6px -1px rgba(15, 23, 42, 0.08),
+    0 20px 40px -12px rgba(15, 23, 42, 0.25);
+  position: relative;
+  overflow: hidden;
+}
+
+.pending-hero::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse 80% 60% at 100% 0%, rgba(51, 112, 255, 0.18), transparent 55%);
+  pointer-events: none;
+}
+
+.pending-hero__text {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  min-width: min(100%, 280px);
+}
+
+.pending-hero__eyebrow {
+  margin: 0 0 0.5rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #94a3b8;
+}
+
+.pending-hero__title {
+  margin: 0 0 0.6rem;
+  font-size: clamp(1.5rem, 3.5vw, 1.85rem);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.pending-hero__lead {
+  margin: 0;
+  max-width: 36rem;
+  font-size: 0.95rem;
+  line-height: 1.65;
+  color: #cbd5e1;
+}
+
+.pending-hero__stat {
+  position: relative;
+  z-index: 1;
+  align-self: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-width: 112px;
+  padding: 1.1rem 1.35rem;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  backdrop-filter: blur(8px);
+}
+
+.pending-hero__stat-value {
+  font-size: 2rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1;
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+}
+
+.pending-hero__stat-label {
+  margin-top: 0.35rem;
+  font-size: 0.75rem;
+  color: #94a3b8;
+  letter-spacing: 0.06em;
+}
+
+.pending-toast {
+  margin: 0 !important;
+}
+
+.pending-panel {
+  border-radius: 14px;
+  background: #fff;
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.04),
+    0 12px 32px -8px rgba(15, 23, 42, 0.08);
+  overflow: hidden;
+}
+
+.pending-panel__bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid #f1f5f9;
+  background: linear-gradient(180deg, #fafbfc 0%, #fff 100%);
+}
+
+.pending-panel__title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #0f172a;
+  letter-spacing: -0.01em;
+}
+
+.pending-panel__hint {
+  font-size: 0.8rem;
+  color: #94a3b8;
+}
+
+.pending-table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.pending-table {
+  width: 100%;
+  min-width: 640px;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 0.9rem;
+}
+
+.pending-table thead th {
+  padding: 0.75rem 1.25rem;
+  text-align: left;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #64748b;
+  background: #f8fafc;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.pending-table tbody td {
+  padding: 1rem 1.25rem;
+  vertical-align: middle;
+  border-bottom: 1px solid #f1f5f9;
+  color: #334155;
+}
+
+.pending-table__row:last-child td {
+  border-bottom: none;
+}
+
+.pending-table__row:hover td {
+  background: #fafbfc;
+}
+
+.pending-table__col-user {
+  min-width: 200px;
+}
+
+.pending-table__col-email {
+  min-width: 180px;
+}
+
+.pending-table__col-time {
+  min-width: 150px;
+  white-space: nowrap;
+}
+
+.pending-table__col-actions {
+  width: 1%;
+}
+
+.pending-table__mono {
+  font-family: ui-monospace, 'Cascadia Code', 'Segoe UI Mono', monospace;
+  font-size: 0.85rem;
+  color: #475569;
+}
+
+.pending-user {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.pending-user__avatar {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1rem;
+  font-weight: 700;
+  color: #1e40af;
+  background: linear-gradient(145deg, #dbeafe 0%, #e0e7ff 100%);
+  border: 1px solid rgba(59, 130, 246, 0.2);
+}
+
+.pending-user__name {
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.pending-time {
+  font-variant-numeric: tabular-nums;
+  color: #64748b;
+  font-size: 0.88rem;
+}
+
+.pending-table__actions {
+  white-space: nowrap;
+}
+
+.pending-inline-form {
+  display: inline-block;
+  margin-right: 0.4rem;
+}
+
+.pending-inline-form:last-child {
+  margin-right: 0;
+}
+
+.pending-btn {
+  border-radius: 8px;
+  border: 1px solid transparent;
+  padding: 0.4rem 1rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  font: inherit;
+  transition: transform 0.12s ease, box-shadow 0.12s ease, background 0.12s ease;
+}
+
+.pending-btn:hover {
+  transform: translateY(-1px);
+}
+
+.pending-btn:active {
+  transform: translateY(0);
+}
+
+.pending-btn--ok {
+  background: linear-gradient(180deg, #ecfdf5 0%, #d1fae5 100%);
+  border-color: #6ee7b7;
+  color: #047857;
+  box-shadow: 0 1px 2px rgba(4, 120, 87, 0.12);
+}
+
+.pending-btn--ok:hover {
+  box-shadow: 0 4px 12px rgba(4, 120, 87, 0.18);
+}
+
+.pending-btn--no {
+  background: linear-gradient(180deg, #fff 0%, #fef2f2 100%);
+  border-color: #fecaca;
+  color: #b91c1c;
+  box-shadow: 0 1px 2px rgba(185, 28, 28, 0.08);
+}
+
+.pending-btn--no:hover {
+  box-shadow: 0 4px 12px rgba(185, 28, 28, 0.12);
+}
+
+.pending-empty-card {
+  text-align: center;
+  padding: clamp(2.5rem, 6vw, 4rem) 1.5rem;
+  border-radius: 16px;
+  background: #fff;
+  border: 1px dashed #cbd5e1;
+  box-shadow: 0 8px 32px -12px rgba(15, 23, 42, 0.06);
+}
+
+.pending-empty-card__icon {
+  width: 64px;
+  height: 64px;
+  margin: 0 auto 1.25rem;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.75rem;
+  color: #94a3b8;
+  background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+  border: 1px solid #e2e8f0;
+}
+
+.pending-empty-card__title {
+  margin: 0 0 0.5rem;
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: #0f172a;
+  letter-spacing: -0.02em;
+}
+
+.pending-empty-card__text {
+  margin: 0 auto;
+  max-width: 28rem;
+  font-size: 0.92rem;
+  line-height: 1.65;
+  color: #64748b;
+}
+
+.pending-panel--history {
+  margin-top: 0;
+}
+
+.pending-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.22rem 0.6rem;
+  border-radius: 6px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.pending-badge--ok {
+  background: #ecfdf5;
+  color: #047857;
+  border: 1px solid #a7f3d0;
+}
+
+.pending-badge--no {
+  background: #fef2f2;
+  color: #b91c1c;
+  border: 1px solid #fecaca;
+}
+
+.pending-history-empty {
+  margin: 0;
+  padding: 1.5rem 1.25rem 1.75rem;
+  font-size: 0.9rem;
+  color: #94a3b8;
+  text-align: center;
+}
+
+.pending-table--history {
+  min-width: 720px;
+}
+
+@media (max-width: 640px) {
+  .pending-hero {
+    flex-direction: column;
+  }
+
+  .pending-hero__stat {
+    align-self: stretch;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    min-width: 0;
+  }
+
+  .pending-hero__stat-value {
+    font-size: 1.5rem;
+  }
+}
