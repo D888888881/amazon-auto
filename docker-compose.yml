@@ -2,11 +2,10 @@ services:
   db:
     image: mysql:8.0
     restart: unless-stopped
-    environment:
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-auto_amazon}
-      MYSQL_USER: ${MYSQL_USER:-auto_amazon}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-auto_amazon}
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-changeme_root}
+    # 仅用 .env 注入 MYSQL_*，避免宿主机 shell 里 export 过 MYSQL_PASSWORD（含中文）
+    # 在解析 compose 时覆盖 ${MYSQL_PASSWORD} 导致 PyMySQL latin-1 报错
+    env_file:
+      - .env
     volumes:
       - mysql_data:/var/lib/mysql
     command:
@@ -28,12 +27,11 @@ services:
   web:
     build: .
     restart: unless-stopped
+    env_file:
+      - .env
     environment:
       DJANGO_SETTINGS_MODULE: auto_amazon_project.settings
       DB_HOST: db
-      DB_NAME: ${MYSQL_DATABASE:-auto_amazon}
-      DB_USER: ${MYSQL_USER:-auto_amazon}
-      DB_PASSWORD: ${MYSQL_PASSWORD:-auto_amazon}
       DB_PORT: "3306"
       REDIS_HOST: redis
       REDIS_PORT: "6379"

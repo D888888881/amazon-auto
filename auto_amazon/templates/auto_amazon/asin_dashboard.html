@@ -24,6 +24,7 @@
     <form id="dash-batch-form" method="post" action="{% url 'index' %}">
         {% csrf_token %}
         <input type="hidden" name="action" id="dash-action" value="">
+        <input type="hidden" name="delete_with_folder" id="dash-delete-with-folder" value="0">
     </form>
 
     <div class="dash-toolbar">
@@ -220,10 +221,11 @@
                             <a class="dash-btn" href="{% url 'excel' %}?path={{ row.asin|urlencode }}" title="打开该 ASIN 的文件目录">目录</a>
                             {% endif %}
                             {% if not row.ops_readonly %}
-                            <form method="post" action="{% url 'index' %}" style="display:inline" onsubmit="return confirm('确定删除该条记录？');">
+                            <form method="post" action="{% url 'index' %}" style="display:inline" class="js-delete-one-form">
                                 {% csrf_token %}
                                 <input type="hidden" name="action" value="delete_one">
                                 <input type="hidden" name="row_id" value="{{ row.pk }}">
+                                <input type="hidden" name="delete_with_folder" value="0" class="js-delete-with-folder">
                                 <button type="submit" class="dash-btn">删除</button>
                             </form>
                             {% endif %}
@@ -259,6 +261,21 @@
     </div>
     {% endif %}
 </div>
+
+<dialog id="dash-delete-dialog" style="max-width: 420px; border: 1px solid #d1d5db; border-radius: 10px; padding: 1rem 1.1rem;">
+  <form method="dialog" id="dash-delete-dialog-form">
+    <h3 style="margin:0 0 .6rem 0; font-size:1rem;">删除确认</h3>
+    <p id="dash-delete-dialog-text" style="margin:0 0 .65rem 0;">确定删除吗？</p>
+    <label style="display:flex;align-items:center;gap:.5rem;margin:.25rem 0 .9rem;">
+      <input type="checkbox" id="dash-delete-folder-checkbox">
+      <span>同时删除对应 ASIN 文件夹</span>
+    </label>
+    <div style="display:flex;gap:.6rem;justify-content:flex-end;">
+      <button type="button" class="dash-btn" id="dash-delete-cancel">取消</button>
+      <button type="button" class="dash-btn dash-btn--danger" id="dash-delete-confirm">确认删除</button>
+    </div>
+  </form>
+</dialog>
 
 <script>
 (function () {
@@ -384,8 +401,15 @@
   var roiBtn = document.getElementById('dash-batch-roi');
   var batchForm = document.getElementById('dash-batch-form');
   var actionInput = document.getElementById('dash-action');
+  var deleteWithFolderInput = document.getElementById('dash-delete-with-folder');
   var exportBtn = document.getElementById('dash-export-excel');
   var exportUrl = '{% url "dashboard_export_excel" %}';
+  var deleteDialog = document.getElementById('dash-delete-dialog');
+  var deleteDialogText = document.getElementById('dash-delete-dialog-text');
+  var deleteFolderCheckbox = document.getElementById('dash-delete-folder-checkbox');
+  var deleteCancelBtn = document.getElementById('dash-delete-cancel');
+  var deleteConfirmBtn = document.getElementById('dash-delete-confirm');
+  var pendingDeleteSubmit = null;
   var checks = document.querySelectorAll('.dash-row-check');
   function refreshCostPreview(tr) {
     if (!tr) return;
@@ -482,10 +506,62 @@
         disableAll();
         sb.textContent = '计算中...';
       } else if (action === 'delete_batch') {
-        if (!window.confirm('确定删除勾选的记录吗？')) {
-          e.preventDefault();
-          return;
+        e.preventDefault();
+        pendingDeleteSubmit = function () {
+          if (deleteWithFolderInput) {
+            deleteWithFolderInput.value = deleteFolderCheckbox && deleteFolderCheckbox.checked ? '1' : '0';
+          }
+          batchForm.submit();
+        };
+        if (deleteDialogText) deleteDialogText.textContent = '确定删除勾选的记录吗？';
+        if (deleteFolderCheckbox) deleteFolderCheckbox.checked = false;
+        if (deleteDialog && typeof deleteDialog.showModal === 'function') {
+          deleteDialog.showModal();
+        } else {
+          var yes = window.confirm('确定删除勾选的记录吗？');
+          if (!yes) return;
+          var withFolder = window.confirm('是否同时删除对应 ASIN 文件夹？（取消=仅删看板数据）');
+          if (deleteWithFolderInput) deleteWithFolderInput.value = withFolder ? '1' : '0';
+          batchForm.submit();
         }
+      }
+    });
+  }
+  document.querySelectorAll('.js-delete-one-form').forEach(function (f) {
+    f.addEventListener('submit', function (e) {
+      e.preventDefault();
+      pendingDeleteSubmit = function () {
+        var one = f.querySelector('.js-delete-with-folder');
+        if (one) one.value = deleteFolderCheckbox && deleteFolderCheckbox.checked ? '1' : '0';
+        f.submit();
+      };
+      if (deleteDialogText) deleteDialogText.textContent = '确定删除该条记录吗？';
+      if (deleteFolderCheckbox) deleteFolderCheckbox.checked = false;
+      if (deleteDialog && typeof deleteDialog.showModal === 'function') {
+        deleteDialog.showModal();
+      } else {
+        var yes = window.confirm('确定删除该条记录吗？');
+        if (!yes) return;
+        var withFolder = window.confirm('是否同时删除对应 ASIN 文件夹？（取消=仅删看板数据）');
+        var one = f.querySelector('.js-delete-with-folder');
+        if (one) one.value = withFolder ? '1' : '0';
+        f.submit();
+      }
+    });
+  });
+  if (deleteCancelBtn) {
+    deleteCancelBtn.addEventListener('click', function () {
+      pendingDeleteSubmit = null;
+      if (deleteDialog) deleteDialog.close();
+    });
+  }
+  if (deleteConfirmBtn) {
+    deleteConfirmBtn.addEventListener('click', function () {
+      if (deleteDialog) deleteDialog.close();
+      if (typeof pendingDeleteSubmit === 'function') {
+        var fn = pendingDeleteSubmit;
+        pendingDeleteSubmit = null;
+        fn();
       }
     });
   }

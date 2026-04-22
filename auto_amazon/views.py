@@ -544,6 +544,32 @@ def _ops_match(raw: str, lo: float | None, hi: float | None) -> bool:
     return False
 
 
+def _delete_asin_folder_if_allowed(user, asin: str) -> tuple[bool, str]:
+    """
+    删除 media/file/<ASIN> 目录。
+    返回 (是否成功删除, 说明信息)。
+    普通用户仅可删除本人导入过的 ASIN 目录；超管可删除任意 ASIN 目录。
+    """
+    asin = normalize_asin(asin)
+    if not asin:
+        return False, 'ASIN 无效'
+    if not re.match(r'^B0[A-Z0-9]{8}$', asin):
+        return False, f'ASIN 非法：{asin}'
+    if not getattr(user, 'is_superuser', False):
+        if not ImportedMediaPath.objects.filter(user=user, rel_path=asin).exists():
+            return False, f'无权限删除 ASIN 文件夹：{asin}（仅可删除本人导入目录）'
+    d = media_root() / asin
+    if not d.exists():
+        ImportedMediaPath.objects.filter(Q(rel_path=asin) | Q(rel_path__startswith=f'{asin}/')).delete()
+        return True, f'{asin} 目录不存在，已清理导入记录'
+    try:
+        shutil.rmtree(d)
+    except OSError as e:
+        return False, f'删除 {asin} 目录失败：{e}'
+    ImportedMediaPath.objects.filter(Q(rel_path=asin) | Q(rel_path__startswith=f'{asin}/')).delete()
+    return True, f'已删除 ASIN 文件夹：{asin}'
+
+
 @login_required
 def index(request):
     if request.method == 'POST':
@@ -551,8 +577,29 @@ def index(request):
         if action == 'delete_batch':
             ids = request.POST.getlist('row_ids')
             if ids:
+                delete_with_folder = str(request.POST.get('delete_with_folder') or '').lower() in (
+                    '1',
+                    'true',
+                    'on',
+                    'yes',
+                )
+                rows = list(AsinDashboardRow.objects.filter(user=request.user, pk__in=ids).only('asin'))
+                asins = sorted({normalize_asin(r.asin) for r in rows if r.asin})
                 AsinDashboardRow.objects.filter(user=request.user, pk__in=ids).delete()
                 messages.success(request, f'已删除 {len(ids)} 条记录。')
+                if delete_with_folder and asins:
+                    ok_cnt = 0
+                    err_msgs: list[str] = []
+                    for asin in asins:
+                        ok, msg = _delete_asin_folder_if_allowed(request.user, asin)
+                        if ok:
+                            ok_cnt += 1
+                        else:
+                            err_msgs.append(msg)
+                    if ok_cnt:
+                        messages.success(request, f'已同步删除 {ok_cnt} 个 ASIN 文件夹。')
+                    for m in err_msgs[:5]:
+                        messages.warning(request, m)
         elif action == 'calc_roi_selected':
             ids = request.POST.getlist('row_ids')
             if not ids:
@@ -661,8 +708,22 @@ def index(request):
         elif action == 'delete_one':
             rid = request.POST.get('row_id')
             if rid:
+                delete_with_folder = str(request.POST.get('delete_with_folder') or '').lower() in (
+                    '1',
+                    'true',
+                    'on',
+                    'yes',
+                )
+                row = AsinDashboardRow.objects.filter(user=request.user, pk=rid).only('asin').first()
+                asin = normalize_asin(row.asin) if row and row.asin else ''
                 AsinDashboardRow.objects.filter(user=request.user, pk=rid).delete()
                 messages.success(request, '已删除该条记录。')
+                if delete_with_folder and asin:
+                    ok, msg = _delete_asin_folder_if_allowed(request.user, asin)
+                    if ok:
+                        messages.success(request, msg)
+                    else:
+                        messages.warning(request, msg)
         return redirect('index')
 
     sort_key = request.GET.get('sort', 'updated_at')
@@ -1177,6 +1238,19 @@ def _discover_local_asins(force_recompute: bool) -> tuple[list[str], list[str]]:
     return sorted(pending), sorted(skipped)
 
 
+def _compute_allowed_asins_for_user(user) -> set[str] | None:
+    """
+    计算当前用户可参与 ROI 计算的 ASIN 集合。
+    - 超管：None（不限制）
+    - 普通用户：本人导入 + 被分配
+    """
+    if getattr(user, 'is_superuser', False):
+        return None
+    imported = user_imported_asin_codes(user)
+    assigned = {normalize_asin(a) for a in user_assigned_asin_codes(user)}
+    return {a for a in (imported | assigned) if a}
+
+
 @login_required
 @require_POST
 def upload_start(request):
@@ -1198,6 +1272,10 @@ def upload_start(request):
         return JsonResponse({'ok': False, 'error': '请先勾选至少一个待计算 ASIN。'}, status=400)
     include_recomputed = str(request.POST.get('recompute_existing') or '').lower() in ('1', 'true', 'on', 'yes')
     pending, skipped = _discover_local_asins(force_recompute=include_recomputed)
+    allowed_asins = _compute_allowed_asins_for_user(request.user)
+    if allowed_asins is not None:
+        pending = [a for a in pending if a in allowed_asins]
+        skipped = [a for a in skipped if a in allowed_asins]
     allowed_set = set(pending)
     asins = sorted({a for a in selected if a in allowed_set})
     if not asins:
@@ -1270,6 +1348,10 @@ def upload_page(request):
 def compute_roi_page(request):
     include_recomputed = str(request.GET.get('recompute_existing') or '').lower() in ('1', 'true', 'on', 'yes')
     pending_asins, skipped_asins = _discover_local_asins(force_recompute=False)
+    allowed_asins = _compute_allowed_asins_for_user(request.user)
+    if allowed_asins is not None:
+        pending_asins = [a for a in pending_asins if a in allowed_asins]
+        skipped_asins = [a for a in skipped_asins if a in allowed_asins]
     all_asins = sorted(set(pending_asins + skipped_asins)) if include_recomputed else pending_asins
     asin_kw = (request.GET.get('asin_kw') or '').strip().upper()
     if asin_kw:

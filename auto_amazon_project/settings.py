@@ -26,6 +26,8 @@ SECRET_KEY = 'django-insecure-699nyf1=qu0=-apikwr+76t#)b67j*_n3h^x2xpc2n0cq93wl^
 DEBUG = True
 
 ALLOWED_HOSTS = ['*']
+_csrf_origins = os.environ.get('CSRF_TRUSTED_ORIGINS', '')
+CSRF_TRUSTED_ORIGINS = [item.strip() for item in _csrf_origins.split(',') if item.strip()]
 
 
 # Application definition
@@ -78,9 +80,10 @@ WSGI_APPLICATION = 'auto_amazon_project.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.mysql',
-        'NAME': os.environ.get('DB_NAME', 'auto_amazon'),
-        'USER': os.environ.get('DB_USER', 'root'),
-        'PASSWORD': os.environ.get('DB_PASSWORD', '201314'),
+        # 兼容 Docker 场景：优先读 DB_*，缺失时回退到 MYSQL_*。
+        'NAME': os.environ.get('DB_NAME') or os.environ.get('MYSQL_DATABASE', 'auto_amazon'),
+        'USER': os.environ.get('DB_USER') or os.environ.get('MYSQL_USER', 'root'),
+        'PASSWORD': os.environ.get('DB_PASSWORD') or os.environ.get('MYSQL_PASSWORD', '201314'),
         'HOST': os.environ.get('DB_HOST', '127.0.0.1'),
         'PORT': os.environ.get('DB_PORT', '3306'),
         'OPTIONS': {

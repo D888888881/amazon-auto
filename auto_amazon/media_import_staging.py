@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import tempfile
 import uuid
 import zipfile
 from pathlib import Path
@@ -13,7 +14,9 @@ MAX_IMPORT_BYTES = int(getattr(settings, 'EXCEL_IMPORT_MAX_BYTES', 550 * 1024 * 
 
 
 def staging_dir_for(user_id: int, staging_id: str) -> Path:
-    p = Path(settings.MEDIA_ROOT).resolve() / '_excel_import_staging' / str(user_id) / staging_id
+    # 分片临时文件放在系统临时目录，避免占用 media/file 业务目录空间。
+    base = Path(tempfile.gettempdir()) / 'auto_amazon_excel_import_staging'
+    p = base.resolve() / str(user_id) / staging_id
     p.mkdir(parents=True, exist_ok=True)
     return p
 
