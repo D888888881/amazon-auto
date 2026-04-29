@@ -402,7 +402,7 @@ class AsyncSifAPI:
 # ==================== 使用示例 ====================
 async def sif_main(asins: list[str]):
     # 优先从环境变量读取 JWT，避免把 token 写死在仓库里
-    auth_token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ3ZWNoYXRpZCI6Im90SkwwNXc4MzRhenJ0Z3NRTVJDV0x5NmsxQjgiLCJ1c2VyU2FsdCI6InA4RHVzZVI2IiwiZXhwIjoxNzc3MTg4MjAxLCJ1c2VyaWQiOiJqbXhOMTRiMW45NDMzM3BRNzAzSUFld3EiLCJwbGF0Zm9ybSI6Im9mZmljaWFsIn0.NOia-F2D2MHapt5UyXcTQiVrdsjeIcmrMfU3HAveh1k"
+    auth_token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ3ZWNoYXRpZCI6Im90SkwwNXc4MzRhenJ0Z3NRTVJDV0x5NmsxQjgiLCJ1c2VyU2FsdCI6InA4RHVzZVI2IiwiZXhwIjoxNzc3ODc4ODcxLCJ1c2VyaWQiOiJqbXhOMTRiMW45NDMzM3BRNzAzSUFld3EiLCJwbGF0Zm9ybSI6Im9mZmljaWFsIn0.prM3cs1kAxdhhxSIvYpbg8_SxIiR9sP8VfCfa4RDNqk"
 
     cookies = {
         "Hm_lvt_8d71bef53342fdb284ff83594f3b97ff": "1773713262",

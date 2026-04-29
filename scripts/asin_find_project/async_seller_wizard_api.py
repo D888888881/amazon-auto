@@ -970,6 +970,7 @@ async def save_roi_us_pack(nodeLabelPath: str,
     # 单件采购+单件头程
     unit_head_price = unit_purchase + head_distance
     target_asin_url = f'https://www.amazon.com/DP/{asin}'
+    link1688 = 'https://aibuy.1688.com/landingpage/home/inventory/products.html?bizType=selectionTool&customerId=sellerspriteLP&lang=zh&currency=CNY'
     imageUrl = None
     try:
         imageUrl = asin_info_dict.get('imageUrl', ' ')
@@ -1009,7 +1010,7 @@ async def save_roi_us_pack(nodeLabelPath: str,
     middle_fields = [
         '广告预算', '广告cpc', '广告点击', '转化率', '月出单量', '出单量',
         '日利润1', '日利润2', '月利润1', '月利润2', '广告费占比','图片链接',
-        'asin链接'
+        'asin链接','1688链接'
     ]
     middle_values = [
         f"{ad_budget:.2f}",
@@ -1025,11 +1026,12 @@ async def save_roi_us_pack(nodeLabelPath: str,
         f"{ad_cost_ratio:.2f}" if ad_cost_ratio is not None else 'N/A',
         f"{imageUrl}" if imageUrl is not None else 'N/A',
         f"{target_asin_url}" if target_asin_url is not None else 'N/A',
+        f"{link1688}" if target_asin_url is not None else 'N/A'
     ]
     middle_units = [
         '$', '$', '次', '%', '单', '单',
         '$', '￥', '$', '￥', '%','a',
-        'a'
+        'a','a'
     ]
 
     # 右侧：流量与利润指标
