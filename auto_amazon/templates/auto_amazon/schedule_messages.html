@@ -1,0 +1,95 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block title %}定时消息 — Amazon 自动化{% endblock %}
+
+{% block extra_head %}
+<link rel="stylesheet" href="{% static 'css/schedule_messages.css' %}">
+{% endblock %}
+
+{% block main_class %}main--messages{% endblock %}
+
+{% block content %}
+<section class="msg-hero">
+    <h1 class="msg-hero__title">定时任务消息</h1>
+    <p class="msg-hero__sub">展示重点关注 ASIN 定时重算后的指标对比与预警。消息发送给 ASIN 上传者（或数据归属用户）。</p>
+</section>
+
+<form method="get" class="msg-filter">
+    <label>
+        ASIN
+        <input type="text" name="asin" value="{{ filters.asin }}" placeholder="B0XXXXXXXX">
+    </label>
+    <label>
+        预警
+        <select name="alert">
+            <option value="">全部</option>
+            <option value="yes" {% if filters.alert == 'yes' %}selected{% endif %}>开始预警</option>
+            <option value="no" {% if filters.alert == 'no' %}selected{% endif %}>未预警</option>
+        </select>
+    </label>
+    <button type="submit" class="btn btn-primary">筛选</button>
+    <a href="{% url 'schedule_messages' %}" class="btn btn-ghost">重置</a>
+</form>
+
+<div class="msg-table-wrap">
+    <table class="msg-table">
+        <thead>
+            <tr>
+                <th>发送时间</th>
+                <th>ASIN</th>
+                <th>当前去广告投产比</th>
+                <th>最新去广告投产比</th>
+                <th>对比</th>
+                <th>当前广告难度</th>
+                <th>最新广告难度</th>
+                <th>对比</th>
+                <th>当前运营难度</th>
+                <th>最新运营难度</th>
+                <th>对比</th>
+                <th>是否预警</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for m in page_obj %}
+            <tr class="{% if m.alert_status == 'alert' %}msg-row--alert{% endif %}">
+                <td>{{ m.sent_at|date:"Y-m-d H:i" }}</td>
+                <td><code>{{ m.asin }}</code></td>
+                <td>{% if m.curr_ad_roi is not None %}{{ m.curr_ad_roi|floatformat:2 }}%{% else %}—{% endif %}</td>
+                <td>{% if m.latest_ad_roi is not None %}{{ m.latest_ad_roi|floatformat:2 }}%{% else %}—{% endif %}</td>
+                <td class="msg-delta">{% if m.delta_ad_roi_text %}{{ m.delta_ad_roi_text }}{% else %}—{% endif %}</td>
+                <td>{% if m.curr_ad_difficulty is not None %}{{ m.curr_ad_difficulty|floatformat:2 }}{% else %}—{% endif %}</td>
+                <td>{% if m.latest_ad_difficulty is not None %}{{ m.latest_ad_difficulty|floatformat:2 }}{% else %}—{% endif %}</td>
+                <td class="msg-delta">{% if m.delta_ad_difficulty_text %}{{ m.delta_ad_difficulty_text }}{% else %}—{% endif %}</td>
+                <td>{% if m.curr_ops_difficulty is not None %}{{ m.curr_ops_difficulty|floatformat:2 }}%{% else %}—{% endif %}</td>
+                <td>{% if m.latest_ops_difficulty is not None %}{{ m.latest_ops_difficulty|floatformat:2 }}%{% else %}—{% endif %}</td>
+                <td class="msg-delta">{% if m.delta_ops_difficulty_text %}{{ m.delta_ops_difficulty_text }}{% else %}—{% endif %}</td>
+                <td>
+                    {% if m.alert_status == 'alert' %}
+                    <span class="msg-badge msg-badge--alert">开始预警</span>
+                    {% else %}
+                    <span class="msg-badge msg-badge--normal">未预警</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% empty %}
+            <tr>
+                <td colspan="12" class="msg-empty">暂无定时任务消息</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+{% if page_obj.paginator.num_pages > 1 %}
+<nav class="msg-pager" aria-label="分页">
+    {% if page_obj.has_previous %}
+    <a href="?page={{ page_obj.previous_page_number }}&asin={{ filters.asin }}&alert={{ filters.alert }}">上一页</a>
+    {% endif %}
+    <span>第 {{ page_obj.number }} / {{ page_obj.paginator.num_pages }} 页</span>
+    {% if page_obj.has_next %}
+    <a href="?page={{ page_obj.next_page_number }}&asin={{ filters.asin }}&alert={{ filters.alert }}">下一页</a>
+    {% endif %}
+</nav>
+{% endif %}
+{% endblock %}

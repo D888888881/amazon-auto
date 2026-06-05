@@ -37,6 +37,10 @@ class UserProfile(models.Model):
 class AsinDashboardRow(models.Model):
     """上传分析后的 ASIN 行数据（每行一个 ASIN）。"""
 
+    class FollowStatus(models.TextChoices):
+        NORMAL = 'normal', '未关注'
+        PRIORITY = 'priority', '重点关注'
+
     user = models.ForeignKey(
         User,
         on_delete=models.CASCADE,
@@ -60,6 +64,15 @@ class AsinDashboardRow(models.Model):
     product_grade = models.CharField('产品等级', max_length=1)
     sales_trend_json = models.TextField('趋势 JSON', blank=True)
     exchange_rate = models.FloatField('汇率', null=True, blank=True)
+    follow_status = models.CharField(
+        '关注',
+        max_length=16,
+        choices=FollowStatus.choices,
+        default=FollowStatus.NORMAL,
+        db_index=True,
+    )
+    last_scheduled_roi_at = models.DateTimeField('上次定时ROI', null=True, blank=True, db_index=True)
+    last_scheduled_ad_at = models.DateTimeField('上次定时广告难度', null=True, blank=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -158,3 +171,150 @@ class ImportedMediaPath(models.Model):
 
     def __str__(self) -> str:
         return self.rel_path
+
+
+class AsinUploadBatch(models.Model):
+    """一次 ASIN 文件上传记录（列表页每一行）。"""
+
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='asin_upload_batches',
+        verbose_name='上传用户',
+    )
+    source_filename = models.CharField('源文件名', max_length=255, blank=True)
+    total_in_file = models.PositiveIntegerField('文件内 ASIN 数', default=0)
+    new_count = models.PositiveIntegerField('新增 ASIN 数', default=0)
+    skipped_count = models.PositiveIntegerField('跳过重复数', default=0)
+    is_downloaded = models.BooleanField('是否已下载', default=False)
+    downloaded_at = models.DateTimeField('下载时间', null=True, blank=True)
+    downloaded_by = models.ForeignKey(
+        User,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='asin_batch_downloads',
+        verbose_name='下载人',
+    )
+    created_at = models.DateTimeField('上传时间', auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+        verbose_name = 'ASIN 上传批次'
+        verbose_name_plural = 'ASIN 上传批次'
+
+    def __str__(self) -> str:
+        return f'{self.user.username} · {self.new_count} · {self.created_at:%Y-%m-%d %H:%M}'
+
+
+class AsinCatalogItem(models.Model):
+    """全局 ASIN 库（用于上传去重）。"""
+
+    asin = models.CharField(max_length=32, unique=True, db_index=True)
+    batch = models.ForeignKey(
+        AsinUploadBatch,
+        on_delete=models.CASCADE,
+        related_name='items',
+        verbose_name='所属批次',
+    )
+    uploaded_by = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='asin_catalog_items',
+        verbose_name='上传用户',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at', 'asin']
+        verbose_name = 'ASIN 库条目'
+        verbose_name_plural = 'ASIN 库条目'
+
+    def __str__(self) -> str:
+        return self.asin
+
+
+class ScheduledJobLog(models.Model):
+    """定时任务执行日志（便于排查稳定性问题）。"""
+
+    class JobType(models.TextChoices):
+        ROI = 'roi', 'ROI'
+        AD_DIFFICULTY = 'ad_difficulty', '广告难度'
+        COMBINED = 'combined', '组合'
+
+    class Status(models.TextChoices):
+        SUCCESS = 'success', '成功'
+        PARTIAL = 'partial', '部分成功'
+        FAILED = 'failed', '失败'
+        SKIPPED = 'skipped', '跳过'
+
+    job_type = models.CharField(max_length=32, choices=JobType.choices)
+    status = models.CharField(max_length=16, choices=Status.choices)
+    asin_list = models.JSONField(default=list, blank=True)
+    detail = models.TextField(blank=True)
+    started_at = models.DateTimeField(auto_now_add=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-started_at', '-id']
+        verbose_name = '定时任务日志'
+        verbose_name_plural = '定时任务日志'
+
+    def __str__(self) -> str:
+        return f'{self.get_job_type_display()} · {self.get_status_display()}'
+
+
+class ScheduledTaskMessage(models.Model):
+    """定时任务完成后推送给 ASIN 上传者的消息。"""
+
+    class AlertStatus(models.TextChoices):
+        NORMAL = 'normal', '未预警'
+        ALERT = 'alert', '开始预警'
+
+    recipient = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='scheduled_task_messages',
+        verbose_name='接收用户',
+    )
+    asin = models.CharField(max_length=32, db_index=True)
+    dashboard_row = models.ForeignKey(
+        AsinDashboardRow,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='schedule_messages',
+    )
+    curr_ad_roi = models.FloatField('当前去广告投产比', null=True, blank=True)
+    curr_ad_difficulty = models.FloatField('当前广告难度', null=True, blank=True)
+    curr_ops_difficulty = models.FloatField('当前运营难度', null=True, blank=True)
+    latest_ad_roi = models.FloatField('最新去广告投产比', null=True, blank=True)
+    latest_ad_difficulty = models.FloatField('最新广告难度', null=True, blank=True)
+    latest_ops_difficulty = models.FloatField('最新运营难度', null=True, blank=True)
+    delta_ad_roi = models.FloatField('对比去广告投产比', null=True, blank=True)
+    delta_ad_difficulty = models.FloatField('对比广告难度', null=True, blank=True)
+    delta_ops_difficulty = models.FloatField('对比运营难度', null=True, blank=True)
+    delta_ad_roi_text = models.CharField(max_length=32, blank=True)
+    delta_ad_difficulty_text = models.CharField(max_length=32, blank=True)
+    delta_ops_difficulty_text = models.CharField(max_length=32, blank=True)
+    alert_status = models.CharField(
+        max_length=16,
+        choices=AlertStatus.choices,
+        default=AlertStatus.NORMAL,
+    )
+    sent_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    job_log = models.ForeignKey(
+        ScheduledJobLog,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='messages',
+    )
+
+    class Meta:
+        ordering = ['-sent_at', '-id']
+        verbose_name = '定时任务消息'
+        verbose_name_plural = '定时任务消息'
+
+    def __str__(self) -> str:
+        return f'{self.asin} → {self.recipient_id}'

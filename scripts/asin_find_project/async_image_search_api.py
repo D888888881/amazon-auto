@@ -220,4 +220,4 @@ async def async_price_info_main(image_path, _m_h5_tk, _m_h5_tk_enc):
 
 
 if __name__ == "__main__":
-    asyncio.run(async_price_info_main("images/B0FWJ8HNCB.jpg", "cf27941be4bdc812d693957f03dfcd73_1776050110991", "0a6e88ee9b532cd5de05daf00d3e36bc"))
+    asyncio.run(async_price_info_main("images/B0F6MTPQVG.jpg", "da3c4d7d59b3b4ba242dbaa98d60f5ec_1780649370650", "f1c2182e0e2424b378482a13118e9d35"))

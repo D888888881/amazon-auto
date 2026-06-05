@@ -10,6 +10,8 @@ from typing import Callable
 
 from django.conf import settings
 
+from .seller_unlock import execute_with_seller_unlock_retry
+
 
 def _parse_stdout_json(text: str, stderr_lines: list[str]) -> dict:
     """解析子进程 stdout；允许 BOM、前后空白，或混有杂项时提取第一个 JSON 对象/数组。"""
@@ -47,15 +49,12 @@ def _parse_stdout_json(text: str, stderr_lines: list[str]) -> dict:
     return data
 
 
-def run_seller_wizard(
+def _run_seller_wizard_subprocess(
     asins: list[str] | None,
     parity: float,
     cost_overrides: dict | None = None,
     on_stderr_line: Callable[[str], None] | None = None,
 ) -> dict:
-    """
-    运行分析子进程。可选 on_stderr_line 用于实时接收子进程 stderr 每一行（含脚本 print 日志）。
-    """
     base = Path(settings.BASE_DIR).resolve()
     runner = base / 'scripts' / 'asin_find_project' / 'django_runner_seller_wizard.py'
     if not runner.is_file():
@@ -112,11 +111,10 @@ def run_seller_wizard(
     return _parse_stdout_json(out, stderr_lines)
 
 
-def run_ad_difficulty_for_asins(
+def _run_ad_difficulty_subprocess(
     asins: list[str],
     on_stderr_line: Callable[[str], None] | None = None,
 ) -> dict:
-    """按勾选 ASIN 触发广告难度计算（仅更新 ranking_percent 相关）。"""
     base = Path(settings.BASE_DIR).resolve()
     runner = base / 'scripts' / 'asin_find_project' / 'django_runner_ad_difficulty.py'
     if not runner.is_file():
@@ -167,3 +165,33 @@ def run_ad_difficulty_for_asins(
 
     out = stdout.decode('utf-8', errors='replace')
     return _parse_stdout_json(out, stderr_lines)
+
+
+def run_seller_wizard(
+    asins: list[str] | None,
+    parity: float,
+    cost_overrides: dict | None = None,
+    on_stderr_line: Callable[[str], None] | None = None,
+) -> dict:
+    """
+    运行 ROI 分析子进程。
+    遇 rank-login-user（子账号被禁）时自动执行解禁并重试一次。
+    """
+    return execute_with_seller_unlock_retry(
+        lambda: _run_seller_wizard_subprocess(asins, parity, cost_overrides, on_stderr_line),
+        on_log=on_stderr_line,
+    )
+
+
+def run_ad_difficulty_for_asins(
+    asins: list[str],
+    on_stderr_line: Callable[[str], None] | None = None,
+) -> dict:
+    """
+    运行广告难度计算子进程。
+    遇 rank-login-user（子账号被禁）时自动执行解禁并重试一次。
+    """
+    return execute_with_seller_unlock_retry(
+        lambda: _run_ad_difficulty_subprocess(asins, on_stderr_line),
+        on_log=on_stderr_line,
+    )

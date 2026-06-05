@@ -106,7 +106,7 @@ async def async_fba_batch(asin_list, max_concurrent=5):
     :param max_concurrent: 最大并发数
     :return: 字典，键为 ASIN，值为 {"FBA": ..., "head_distance": ...} 或 None
     """
-    config = await set_cookie_main('ITBM000001', 'ITBM000001')
+    config = await set_cookie_main('ITBM000067', 'ITBM000067')
     cookies['rank-login-user'] = config['rank-login-user']
     cookies['rank-login-user-info'] = config['rank-login-user-info']
     semaphore = asyncio.Semaphore(max_concurrent)

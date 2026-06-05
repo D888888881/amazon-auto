@@ -200,7 +200,7 @@ async def fetch_market_research(
 
 
 async def async_return_rale_main(department_keyword: str)->str:
-    config = await set_cookie_main('ITBM000001', 'ITBM000001')
+    config = await set_cookie_main('ITBM000067', 'ITBM000067')
     cookies['rank-login-user'] = config['rank-login-user']
     cookies['rank-login-user-info'] = config['rank-login-user-info']
 

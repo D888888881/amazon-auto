@@ -17,11 +17,7 @@ from openpyxl.styles import PatternFill, Font, Alignment
 from async_image_search_api import async_price_info_main
 from async_fba_api import async_fba_batch
 from async_return_rale_api import async_return_rale_main
-from taobao__m_h5_tk import get_m_h5_tk
-
-# asyncio.run(login_via_specified_url())
-# taobao_config = asyncio.run(read_taobao_config('config_file/taobao_cookies.json'))
-taobao_config = get_m_h5_tk()
+from taobao__m_h5_tk import get_taobao_tokens
 # 本地数据根目录：相对本脚本所在目录的 file/，避免「在别的 cwd 运行脚本」时扫不到 Excel
 # FILE_DATA_ROOT = Path(r"E:\py_projiect\auto_amazon_project\media\file")
 FILE_DATA_ROOT = Path(__file__).resolve().parent.parent.parent / "media" / "file"
@@ -784,10 +780,12 @@ async def save_roi_us_pack(nodeLabelPath: str,
 
     # ==================== 1. 获取基础数据 ====================
     fba_info = fba_info_dict.get(product_asin, {})
-    head_distance = fba_info.get('head_distance', 0.0)
+    head_distance = fba_info.get('head_distance')
+    if head_distance is None:
+        head_distance = 0.0
     if head_distance_override is not None:
         head_distance = head_distance_override
-    fba_fee = fba_info.get('FBA', 0.0)
+    fba_fee = fba_info.get('FBA', 0.0) or 0.0
 
     if unit_purchase_override is not None:
         unit_purchase = unit_purchase_override
@@ -798,6 +796,7 @@ async def save_roi_us_pack(nodeLabelPath: str,
                 tokens[0],
                 tokens[1],
             )
+            print(unit_purchase,asin,'3333')
         except Exception as e:
             print(f"获取单件采购失败: {e}")
             unit_purchase = None
@@ -835,9 +834,9 @@ async def save_roi_us_pack(nodeLabelPath: str,
         product_price = None
 
     if asin_price is None:
-        product_price = lowest_price * 2
+        product_price = lowest_price * 2 if lowest_price is not None else None
     else:
-        product_price = asin_price*1.02
+        product_price = asin_price * 1.02
 
     discount = 0
     if product_price is not None:
@@ -963,12 +962,16 @@ async def save_roi_us_pack(nodeLabelPath: str,
         profit_margin = None
 
     # 去广告毛利率
-    if profit_margin is not None:
+    if profit_margin is not None and ad_cost_ratio is not None:
         ad_removed_gross_margin = profit_margin - ad_cost_ratio
     else:
         ad_removed_gross_margin = None
     # 单件采购+单件头程
-    unit_head_price = unit_purchase + head_distance
+    unit_head_price = (
+        unit_purchase + head_distance
+        if unit_purchase is not None and head_distance is not None
+        else None
+    )
     target_asin_url = f'https://www.amazon.com/DP/{asin}'
     link1688 = 'https://aibuy.1688.com/landingpage/home/inventory/products.html?bizType=selectionTool&customerId=sellerspriteLP&lang=zh&currency=CNY'
     imageUrl = None
@@ -1026,7 +1029,7 @@ async def save_roi_us_pack(nodeLabelPath: str,
         f"{ad_cost_ratio:.2f}" if ad_cost_ratio is not None else 'N/A',
         f"{imageUrl}" if imageUrl is not None else 'N/A',
         f"{target_asin_url}" if target_asin_url is not None else 'N/A',
-        f"{link1688}" if target_asin_url is not None else 'N/A'
+        f"{link1688}" if link1688 is not None else 'N/A'
     ]
     middle_units = [
         '$', '$', '次', '%', '单', '单',
@@ -1178,9 +1181,17 @@ async def save_roi_us_pack(nodeLabelPath: str,
     # 保存最终样式
     wb.save(output_path)
     print("样式设置完成：右侧特殊字段已移到底部，列宽45/行高50/字体36加粗，其余字段居中对齐")
-    return {asin: {'profit_margin': round(ad_removed_gross_margin, 2), 'unit_purchase': unit_purchase,
-                   'monthly_profit1': monthly_profit1, 'profit_per_order': profit_per_order,
-                   'head_distance': head_distance, 'actual_cost': actual_cost, 'ad_removed_roi': ad_removed_roi}}
+    return {
+        asin: {
+            'profit_margin': round(ad_removed_gross_margin, 2) if ad_removed_gross_margin is not None else None,
+            'unit_purchase': unit_purchase,
+            'monthly_profit1': monthly_profit1,
+            'profit_per_order': profit_per_order,
+            'head_distance': head_distance,
+            'actual_cost': actual_cost,
+            'ad_removed_roi': ad_removed_roi,
+        }
+    }
 
 
 async def get_month_number(asin_list: list, data_nested: dict, key_list: dict):
@@ -1427,6 +1438,7 @@ async def seller_wizard_main(
 ):
     FILE_DATA_ROOT.mkdir(parents=True, exist_ok=True)
     print(f"本地 Excel 根目录: {FILE_DATA_ROOT.resolve()}")
+    taobao_config = await asyncio.to_thread(get_taobao_tokens)
     tokens = [taobao_config["_m_h5_tk"], taobao_config["_m_h5_tk_enc"]]
 
     # 1. 从 file/{ASIN}/{关键词}/ 自动扫描 Excel（关键词列表由目录结构决定）
@@ -1443,6 +1455,7 @@ async def seller_wizard_main(
         return
 
     fba_info_dict = await async_fba_batch(target_asins)
+    print(fba_info_dict,'666666')
 
     asin_info_dict = await advertisement_main(target_asins, max_concurrent=1)
 

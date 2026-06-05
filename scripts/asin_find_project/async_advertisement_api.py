@@ -292,7 +292,8 @@ async def fetch_multiple_asins_totalUnits(asin_list: List[str], max_concurrent: 
 # ---------- 使用示例 ----------
 async def advertisement_main(asins: List[str], max_concurrent: int = 1) -> Dict[str, Any]:
     # 假设要查询的 ASIN 列表
-    config =  await set_cookie_main('ITBM000001', 'ITBM000001')
+    config =  await set_cookie_main('ITBM000067', 'ITBM000067')
+    print(config)
     COOKIES['rank-login-user'] = config['rank-login-user']
     COOKIES['rank-login-user-info'] = config['rank-login-user-info']
     # totalUnits_dict = await fetch_multiple_asins_totalUnits(asins, max_concurrent=max_concurrent)
@@ -310,7 +311,7 @@ async def advertisement_main(asins: List[str], max_concurrent: int = 1) -> Dict[
 if __name__ == "__main__":
     # asins = ["B0F6MTPQVG","B0F9WW826V",'B0FWJ8HNCB','B0FY5S16DK','B0C62HMMCJ']
     # asins = ['B0FWJ8HNCB', 'B0D3M1WHQ6','B0D6XKFPF1','B0DXF3TQRD','B0DFH5Z3JB','B08HJR2RL2', 'B0D3M1WHQ6','B0DXF3TQRD','B0DFH5Z3JB','B0GCCXBK14','B0DGKTRZN2','B0D299X6KN','B0CSJZVHKX','B0DR2LC897','B0D6XKFPF1','B0C3QQJ8YF','B093QZ6V3S','B0DT4JGZY5']
-    asins = ['B0FWJ8HNCB', 'B0F6MTPQVG']
+    asins = ['B0GQYQ98TL', 'B0FR8MX7ZL']
     # result = asyncio.run(fetch_multiple_asins(asins))
     # result = asyncio.run(fetch_multiple_asins(asins,1))
     result = asyncio.run(advertisement_main(asins))

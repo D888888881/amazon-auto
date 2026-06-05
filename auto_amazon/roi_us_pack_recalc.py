@@ -169,6 +169,40 @@ def _set_field(
             row[c] = text
 
 
+def extract_dashboard_metrics_from_roi_us_pack(rows: list[list[Any]]) -> dict[str, float | None]:
+    """从 ROI-US-pack 表读取与首页看板对齐的核心指标。"""
+    field_cells = _collect_field_cells(rows)
+    if not field_cells.get('单件采购'):
+        return {}
+
+    def first_val(key: str) -> float | None:
+        for r, c in field_cells.get(key, ()):
+            if r < len(rows):
+                row = rows[r]
+                if isinstance(row, list) and c < len(row):
+                    return _parse_num(_cell_val(row[c]))
+        return None
+
+    unit_p = first_val('单件采购')
+    head = first_val('单件头程')
+    hat = round(unit_p + head, 2) if unit_p is not None and head is not None else None
+    monthly_vol = first_val('月出单量')
+    if monthly_vol is None:
+        daily = first_val('出单量')
+        if daily is not None:
+            monthly_vol = daily * 30.0
+
+    return {
+        'profit_margin': first_val('去广告毛利率'),
+        'ad_removed_roi': first_val('去广告投产'),
+        'profit_per_order': first_val('每单利润'),
+        'unit_purchase': unit_p,
+        'head_distance': head,
+        'head_actual_total': hat,
+        'monthly_results': monthly_vol,
+    }
+
+
 def recalc_roi_us_pack_rows(rows: list[list[Any]]) -> tuple[bool, str]:
     """
     就地重算 ROI-US-pack 网格（与 excel 编辑器相同的 rows 结构）。

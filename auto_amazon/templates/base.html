@@ -17,10 +17,9 @@
     <nav class="nav">
         <a href="{% url 'index' %}" class="{% if request.resolver_match.url_name == 'index' %}active{% endif %}">首页</a>
         <a href="{% url 'compute_roi' %}" class="{% if request.resolver_match.url_name == 'compute_roi' or request.resolver_match.url_name == 'upload' %}active{% endif %}">计算ROI</a>
-        {% if user.is_superuser %}
-        <a href="{% url 'fetch_data' %}" class="{% if request.resolver_match.url_name == 'fetch_data' %}active{% endif %}">获取数据</a>
-        {% endif %}
+        <a href="{% url 'asin_upload' %}" class="{% if request.resolver_match.url_name == 'asin_upload' or request.resolver_match.url_name == 'fetch_data' %}active{% endif %}">上传ASIN</a>
         <a href="{% url 'excel' %}" class="{% if request.resolver_match.url_name == 'excel' %}active{% endif %}">数据审核</a>
+        <a href="{% url 'schedule_messages' %}" class="{% if request.resolver_match.url_name == 'schedule_messages' %}active{% endif %}">消息</a>
         {% if user.is_superuser %}
         <a href="{% url 'pending_registrations' %}" class="{% if request.resolver_match.url_name == 'pending_registrations' %}active{% endif %}">注册审核</a>
         <a href="{% url 'user_management' %}" class="{% if request.resolver_match.url_name == 'user_management' %}active{% endif %}">用户管理</a>

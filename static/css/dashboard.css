@@ -384,3 +384,54 @@
   max-width: 10rem;
   word-break: break-all;
 }
+
+.col-follow {
+  min-width: 6.5rem;
+}
+
+.dash-follow-form {
+  margin: 0;
+}
+
+.dash-follow-select {
+  height: 28px;
+  min-width: 6.2rem;
+  padding: 0 0.35rem;
+  border-radius: 6px;
+  border: 1px solid #cbd5e1;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  background: #fff;
+  color: #64748b;
+}
+
+.dash-follow-select--priority {
+  border-color: #f59e0b;
+  background: #fffbeb;
+  color: #b45309;
+}
+
+.dash-follow-select:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.25);
+}
+
+.dash-follow-badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.dash-follow-badge--normal {
+  background: #f1f5f9;
+  color: #64748b;
+}
+
+.dash-follow-badge--priority {
+  background: #fef3c7;
+  color: #b45309;
+}

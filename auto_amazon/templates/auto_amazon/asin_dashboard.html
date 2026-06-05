@@ -29,8 +29,10 @@
 
     <div class="dash-toolbar">
         <div class="dash-toolbar__actions">
-            <a class="dash-btn dash-btn--primary" href="{% url 'upload' %}">上传与数据</a>
-            <input type="text" name="exchange_rate" form="dash-batch-form" class="dash-rate-input" placeholder="汇率(如6.88)" aria-label="汇率">
+
+            <input type="text" name="exchange_rate" form="dash-batch-form" class="dash-rate-input"
+                   value="{{ default_exchange_rate }}"
+                   placeholder="汇率 USD→CNY" aria-label="汇率" title="已自动获取实时汇率，可手动修改">
             <button type="submit" form="dash-batch-form" data-action="calc_roi_selected" class="dash-btn" id="dash-batch-roi" disabled>计算ROI</button>
             <button type="submit" form="dash-batch-form" data-action="calc_ranking_selected" class="dash-btn" id="dash-batch-calc" disabled>计算广告难度</button>
             <button type="submit" form="dash-batch-form" data-action="delete_batch" class="dash-btn dash-btn--danger" id="dash-batch-delete" disabled>批量删除</button>
@@ -84,6 +86,13 @@
                     <option value="" {% if filters.roi_verified != 'yes' and filters.roi_verified != 'no' %}selected{% endif %}>全部</option>
                     <option value="yes" {% if filters.roi_verified == 'yes' %}selected{% endif %}>是</option>
                     <option value="no" {% if filters.roi_verified == 'no' %}selected{% endif %}>否</option>
+                </select>
+            </label>
+            <label>关注
+                <select name="follow_filter">
+                    <option value="" {% if not filters.follow_filter %}selected{% endif %}>全部</option>
+                    <option value="normal" {% if filters.follow_filter == 'normal' %}selected{% endif %}>未关注</option>
+                    <option value="priority" {% if filters.follow_filter == 'priority' %}selected{% endif %}>重点关注</option>
                 </select>
             </label>
             <label>更新时间(起)
@@ -162,6 +171,7 @@
                     <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=updated_at&amp;dir={% if sort == 'updated_at' and dir == 'asc' %}desc{% else %}asc{% endif %}">更新时间</a></th>
                     <th>分配人</th>
                     <th>是否校验</th>
+                    <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=follow_status&amp;dir={% if sort == 'follow_status' and dir == 'asc' %}desc{% else %}asc{% endif %}">关注</a></th>
                     <th>运营难度1</th>
                     <th>运营难度2</th>
                     <th>运营难度3</th>
@@ -171,7 +181,7 @@
             </thead>
             <tbody>
                 {% for row in rows %}
-                <tr>
+                <tr data-can-delete="{% if row.can_delete_row %}1{% else %}0{% endif %}">
                     <td class="col-check"><input type="checkbox" name="row_ids" value="{{ row.pk }}" class="dash-row-check" form="dash-batch-form" aria-label="选择 {{ row.asin }}"{% if row.ops_readonly %} disabled{% endif %}></td>
                     <td class="col-num">{{ page_obj.start_index|add:forloop.counter0 }}</td>
                     <td class="col-asin">
@@ -211,6 +221,24 @@
                     <td class="col-updated-at">{% if row.data_updated_at %}{{ row.data_updated_at|date:'Y-m-d H:i:s' }}{% else %}—{% endif %}</td>
                     <td class="col-assignees" title="该 ASIN 文件夹当前分配的用户">{{ row.assignee_display }}</td>
                     <td class="col-roi-verify" title="在 ROI-US-pack 编辑器中点击「确认校验」后为「是」">{% if row.roi_pack_verified %}是{% else %}否{% endif %}</td>
+                    <td class="col-follow">
+                        {% if row.ops_readonly %}
+                        <span class="dash-follow-badge dash-follow-badge--{% if row.follow_status == 'priority' %}priority{% else %}normal{% endif %}">
+                            {% if row.follow_status == 'priority' %}重点关注{% else %}未关注{% endif %}
+                        </span>
+                        {% else %}
+                        <form method="post" action="{% url 'index' %}" class="dash-follow-form">
+                            {% csrf_token %}
+                            <input type="hidden" name="action" value="set_follow_status">
+                            <input type="hidden" name="row_id" value="{{ row.pk }}">
+                            <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                            <select name="follow_status" class="dash-follow-select dash-follow-select--{% if row.follow_status == 'priority' %}priority{% else %}normal{% endif %}" aria-label="关注 {{ row.asin }}" onchange="this.form.submit()">
+                                <option value="normal" {% if row.follow_status != 'priority' %}selected{% endif %}>未关注</option>
+                                <option value="priority" {% if row.follow_status == 'priority' %}selected{% endif %}>重点关注</option>
+                            </select>
+                        </form>
+                        {% endif %}
+                    </td>
                     <td class="col-ops-chart">{% include "auto_amazon/_ops_cell.html" with payload=row.ops_difficulty_1 row_pk=row.pk slot=1 ops_readonly=row.ops_readonly %}</td>
                     <td class="col-ops-chart">{% include "auto_amazon/_ops_cell.html" with payload=row.ops_difficulty_2 row_pk=row.pk slot=2 ops_readonly=row.ops_readonly %}</td>
                     <td class="col-ops-chart">{% include "auto_amazon/_ops_cell.html" with payload=row.ops_difficulty_3 row_pk=row.pk slot=3 ops_readonly=row.ops_readonly %}</td>
@@ -220,7 +248,7 @@
                             {% if row.can_open_dir %}
                             <a class="dash-btn" href="{% url 'excel' %}?path={{ row.asin|urlencode }}" title="打开该 ASIN 的文件目录">目录</a>
                             {% endif %}
-                            {% if not row.ops_readonly %}
+                            {% if row.can_delete_row %}
                             <form method="post" action="{% url 'index' %}" style="display:inline" class="js-delete-one-form">
                                 {% csrf_token %}
                                 <input type="hidden" name="action" value="delete_one">
@@ -429,23 +457,29 @@
   var pendingAction = '';
   function refreshBatch() {
     var n = 0;
-    checks.forEach(function (c) { if (c.checked) n += 1; });
-    if (batchBtn) batchBtn.disabled = n === 0;
+    var deletable = 0;
+    checks.forEach(function (c) {
+      if (!c.checked) return;
+      n += 1;
+      var tr = c.closest('tr');
+      if (tr && tr.getAttribute('data-can-delete') === '1') deletable += 1;
+    });
+    if (batchBtn) batchBtn.disabled = n === 0 || deletable !== n;
     if (calcBtn) calcBtn.disabled = n === 0;
     if (roiBtn) roiBtn.disabled = n === 0;
-    var ne = 0;
-    checks.forEach(function (c) {
-      if (c.checked && !c.disabled) ne += 1;
-    });
-    if (exportBtn) exportBtn.disabled = ne === 0;
+    if (exportBtn) exportBtn.disabled = n === 0;
     if (selAll) {
-      selAll.indeterminate = n > 0 && n < checks.length;
-      selAll.checked = checks.length > 0 && n === checks.length;
+      var enabledChecks = [];
+      checks.forEach(function (c) { if (!c.disabled) enabledChecks.push(c); });
+      var enabledChecked = 0;
+      enabledChecks.forEach(function (c) { if (c.checked) enabledChecked += 1; });
+      selAll.indeterminate = enabledChecked > 0 && enabledChecked < enabledChecks.length;
+      selAll.checked = enabledChecks.length > 0 && enabledChecked === enabledChecks.length;
     }
   }
   if (selAll) {
     selAll.addEventListener('change', function () {
-      checks.forEach(function (c) { c.checked = selAll.checked; });
+      checks.forEach(function (c) { if (!c.disabled) c.checked = selAll.checked; });
       refreshBatch();
     });
   }
@@ -507,6 +541,17 @@
         sb.textContent = '计算中...';
       } else if (action === 'delete_batch') {
         e.preventDefault();
+        var blocked = [];
+        selectedRows.forEach(function (tr) {
+          if (tr.getAttribute('data-can-delete') !== '1') {
+            var asinEl = tr.querySelector('.col-asin');
+            blocked.push(asinEl ? asinEl.textContent.trim() : '未知');
+          }
+        });
+        if (blocked.length) {
+          alert('以下 ASIN 为分配数据，不可删除：\n' + blocked.slice(0, 8).join('\n'));
+          return;
+        }
         pendingDeleteSubmit = function () {
           if (deleteWithFolderInput) {
             deleteWithFolderInput.value = deleteFolderCheckbox && deleteFolderCheckbox.checked ? '1' : '0';
@@ -569,7 +614,7 @@
     exportBtn.addEventListener('click', function () {
       var ids = [];
       checks.forEach(function (c) {
-        if (c.checked && !c.disabled) ids.push(c.value);
+        if (c.checked) ids.push(c.value);
       });
       if (!ids.length) {
         alert('请先勾选要导出的记录。');

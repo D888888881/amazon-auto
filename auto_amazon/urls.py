@@ -19,6 +19,9 @@ urlpatterns = [
     path('upload/', views.upload_page, name='upload'),
     path('compute-roi/', views.compute_roi_page, name='compute_roi'),
     path('fetch-data/', views.fetch_data_page, name='fetch_data'),
+    path('upload-asin/', views.asin_upload_page, name='asin_upload'),
+    path('upload-asin/export/<int:batch_id>/', views.asin_upload_export, name='asin_upload_export'),
+    path('messages/', views.schedule_messages_page, name='schedule_messages'),
 
     path('excel/', views.excel_page, name='excel'),
 

@@ -1,0 +1,152 @@
+.main--messages {
+  max-width: 2200px;
+  margin: 0 auto;
+  padding: 1.75rem 1.5rem 2.5rem;
+}
+
+.msg-hero {
+  margin-bottom: 1.25rem;
+}
+
+.msg-hero__title {
+  margin: 0 0 0.35rem;
+  font-size: 1.55rem;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.msg-hero__sub {
+  margin: 0;
+  font-size: 0.92rem;
+  color: #64748b;
+}
+
+.msg-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1rem;
+  align-items: flex-end;
+  margin-bottom: 1rem;
+  padding: 0.85rem 1rem;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+}
+
+.msg-filter label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.78rem;
+  color: #334155;
+}
+
+.msg-filter input,
+.msg-filter select {
+  height: 32px;
+  min-width: 140px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 0 0.5rem;
+  font-size: 0.82rem;
+}
+
+.msg-table-wrap {
+  overflow-x: auto;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+}
+
+.msg-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+.msg-table th,
+.msg-table td {
+  padding: 0.55rem 0.65rem;
+  border-bottom: 1px solid #eef2f7;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.msg-table th {
+  background: #f8fafc;
+  color: #475569;
+  font-weight: 600;
+}
+
+.msg-row--alert {
+  background: #fff7ed;
+}
+
+.msg-delta {
+  font-weight: 600;
+  color: #0f766e;
+}
+
+.msg-badge {
+  display: inline-block;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+}
+
+.msg-badge--alert {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.msg-badge--normal {
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.msg-empty {
+  text-align: center;
+  color: #94a3b8;
+  padding: 2rem !important;
+}
+
+.msg-pager {
+  margin-top: 1rem;
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  font-size: 0.85rem;
+}
+
+.msg-pager a {
+  color: #2563eb;
+  text-decoration: none;
+}
+
+.msg-pager a:hover {
+  text-decoration: underline;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 32px;
+  padding: 0 0.85rem;
+  border-radius: 6px;
+  font-size: 0.82rem;
+  border: 1px solid transparent;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.btn-primary {
+  background: #2563eb;
+  color: #fff;
+}
+
+.btn-ghost {
+  background: #fff;
+  border-color: #cbd5e1;
+  color: #334155;
+}

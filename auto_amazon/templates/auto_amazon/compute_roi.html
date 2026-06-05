@@ -45,11 +45,13 @@
             {% csrf_token %}
             <input type="hidden" name="recompute_existing" value="{% if include_recomputed %}1{% else %}0{% endif %}">
             <div class="upload-field">
-                <label class="upload-field__label" for="id_exchange_rate">汇率（必填）</label>
+                <label class="upload-field__label" for="id_exchange_rate">汇率（自动获取，可修改）</label>
                 <input type="text" name="exchange_rate" id="id_exchange_rate"
                        class="upload-textarea"
                        style="min-height:auto;height:2.75rem;resize:none;"
-                       inputmode="decimal" placeholder="例如 6.88" required>
+                       inputmode="decimal"
+                       value="{{ default_exchange_rate }}"
+                       placeholder="例如 7.25" required>
             </div>
             <div class="upload-live-hint" style="margin:.5rem 0;">
                 {% if include_recomputed %}

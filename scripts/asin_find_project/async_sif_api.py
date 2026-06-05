@@ -2,7 +2,7 @@ import asyncio
 import os
 import aiohttp
 import time
-
+from sif_set_cookie import get_sif_cookie
 from typing import List, Dict, Any, Optional, Tuple
 
 
@@ -402,8 +402,9 @@ class AsyncSifAPI:
 # ==================== 使用示例 ====================
 async def sif_main(asins: list[str]):
     # 优先从环境变量读取 JWT，避免把 token 写死在仓库里
-    auth_token = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ3ZWNoYXRpZCI6Im90SkwwNXc4MzRhenJ0Z3NRTVJDV0x5NmsxQjgiLCJ1c2VyU2FsdCI6InA4RHVzZVI2IiwiZXhwIjoxNzc3ODc4ODcxLCJ1c2VyaWQiOiJqbXhOMTRiMW45NDMzM3BRNzAzSUFld3EiLCJwbGF0Zm9ybSI6Im9mZmljaWFsIn0.prM3cs1kAxdhhxSIvYpbg8_SxIiR9sP8VfCfa4RDNqk"
-
+    with open("config_file/sif_token.txt", "r") as f:
+        sif_token = f.read().strip()
+    auth_token = sif_token
     cookies = {
         "Hm_lvt_8d71bef53342fdb284ff83594f3b97ff": "1773713262",
         "HMACCOUNT": "1B0FE40093B498DF",
@@ -436,6 +437,9 @@ async def sif_main(asins: list[str]):
             except Exception as e:
                 print(f"{asin}: {e}")
         print("<准备关键词>", keyword_groups_dict)
+        if result == [] and keyword_groups_dict == {}:
+            get_sif_cookie()
+            return await sif_main(asins)
         return result, keyword_groups_dict
 
 

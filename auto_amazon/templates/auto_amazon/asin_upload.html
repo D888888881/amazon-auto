@@ -1,0 +1,306 @@
+{% extends 'base.html' %}
+{% load static %}
+{% block title %}上传ASIN — Amazon 自动化{% endblock %}
+{% block main_class %}main--asin-upload{% endblock %}
+{% block extra_head %}
+<link rel="stylesheet" href="{% static 'css/asin_upload.css' %}">
+{% endblock %}
+{% block content %}
+<div class="asin-upload-page">
+    <header class="asin-upload-hero">
+        <div class="asin-upload-hero__inner">
+            <span class="asin-upload-hero__eyebrow">ASIN Library</span>
+            <h1 class="asin-upload-hero__title">上传 ASIN</h1>
+            <p class="asin-upload-hero__desc">
+                支持 <strong>TXT</strong>、<strong>Excel</strong> 批量导入，系统自动识别 10 位 ASIN 并与全局库<strong>去重</strong>。
+                所有用户均可上传、查看与导出，便于团队协作管理 ASIN 资源。
+            </p>
+        </div>
+    </header>
+
+    {% if messages %}
+    <ul class="asin-upload-messages">
+        {% for message in messages %}
+        <li class="{{ message.tags }}">{{ message }}</li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+
+    <div class="asin-upload-stats">
+        <div class="asin-upload-stat asin-upload-stat--accent">
+            <p class="asin-upload-stat__label">库内 ASIN 总数</p>
+            <p class="asin-upload-stat__value">{{ total_catalog|default:0 }}</p>
+            <p class="asin-upload-stat__sub">全局去重后的唯一 ASIN</p>
+        </div>
+        <div class="asin-upload-stat">
+            <p class="asin-upload-stat__label">上传批次</p>
+            <p class="asin-upload-stat__value">{{ total_batches|default:0 }}</p>
+            <p class="asin-upload-stat__sub">累计上传记录条数</p>
+        </div>
+        <div class="asin-upload-stat">
+            <p class="asin-upload-stat__label">当前筛选结果</p>
+            <p class="asin-upload-stat__value">{{ page_obj.paginator.count|default:0 }}</p>
+            <p class="asin-upload-stat__sub">匹配条件的批次数量</p>
+        </div>
+    </div>
+
+    <section class="asin-upload-card">
+        <div class="asin-upload-card__head">
+            <div class="asin-upload-card__title-wrap">
+                <span class="asin-upload-card__icon asin-upload-card__icon--upload" aria-hidden="true">↑</span>
+                <div>
+                    <h2 class="asin-upload-card__title">上传文件</h2>
+                    <p class="asin-upload-card__hint">拖拽或点击选择 .txt / .xlsx / .xls / .csv，上传 2000 条若重复 500 条则仅新增 1500 条</p>
+                </div>
+            </div>
+        </div>
+        <div class="asin-upload-card__body">
+            <form method="post" enctype="multipart/form-data" id="asin-upload-form">
+                {% csrf_token %}
+                <label class="asin-upload-drop" id="asin-upload-drop" for="id_asin_file">
+                    <span class="asin-upload-drop__icon" aria-hidden="true">📄</span>
+                    <p class="asin-upload-drop__title">点击或拖拽文件到此处</p>
+                    <p class="asin-upload-drop__sub">TXT 每行一个 ASIN · Excel 从单元格自动提取</p>
+                    <p class="asin-upload-drop__file" id="asin-upload-filename" hidden></p>
+                    <input type="file" id="id_asin_file" name="asin_file" accept=".txt,.csv,.xlsx,.xls" required
+                           class="asin-upload-drop__input">
+                </label>
+                <div class="asin-upload-form-actions">
+                    <button type="submit" class="asin-upload-btn asin-upload-btn--primary" id="asin-upload-submit" disabled>
+                        上传并去重
+                    </button>
+                </div>
+            </form>
+        </div>
+    </section>
+
+    <section class="asin-upload-card">
+        <div class="asin-upload-card__head">
+            <div class="asin-upload-card__title-wrap">
+                <span class="asin-upload-card__icon asin-upload-card__icon--list" aria-hidden="true">≡</span>
+                <div>
+                    <h2 class="asin-upload-card__title">上传记录</h2>
+                    <p class="asin-upload-card__hint">按上传用户、下载状态筛选；导出 TXT 后状态自动更新</p>
+                </div>
+            </div>
+        </div>
+
+        <form method="get" class="asin-upload-filter">
+            <div class="asin-upload-filter__field">
+                <label class="asin-upload-filter__label" for="filter-uploader">上传用户</label>
+                <select id="filter-uploader" name="uploader" class="asin-upload-filter__select">
+                    <option value="">全部用户</option>
+                    {% for u in uploader_choices %}
+                    <option value="{{ u }}" {% if filters.uploader == u %}selected{% endif %}>{{ u }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="asin-upload-filter__field">
+                <label class="asin-upload-filter__label" for="filter-dl">下载状态</label>
+                <select id="filter-dl" name="download_status" class="asin-upload-filter__select">
+                    <option value="" {% if filters.download_status != 'yes' and filters.download_status != 'no' %}selected{% endif %}>全部状态</option>
+                    <option value="yes" {% if filters.download_status == 'yes' %}selected{% endif %}>已下载</option>
+                    <option value="no" {% if filters.download_status == 'no' %}selected{% endif %}>未下载</option>
+                </select>
+            </div>
+            <div class="asin-upload-filter__actions">
+                <button type="submit" class="asin-upload-btn asin-upload-btn--primary asin-upload-btn--sm">筛选</button>
+                <a href="{% url 'asin_upload' %}" class="asin-upload-btn asin-upload-btn--ghost asin-upload-btn--sm">重置</a>
+            </div>
+        </form>
+
+        {% if batches %}
+        <div class="asin-upload-table-wrap">
+            <table class="asin-upload-table">
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>用户名称</th>
+                        <th>ASIN 数量</th>
+                        <th>跳过重复</th>
+                        <th>上传时间</th>
+                        <th>源文件</th>
+                        <th>是否下载</th>
+                        <th>导出</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for batch in batches %}
+                    <tr data-batch-id="{{ batch.pk }}">
+                        <td class="col-num">{{ page_obj.start_index|add:forloop.counter0 }}</td>
+                        <td class="col-user">{{ batch.user.username }}</td>
+                        <td class="col-num">{{ batch.new_count }}</td>
+                        <td class="col-num">{{ batch.skipped_count }}</td>
+                        <td class="col-time">{{ batch.created_at|date:'Y-m-d H:i:s' }}</td>
+                        <td class="col-file" title="{{ batch.source_filename }}">{{ batch.source_filename|default:'—' }}</td>
+                        <td class="js-dl-status">
+                            {% if batch.is_downloaded %}
+                            <span class="asin-upload-badge asin-upload-badge--yes" title="{% if batch.downloaded_by %}由 {{ batch.downloaded_by.username }} 于 {{ batch.downloaded_at|date:'Y-m-d H:i' }} 下载{% endif %}">已下载</span>
+                            {% else %}
+                            <span class="asin-upload-badge asin-upload-badge--no">未下载</span>
+                            {% endif %}
+                        </td>
+                        <td>
+                            {% if batch.new_count > 0 %}
+                            <a class="asin-upload-btn asin-upload-btn--primary asin-upload-btn--sm js-export-txt"
+                               href="{% url 'asin_upload_export' batch.pk %}">导出 TXT</a>
+                            {% else %}
+                            <span class="asin-upload-tag-muted">无新增</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% if page_obj.paginator.num_pages > 1 %}
+        <div class="asin-upload-pagination">
+            {% if page_obj.has_previous %}
+            <a class="asin-upload-btn asin-upload-btn--ghost asin-upload-btn--sm" href="?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}page={{ page_obj.previous_page_number }}">上一页</a>
+            {% endif %}
+            <span class="asin-upload-pagination__info">第 {{ page_obj.number }} / {{ page_obj.paginator.num_pages }} 页</span>
+            {% if page_obj.has_next %}
+            <a class="asin-upload-btn asin-upload-btn--ghost asin-upload-btn--sm" href="?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}page={{ page_obj.next_page_number }}">下一页</a>
+            {% endif %}
+        </div>
+        {% endif %}
+        {% else %}
+        <div class="asin-upload-empty">
+            <div class="asin-upload-empty__icon" aria-hidden="true">📋</div>
+            <p>暂无上传记录，请在上方上传第一个 ASIN 文件</p>
+        </div>
+        {% endif %}
+    </section>
+</div>
+
+<script>
+(function () {
+  var drop = document.getElementById('asin-upload-drop');
+  var fileInput = document.getElementById('id_asin_file');
+  var fileNameEl = document.getElementById('asin-upload-filename');
+  var submitBtn = document.getElementById('asin-upload-submit');
+  var currentUser = '{{ user.username|escapejs }}';
+
+  function showFile(name) {
+    if (!fileNameEl || !submitBtn) return;
+    if (name) {
+      fileNameEl.textContent = '已选择：' + name;
+      fileNameEl.hidden = false;
+      submitBtn.disabled = false;
+    } else {
+      fileNameEl.hidden = true;
+      fileNameEl.textContent = '';
+      submitBtn.disabled = true;
+    }
+  }
+
+  if (fileInput) {
+    fileInput.addEventListener('change', function () {
+      showFile(fileInput.files && fileInput.files[0] ? fileInput.files[0].name : '');
+    });
+  }
+
+  if (drop && fileInput) {
+    ['dragenter', 'dragover'].forEach(function (ev) {
+      drop.addEventListener(ev, function (e) {
+        e.preventDefault();
+        drop.classList.add('is-dragover');
+      });
+    });
+    ['dragleave', 'drop'].forEach(function (ev) {
+      drop.addEventListener(ev, function (e) {
+        e.preventDefault();
+        drop.classList.remove('is-dragover');
+      });
+    });
+    drop.addEventListener('drop', function (e) {
+      var files = e.dataTransfer && e.dataTransfer.files;
+      if (!files || !files.length) return;
+      try {
+        var dt = new DataTransfer();
+        dt.items.add(files[0]);
+        fileInput.files = dt.files;
+      } catch (err) {
+        fileInput.files = files;
+      }
+      showFile(files[0].name);
+    });
+  }
+
+  function parseFilename(cd) {
+    if (!cd) return 'asin_batch.txt';
+    var m = /filename\*=UTF-8''([^;\n]+)|filename="([^"]+)"/i.exec(cd);
+    if (m) {
+      try { return decodeURIComponent(m[1] || m[2]); } catch (e) { return m[1] || m[2]; }
+    }
+    return 'asin_batch.txt';
+  }
+
+  function markDownloaded(row, username) {
+    var cell = row && row.querySelector('.js-dl-status');
+    if (!cell) return;
+    var badge = cell.querySelector('.asin-upload-badge');
+    if (!badge) {
+      badge = document.createElement('span');
+      cell.textContent = '';
+      cell.appendChild(badge);
+    }
+    badge.className = 'asin-upload-badge asin-upload-badge--yes';
+    badge.textContent = '已下载';
+    badge.title = '由 ' + (username || currentUser) + ' 刚刚下载';
+  }
+
+  document.querySelectorAll('.js-export-txt').forEach(function (btn) {
+    btn.addEventListener('click', function (e) {
+      e.preventDefault();
+      if (btn.classList.contains('is-loading')) return;
+      var url = btn.getAttribute('href');
+      var row = btn.closest('tr');
+      var label = btn.textContent;
+      btn.classList.add('is-loading');
+      btn.textContent = '导出中…';
+
+      fetch(url, {
+        credentials: 'same-origin',
+        headers: { 'X-Requested-With': 'XMLHttpRequest' }
+      })
+        .then(function (res) {
+          var ct = (res.headers.get('Content-Type') || '').toLowerCase();
+          if (!res.ok || ct.indexOf('json') >= 0) {
+            return res.json().then(function (j) {
+              throw new Error((j && j.error) || '导出失败');
+            }).catch(function (err) {
+              if (err.message && err.message !== 'Unexpected token') throw err;
+              throw new Error('导出失败（HTTP ' + res.status + '）');
+            });
+          }
+          var dlUser = res.headers.get('X-Download-Username') || currentUser;
+          var fn = parseFilename(res.headers.get('Content-Disposition'));
+          return res.blob().then(function (blob) {
+            return { blob: blob, fn: fn, dlUser: dlUser };
+          });
+        })
+        .then(function (data) {
+          var a = document.createElement('a');
+          var objUrl = URL.createObjectURL(data.blob);
+          a.href = objUrl;
+          a.download = data.fn;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(function () { URL.revokeObjectURL(objUrl); }, 2000);
+          markDownloaded(row, data.dlUser);
+          btn.textContent = label;
+        })
+        .catch(function (err) {
+          alert(err.message || '导出失败');
+          btn.textContent = label;
+        })
+        .finally(function () {
+          btn.classList.remove('is-loading');
+        });
+    });
+  });
+})();
+</script>
+{% endblock %}

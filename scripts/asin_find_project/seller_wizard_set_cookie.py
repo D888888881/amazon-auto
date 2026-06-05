@@ -3,7 +3,12 @@ import asyncio
 import httpx
 
 
-async def get_seller_wizard_set_cookie(username: str, password: str):
+async def get_seller_wizard_set_cookie(username: str, password: str =''):
+    """
+    :param username: 用户名称和密码一致，在某一个账户禁用后要重新去卖家精灵重新获取新账号的headers和cookies，因为里面有值是和账户绑定的
+    :param password:
+    :return:
+    """
     headers = {
         "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
         "accept-language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
@@ -12,41 +17,40 @@ async def get_seller_wizard_set_cookie(username: str, password: str):
         "origin": "https://www.sellersprite.com",
         "priority": "u=0, i",
         "referer": "https://www.sellersprite.com/cn/w/user/login",
-        "sec-ch-ua": "\"Chromium\";v=\"146\", \"Not-A.Brand\";v=\"24\", \"Microsoft Edge\";v=\"146\"",
+        "sec-ch-ua": "\"Chromium\";v=\"148\", \"Microsoft Edge\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": "\"Windows\"",
         "sec-fetch-dest": "document",
         "sec-fetch-mode": "navigate",
         "sec-fetch-site": "same-origin",
         "upgrade-insecure-requests": "1",
-        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36 Edg/146.0.0.0"
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36 Edg/148.0.0.0"
     }
     cookies = {
         "ecookie": "0ZIEHmkUOkj5O0bP_CN",
         "_ga": "GA1.1.1624075988.1775543239",
         "MEIQIA_TRACK_ID": "3AsDAuhuMQUzdUXTUNdrluZiyhZ",
         "MEIQIA_VISIT_ID": "3C1BYbL6GIc5O4LO6RfcmKlXqT9",
-        "_fp": "982da2ff9374239947902667704f94ef",
         "p_c_size": "50",
         "k_size": "50",
-        "84a0e9f391fc41713ea0": "9228a761243f38b52daae44d4964b30c",
-        "7581a0c6f4f448143b7f": "f241ca4b26b555b93a8ad142f7cce275",
         "current_guest": "PzM5Kow3aWQD_260410-109254",
-        "7c1fe404463799b52b80": "0d66dc0ebdd249548da407caa9131b40",
-        "40c1a24ba65ba29f5c8b": "39653a56e4c20c5aa8a6bd3d386c8d9b",
-        "Hm_lvt_e0dfc78949a2d7c553713cb5c573a486": "1775729639,1775786924,1776042652,1776160657",
         "HMACCOUNT": "949CAE7CB69976AC",
-        "_gcl_au": "1.1.1826782346.1775543240.933927248.1776160688.1776160688",
-        "_gaf_fp": "b0c03df54705ada0312a329e5350d323",
-        "Sprite-X-Token": "eyJhbGciOiJSUzI1NiIsImtpZCI6IjE2Nzk5NjI2YmZlMDQzZTBiYzI5NTEwMTE4ODA3YWExIn0.eyJqdGkiOiJybjloSGRKX0Rjd2paYUc3SkZxRExBIiwiaWF0IjoxNzc2MTYwNzcyLCJleHAiOjE3NzYyNDcxNzIsIm5iZiI6MTc3NjE2MDcxMiwic3ViIjoieXVueWEiLCJpc3MiOiJyYW5rIiwiYXVkIjoic2VsbGVyU3BhY2UiLCJpZCI6MTY5ODc4MiwicGkiOjEyOTQyNSwibm4iOiJJVEJNMDAwMDAxIiwic3lzIjoiU1NfQ04iLCJlZCI6Ik4iLCJlbSI6IklUQk0wMDAwMDFAc2VsbGVyc3ByaXRlLmNvbSIsIm1sIjoiViIsImVuZCI6MTc4MjU1NDM3MjgxNH0.gvaHXrm7dXwfEapYS2IAko6XIGMhEOWdnz0VjQtB0RR9KkFqZUjJt3oqjqzdi2a2CbUsR15hdZAewf42Yd9oHBDA_Rk0_1n_VHlBXIFT-f0xzuI5pqE2RIG6rR0vqPRV9je7e-BozPAgg2fzc9sChFnjp3UNLMPpTSJU-Df8wA2GOlD22Gj5hL-gYrh_EYPbfPLMj1-c_eRRn77LRU9-5BTVRKbaoxWwOaxfpLrEePahh5eG1GQ4NcW3BYGrRStIiiO0odoU7gcnNeIGnI5s-0PmE6irnsoTUrW8miV77ETChH1aG6GUafzbNVH86mY5HERDuIHWzksbMjQx3AukKQ",
-        "ao_lo_to_n": "\"2738126771wgRGBR8tGt6M09SwNJGVPSkOpk0LOEhVhr1KbThaeu3kSeNoG+OuJtHRX93iETDjC/H6X+e9LMf/rmy657w/CzgHUdwjOBlZQX7eXE6z2wc=\"",
-        "Hm_lpvt_e0dfc78949a2d7c553713cb5c573a486": "1776161013",
-        "_clck": "ycfc14%5E2%5Eg58%5E0%5E2288",
-        "_ga_CN0F80S6GL": "GS2.1.s1776237929$o76$g0$t1776237929$j60$l0$h0",
-        "_clsk": "ijt3oe%5E1776237931471%5E2%5E1%5El.clarity.ms%2Fcollect",
-        "4b576630834ee8190509": "c32875d8e6a75f835e5ece4baa1c7cd5",
-        "JSESSIONID": "F1CB347F579BE2D03496A964265BA28A",
-        "_ga_38NCVF2XST": "GS2.1.s1776237929$o27$g1$t1776237962$j27$l0$h1857658276"
+        "_fp": "e25cc0d8b415349a3beafac3421bf1ca",
+        "e4ad641898d3d0f48da7": "9b8c76bd99e68837048d00c922f59e48",
+        "4da9ea78556c2f3e2f9b": "b39b0a4eb591fc1e32e1fe6af3670f57",
+        "397dfe035873c8d2315b": "103af19256e18a5bc14914795e62a93c",
+        "Hm_lvt_e0dfc78949a2d7c553713cb5c573a486": "1780301940",
+        "_clck": "ycfc14%5E2%5Eg6k%5E0%5E2288",
+        "_gcl_au": "1.1.1826782346.1775543240.432901189.1780383054.1780383054",
+        "ebdde9bd6f45433c1c41": "728a1ac9571cee1f632e823d77c9433c",
+        "_gaf_fp": "296aca6530811998e69f96719174e46c",
+        "Sprite-X-Token": "eyJhbGciOiJSUzI1NiIsImtpZCI6IjE2Nzk5NjI2YmZlMDQzZTBiYzI5NTEwMTE4ODA3YWExIn0.eyJqdGkiOiJIcGh3eGFCSnlDOUpkdzU0cHJobktnIiwiaWF0IjoxNzgwMzgzNDcwLCJleHAiOjE3ODA0Njk4NzAsIm5iZiI6MTc4MDM4MzQxMCwic3ViIjoieXVueWEiLCJpc3MiOiJyYW5rIiwiYXVkIjoic2VsbGVyU3BhY2UiLCJpZCI6MTgwNTEyMCwicGkiOjEyOTQyNSwibm4iOiJJVEJNMDAwMDY3Iiwic3lzIjoiU1NfQ04iLCJlZCI6Ik4iLCJlbSI6IklUQk0wMDAwNjdAc2VsbGVyc3ByaXRlLmNvbSIsIm1sIjoiViIsImVuZCI6MTc4MjU0MzQ3MDU0Nn0.VqZsxM61yLgBaubJyYUjPoW0mTj-szjg8aPFmOQbtnQBfga017YVuW2OcOcUw4Z1AI5JeVgGFdrzghkWkhydJrdJ6_L7znuAr-DizDuVE7vQecjWWmFmLpFFgjgIsfGVE7B2lLx__cpx7oqw37SmVuJmwu6MwOsqtXVdqZrsO0r_RH4yBFU3SpyZu8L5x8wiGq7UiWLg_6Q9j3S530rlZWMhVWBrzt_dMuflyecdj3JFLGVLqPLwfFYCs3waLYH5INKCV0K3ARoWQ8Aso9A69AKcYDUECV6aNroPBBCQkNO4T-0tlWUe_lCVF221QB5NlDM_bO8bfrp6vNyLKe-duQ",
+        "ao_lo_to_n": "\"0701440871A++WqsjzTTKriM3w4ZyMh/1tcut7IaTQO8F8mvI1XB/4dlql0mJxERc2gKUPSxMZu5+vE5ZtUb7J3I/tJAkxAjWpGgvNqjlw0ewC2kv99jA=\"",
+        "Hm_lpvt_e0dfc78949a2d7c553713cb5c573a486": "1780383505",
+        "_clsk": "1ndt70%5E1780383506130%5E13%5E1%5En.clarity.ms%2Fcollect",
+        "JSESSIONID": "EDA07B00E78038AE02C3F1943C40B4B4",
+        "_ga_CN0F80S6GL": "GS2.1.s1780383025$o102$g1$t1780383513$j11$l0$h0",
+        "_ga_38NCVF2XST": "GS2.1.s1780383025$o60$g1$t1780383513$j11$l0$h1266767465"
     }
     url = "https://www.sellersprite.com/w/user/signin"
     data = {
@@ -94,10 +98,13 @@ async def get_seller_wizard_set_cookie(username: str, password: str):
 
         return user_info
 
-async def set_cookie_main(username:str,password:str):
+async def set_cookie_main(username:str,password:str=''):
     result = await get_seller_wizard_set_cookie(username, password)
     print(result)
     return result
 
+
+
+
 if __name__ == '__main__':
-    asyncio.run(set_cookie_main("ITBM000001","ITBM000001"))
+    asyncio.run(set_cookie_main("ITBM000067","ITBM000067"))

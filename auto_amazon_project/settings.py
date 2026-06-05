@@ -173,3 +173,10 @@ CACHES = {
         # 'OPTIONS': _redis_options,
     }
 }
+
+# 定时任务（重点关注 ASIN，7 天间隔；手动计算不重置计时）
+SCHEDULER_ENABLED = os.environ.get('SCHEDULER_ENABLED', 'true').lower() in ('1', 'true', 'yes', 'on')
+PRIORITY_ROI_INTERVAL_DAYS = int(os.environ.get('PRIORITY_ROI_INTERVAL_DAYS', '7'))
+PRIORITY_AD_INTERVAL_DAYS = int(os.environ.get('PRIORITY_AD_INTERVAL_DAYS', '7'))
+USD_CNY_RATE_FALLBACK = float(os.environ.get('USD_CNY_RATE_FALLBACK', '7.2'))
+USD_CNY_RATE_CACHE_SECONDS = int(os.environ.get('USD_CNY_RATE_CACHE_SECONDS', '21600'))

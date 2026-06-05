@@ -27,15 +27,26 @@ from django.urls import reverse
 from django.views.decorators.http import require_GET, require_POST
 from openpyxl import Workbook, load_workbook
 
-from .asin_wizard import run_ad_difficulty_for_asins, run_seller_wizard
+from .asin_job_lock import AsinComputeLock
+from .resilient_wizard import (
+    ordered_unique_asins,
+    run_ad_difficulty_asins_sequential,
+    run_roi_asins_sequential,
+)
+from .asin_wizard import run_seller_wizard
 from .excel_io import read_active_sheet_rich, save_sheet_values_preserving_format
 from .forms import RegisterForm
 from .media_paths import media_root, parent_rel, safe_media_path_global
 from .dashboard_ops_filter import run_dashboard_ops_filter
 from .asin_access import (
+    dedupe_dashboard_rows,
     normalize_asin,
+    resolve_dashboard_row_for_persist,
     user_assigned_asin_codes,
     user_can_access_excel_media_path,
+    user_can_delete_dashboard_row,
+    user_can_operate_dashboard_row,
+    user_dashboard_rows_qs,
     user_imported_asin_codes,
 )
 from .excel_import_utils import ensure_dir_nodes_registered, extract_zip_to_media_root
@@ -46,18 +57,37 @@ from .media_import_staging import (
     refresh_conflicts_in_meta,
 )
 from .models import (
+    AsinCatalogItem,
     AsinDashboardRow,
     AsinDataUpdateStamp,
     AsinFolderAssignment,
     AsinRoiPackVerification,
+    AsinUploadBatch,
     ImportedMediaPath,
+    ScheduledTaskMessage,
     UserProfile,
 )
-from .roi_us_pack_recalc import is_roi_us_pack_filename, recalc_roi_us_pack_rows
+from .asin_upload import batch_asin_lines, ingest_asin_upload
+from .roi_us_pack_recalc import (
+    extract_dashboard_metrics_from_roi_us_pack,
+    is_roi_us_pack_filename,
+    recalc_roi_us_pack_rows,
+)
 from .utils import product_grade_from_monthly_profit1
+from .exchange_rate import fetch_usd_cny_rate
 
 
 WIZARD_JOB_TTL = 7200
+
+
+def _default_exchange_rate_for_form() -> str:
+    """页面汇率输入框默认值（实时获取，用户仍可修改）。"""
+    try:
+        rate = fetch_usd_cny_rate()
+    except Exception:
+        rate = float(getattr(settings, 'USD_CNY_RATE_FALLBACK', 7.2))
+    text = f'{rate:.4f}'.rstrip('0').rstrip('.')
+    return text or '7.2'
 
 
 def _dashboard_per_page(request) -> int:
@@ -138,7 +168,9 @@ def _attach_row_assignee_labels(
     for r in rows:
         key = normalize_asin(r.asin)
         r.assignee_display = label_map.get(key) or '—'
-        r.ops_readonly = r.user_id != viewer_id
+        can_operate = viewer_is_superuser or r.user_id == viewer_id or key in viewer_assigned_asins
+        r.ops_readonly = not can_operate
+        r.can_delete_row = viewer_is_superuser or r.user_id == viewer_id
         r.can_open_dir = viewer_is_superuser or (key in viewer_assigned_asins)
         r.roi_pack_verified = key in verified
 
@@ -450,6 +482,7 @@ DASHBOARD_SORT_FIELDS = {
     'product_grade': 'monthly_profit1',
     'created_at': 'created_at',
     'updated_at': 'updated_at',
+    'follow_status': 'follow_status',
 }
 
 
@@ -613,15 +646,18 @@ def index(request):
             if err:
                 messages.error(request, err)
                 return redirect('index')
+            accessible = user_dashboard_rows_qs(request.user)
             rows_sel = list(
-                AsinDashboardRow.objects.filter(user=request.user, pk__in=ids).only(
+                accessible.filter(pk__in=ids).only(
                     'pk', 'asin', 'unit_purchase', 'head_distance'
                 )
             )
+            rows_sel = [r for r in rows_sel if user_can_operate_dashboard_row(request.user, r)]
             asins = sorted({r.asin for r in rows_sel if r.asin})
             if not asins:
                 messages.error(request, '未找到可计算的 ASIN。')
                 return redirect('index')
+            target_row_ids = {r.asin: r.pk for r in rows_sel}
             cost_overrides: dict = {}
             for r in rows_sel:
                 up_in = _get_float(request.POST.get(f'unit_purchase_{r.pk}'))
@@ -636,7 +672,7 @@ def index(request):
                 if up_val is not None and hd_val is not None:
                     updates['head_actual_total'] = round(up_val + hd_val, 2)
                 if updates:
-                    AsinDashboardRow.objects.filter(user=request.user, pk=r.pk).update(**updates)
+                    AsinDashboardRow.objects.filter(pk=r.pk).update(**updates)
                 one = {}
                 if up_val is not None:
                     one['unit_purchase'] = float(up_val)
@@ -662,7 +698,7 @@ def index(request):
             )
             t = threading.Thread(
                 target=_run_wizard_job,
-                args=(jid, request.user.id, asins, parity, cost_overrides),
+                args=(jid, request.user.id, asins, parity, cost_overrides, target_row_ids),
                 daemon=True,
             )
             t.start()
@@ -677,11 +713,14 @@ def index(request):
             if active:
                 messages.error(request, '已有任务在运行中，请等待当前任务完成后再发起新的计算。')
                 return redirect(f"{reverse('compute_roi')}?job_id={active}")
-            rows_sel = list(AsinDashboardRow.objects.filter(user=request.user, pk__in=ids).only('asin'))
+            accessible = user_dashboard_rows_qs(request.user)
+            rows_sel = list(accessible.filter(pk__in=ids).only('pk', 'asin'))
+            rows_sel = [r for r in rows_sel if user_can_operate_dashboard_row(request.user, r)]
             asins = sorted({r.asin for r in rows_sel if r.asin})
             if not asins:
                 messages.error(request, '未找到可计算的记录。')
                 return redirect('index')
+            target_row_pks = [r.pk for r in rows_sel]
             jid = str(uuid.uuid4())
             key = _wizard_job_key(jid)
             _set_user_active_job(request.user.id, jid)
@@ -699,7 +738,7 @@ def index(request):
             )
             t = threading.Thread(
                 target=_run_ad_difficulty_job,
-                args=(jid, request.user.id, asins),
+                args=(jid, request.user.id, asins, target_row_pks),
                 daemon=True,
             )
             t.start()
@@ -724,6 +763,20 @@ def index(request):
                         messages.success(request, msg)
                     else:
                         messages.warning(request, msg)
+        elif action == 'set_follow_status':
+            rid = (request.POST.get('row_id') or '').strip()
+            status = (request.POST.get('follow_status') or '').strip()
+            if rid.isdigit() and status in (
+                AsinDashboardRow.FollowStatus.NORMAL,
+                AsinDashboardRow.FollowStatus.PRIORITY,
+            ):
+                row = user_dashboard_rows_qs(request.user).filter(pk=int(rid)).first()
+                if row and user_can_operate_dashboard_row(request.user, row):
+                    AsinDashboardRow.objects.filter(pk=row.pk).update(follow_status=status)
+            nxt = (request.POST.get('next') or '').strip()
+            if nxt.startswith('/') and not nxt.startswith('//'):
+                return redirect(nxt)
+            return redirect('index')
         return redirect('index')
 
     sort_key = request.GET.get('sort', 'updated_at')
@@ -737,9 +790,7 @@ def index(request):
     assigned_codes = user_assigned_asin_codes(request.user)
     assigned_set = {normalize_asin(a) for a in assigned_codes}
     viewer_is_superuser = bool(request.user.is_superuser)
-    rows_qs = AsinDashboardRow.objects.filter(
-        Q(user=request.user) | Q(asin__in=assigned_codes)
-    ).distinct()
+    rows_qs = user_dashboard_rows_qs(request.user)
     updated_stamp_map = {
         normalize_asin(a): t
         for a, t in AsinDataUpdateStamp.objects.values_list('asin', 'updated_at')
@@ -808,6 +859,12 @@ def index(request):
         else:
             rows_qs = rows_qs.exclude(asin__in=verified_codes)
 
+    follow_f = (request.GET.get('follow_filter') or '').strip()
+    if follow_f == AsinDashboardRow.FollowStatus.NORMAL:
+        rows_qs = rows_qs.filter(follow_status=AsinDashboardRow.FollowStatus.NORMAL)
+    elif follow_f == AsinDashboardRow.FollowStatus.PRIORITY:
+        rows_qs = rows_qs.filter(follow_status=AsinDashboardRow.FollowStatus.PRIORITY)
+
     if field == 'updated_at':
         rows = list(rows_qs)
         rows.sort(
@@ -859,6 +916,10 @@ def index(request):
             if hit:
                 filtered.append(r)
         rows = filtered
+
+    if not isinstance(rows, list):
+        rows = list(rows)
+    rows = dedupe_dashboard_rows(rows, request.user.id, assigned_set)
 
     page_num = request.GET.get('page') or 1
     per_page = _dashboard_per_page(request)
@@ -912,9 +973,14 @@ def index(request):
                 'ops_range': ops_range,
                 'selected_grades': allowed,
                 'roi_verified': roi_verified_f if roi_verified_f in ('yes', 'no') else '',
+                'follow_filter': follow_f if follow_f in (
+                    AsinDashboardRow.FollowStatus.NORMAL,
+                    AsinDashboardRow.FollowStatus.PRIORITY,
+                ) else '',
                 'updated_from': (request.GET.get('updated_from') or '').strip(),
                 'updated_to': (request.GET.get('updated_to') or '').strip(),
             },
+            'default_exchange_rate': _default_exchange_rate_for_form(),
         },
     )
 
@@ -931,8 +997,8 @@ def dashboard_ops_filter(request):
         messages.error(request, '参数无效。')
         return redirect('index')
     row = AsinDashboardRow.objects.filter(pk=int(row_id)).first()
-    if not row or row.user_id != request.user.id:
-        messages.error(request, '只能操作本人导入的数据行。')
+    if not row or not user_can_operate_dashboard_row(request.user, row):
+        messages.error(request, '无权操作该数据行。')
         return redirect('index')
     payload = getattr(row, field, '') or ''
     ok, msg = run_dashboard_ops_filter(row.asin, payload)
@@ -1025,8 +1091,30 @@ def _ops_difficulty_three_fields(data: dict, asin: str) -> tuple[str, str, str]:
     return out[0], out[1], out[2]
 
 
-def _persist_wizard_results(user_id: int, result: dict, parity: float) -> int:
-    """按 (user, asin) 覆盖写入：已存在则 update，不新增重复行。"""
+def _sync_dashboard_from_roi_us_pack(user: User, asin: str, rows: list) -> None:
+    """Excel ROI-US-pack 保存/重算后，将去广告毛利率、去广告投产比等同步到看板行。"""
+    metrics = extract_dashboard_metrics_from_roi_us_pack(rows)
+    if not metrics:
+        return
+    row = resolve_dashboard_row_for_persist(user, asin)
+    if row is None:
+        return
+    updates = {k: v for k, v in metrics.items() if v is not None}
+    if not updates:
+        return
+    AsinDashboardRow.objects.filter(pk=row.pk).update(**updates)
+    AsinDashboardRow.objects.filter(user_id=user.id, asin=normalize_asin(asin)).exclude(
+        pk=row.pk
+    ).delete()
+
+
+def _persist_wizard_results(
+    user_id: int,
+    result: dict,
+    parity: float,
+    target_row_ids: dict[str, int] | None = None,
+) -> int:
+    """按指定看板行或 (user, asin) 覆盖写入：已存在则 update，不新增重复行。"""
 
     def _to_float(v):
         if v is None:
@@ -1038,6 +1126,8 @@ def _persist_wizard_results(user_id: int, result: dict, parity: float) -> int:
 
     n = 0
     touched_asins: set[str] = set()
+    row_id_map = target_row_ids or {}
+    user = User.objects.filter(pk=user_id).first()
     for asin, data in result.items():
         if not isinstance(data, dict):
             continue
@@ -1050,8 +1140,12 @@ def _persist_wizard_results(user_id: int, result: dict, parity: float) -> int:
         hd = _to_float(data.get('head_distance'))
         ac = _to_float(data.get('actual_cost'))
         ad_roi = _to_float(data.get('ad_removed_roi'))
+        if ad_roi is None:
+            ad_roi = 0.5
 
-        existing = AsinDashboardRow.objects.filter(user_id=user_id, asin=asin).first()
+        existing = resolve_dashboard_row_for_persist(user, asin, row_id_map) if user else None
+        if existing is None:
+            existing = AsinDashboardRow.objects.filter(user_id=user_id, asin=asin).first()
         ranking_to_store = rp
         if existing is not None and existing.ranking_percent is not None:
             try:
@@ -1068,30 +1162,38 @@ def _persist_wizard_results(user_id: int, result: dict, parity: float) -> int:
             hat = round(hd + up, 2)
 
         o1, o2, o3 = _ops_difficulty_three_fields(data, asin)
+        if existing is not None:
+            if not (o1 or '').strip() and (existing.ops_difficulty_1 or '').strip():
+                o1 = existing.ops_difficulty_1
+            if not (o2 or '').strip() and (existing.ops_difficulty_2 or '').strip():
+                o2 = existing.ops_difficulty_2
+            if not (o3 or '').strip() and (existing.ops_difficulty_3 or '').strip():
+                o3 = existing.ops_difficulty_3
 
-        AsinDashboardRow.objects.update_or_create(
-            user_id=user_id,
-            asin=asin,
-            defaults={
-                'profit_margin': pm,
-                'ranking_percent': ranking_to_store,
-                'ops_difficulty_1': o1,
-                'ops_difficulty_2': o2,
-                'ops_difficulty_3': o3,
-                'unit_purchase': up,
-                'monthly_results': mr,
-                'profit_per_order': ppo,
-                'monthly_profit1': mp1,
-                'monthly_sales_total': mp1,
-                'head_distance': hd,
-                'actual_cost': ac,
-                'head_actual_total': hat,
-                'ad_removed_roi': ad_roi*100,
-                'product_grade': product_grade_from_monthly_profit1(mp1),
-                'sales_trend_json': '',
-                'exchange_rate': parity,
-            },
-        )
+        defaults = {
+            'profit_margin': pm,
+            'ranking_percent': ranking_to_store,
+            'ops_difficulty_1': o1,
+            'ops_difficulty_2': o2,
+            'ops_difficulty_3': o3,
+            'unit_purchase': up,
+            'monthly_results': mr,
+            'profit_per_order': ppo,
+            'monthly_profit1': mp1,
+            'monthly_sales_total': mp1,
+            'head_distance': hd,
+            'actual_cost': ac,
+            'head_actual_total': hat,
+            'ad_removed_roi': ad_roi * 100,
+            'product_grade': product_grade_from_monthly_profit1(mp1),
+            'sales_trend_json': '',
+            'exchange_rate': parity,
+        }
+        if existing is not None:
+            AsinDashboardRow.objects.filter(pk=existing.pk).update(**defaults)
+            AsinDashboardRow.objects.filter(user_id=user_id, asin=asin).exclude(pk=existing.pk).delete()
+        else:
+            AsinDashboardRow.objects.create(user_id=user_id, asin=asin, **defaults)
         n += 1
         touched_asins.add(asin)
     _touch_asin_updates(touched_asins)
@@ -1104,9 +1206,21 @@ def _run_wizard_job(
         asins: list[str] | None,
         parity: float,
         cost_overrides: dict | None = None,
+        target_row_ids: dict[str, int] | None = None,
 ) -> None:
     key = _wizard_job_key(job_id)
     close_old_connections()
+    lock = AsinComputeLock(asins, f'user:{user_id}:{job_id}')
+    blocked = lock.acquire()
+    if blocked:
+        ent = cache.get(key) or {}
+        ent['status'] = 'error'
+        ent['error'] = f'ASIN {blocked} 正在被其他任务计算，请稍后重试。'
+        ent['user_id'] = user_id
+        cache.set(key, ent, 3600)
+        _clear_user_active_job(user_id, job_id)
+        close_old_connections()
+        return
     try:
 
         def on_line(line: str) -> None:
@@ -1121,12 +1235,41 @@ def _run_wizard_job(
             ent['user_id'] = user_id
             cache.set(key, ent, WIZARD_JOB_TTL)
 
-        result = run_seller_wizard(asins, parity, cost_overrides=cost_overrides, on_stderr_line=on_line)
-        n = _persist_wizard_results(user_id, result, parity)
+        def on_progress(msg: str) -> None:
+            on_line(msg)
+
+        asin_list = ordered_unique_asins(asins)
+        written = 0
+
+        if asin_list:
+            def _persist_one(asin: str, part: dict) -> None:
+                nonlocal written
+                row_ids = None
+                if target_row_ids and asin in target_row_ids:
+                    row_ids = {asin: target_row_ids[asin]}
+                written += _persist_wizard_results(
+                    user_id, part, parity, target_row_ids=row_ids
+                )
+
+            run_roi_asins_sequential(
+                asin_list,
+                parity,
+                cost_overrides=cost_overrides,
+                on_stderr_line=on_line,
+                on_progress=on_progress,
+                on_asin_done=_persist_one,
+            )
+        else:
+            result = run_seller_wizard(
+                asins, parity, cost_overrides=cost_overrides, on_stderr_line=on_line
+            )
+            written = _persist_wizard_results(
+                user_id, result, parity, target_row_ids=target_row_ids
+            )
 
         ent = cache.get(key) or {}
         ent['status'] = 'done'
-        ent['rows_written'] = n
+        ent['rows_written'] = written
         ent['redirect'] = reverse('index')
         ent['user_id'] = user_id
         cache.set(key, ent, 900)
@@ -1141,13 +1284,30 @@ def _run_wizard_job(
         ent['user_id'] = user_id
         cache.set(key, ent, 3600)
     finally:
+        lock.release_all()
         _clear_user_active_job(user_id, job_id)
         close_old_connections()
 
 
-def _run_ad_difficulty_job(job_id: str, user_id: int, asins: list[str]) -> None:
+def _run_ad_difficulty_job(
+    job_id: str,
+    user_id: int,
+    asins: list[str],
+    target_row_pks: list[int] | None = None,
+) -> None:
     key = _wizard_job_key(job_id)
     close_old_connections()
+    lock = AsinComputeLock(asins, f'user:{user_id}:{job_id}')
+    blocked = lock.acquire()
+    if blocked:
+        ent = cache.get(key) or {}
+        ent['status'] = 'error'
+        ent['error'] = f'ASIN {blocked} 正在被其他任务计算，请稍后重试。'
+        ent['user_id'] = user_id
+        cache.set(key, ent, 3600)
+        _clear_user_active_job(user_id, job_id)
+        close_old_connections()
+        return
     try:
         def on_line(line: str) -> None:
             ent = cache.get(key) or {}
@@ -1161,21 +1321,44 @@ def _run_ad_difficulty_job(job_id: str, user_id: int, asins: list[str]) -> None:
             ent['user_id'] = user_id
             cache.set(key, ent, WIZARD_JOB_TTL)
 
-        result = run_ad_difficulty_for_asins(asins, on_stderr_line=on_line)
-        rows_sel = list(
-            AsinDashboardRow.objects.filter(user_id=user_id, asin__in=asins).only('pk', 'asin')
-        )
+        def on_progress(msg: str) -> None:
+            on_line(msg)
+
+        if target_row_pks:
+            rows_sel = list(
+                AsinDashboardRow.objects.filter(pk__in=target_row_pks).only('pk', 'asin')
+            )
+        else:
+            rows_sel = list(
+                AsinDashboardRow.objects.filter(user_id=user_id, asin__in=asins).only('pk', 'asin')
+            )
+        asin_to_pk = {normalize_asin(r.asin): r.pk for r in rows_sel if normalize_asin(r.asin)}
+        asin_list = ordered_unique_asins(asins)
+        asin_list = [a for a in asin_list if a in asin_to_pk]
+
         updated = 0
-        for r in rows_sel:
-            payload = result.get(r.asin) or {}
+
+        def _persist_ad(asin: str, part: dict) -> None:
+            nonlocal updated
+            pk = asin_to_pk.get(asin)
+            if not pk:
+                return
+            payload = part.get(asin) or {}
             rp = payload.get('ranking_percent')
             try:
                 rp_num = float(rp)
             except (TypeError, ValueError):
                 rp_num = 0.0
-            AsinDashboardRow.objects.filter(user_id=user_id, pk=r.pk).update(ranking_percent=rp_num)
+            AsinDashboardRow.objects.filter(pk=pk).update(ranking_percent=rp_num)
             updated += 1
-        _touch_asin_updates({r.asin for r in rows_sel})
+
+        run_ad_difficulty_asins_sequential(
+            asin_list,
+            on_stderr_line=on_line,
+            on_progress=on_progress,
+            on_asin_done=_persist_ad,
+        )
+        _touch_asin_updates(asin_list)
 
         ent = cache.get(key) or {}
         ent['status'] = 'done'
@@ -1194,6 +1377,7 @@ def _run_ad_difficulty_job(job_id: str, user_id: int, asins: list[str]) -> None:
         ent['user_id'] = user_id
         cache.set(key, ent, 3600)
     finally:
+        lock.release_all()
         _clear_user_active_job(user_id, job_id)
         close_old_connections()
 
@@ -1374,14 +1558,157 @@ def compute_roi_page(request):
             'total_pending': len(pending_asins),
             'total_all': len(all_asins),
             'include_recomputed': include_recomputed,
+            'default_exchange_rate': _default_exchange_rate_for_form(),
         },
     )
 
 
 @login_required
+def schedule_messages_page(request):
+    """定时任务推送消息：普通用户仅看发给自己的消息。"""
+    qs = ScheduledTaskMessage.objects.select_related('recipient', 'dashboard_row')
+    if not request.user.is_superuser:
+        qs = qs.filter(recipient=request.user)
+
+    alert_filter = (request.GET.get('alert') or '').strip().lower()
+    if alert_filter == 'yes':
+        qs = qs.filter(alert_status=ScheduledTaskMessage.AlertStatus.ALERT)
+    elif alert_filter == 'no':
+        qs = qs.filter(alert_status=ScheduledTaskMessage.AlertStatus.NORMAL)
+
+    asin_q = (request.GET.get('asin') or '').strip().upper()
+    if asin_q:
+        qs = qs.filter(asin__icontains=asin_q)
+
+    paginator = Paginator(qs, 30)
+    page_obj = paginator.get_page(request.GET.get('page') or 1)
+
+    return render(
+        request,
+        'auto_amazon/schedule_messages.html',
+        {
+            'page_obj': page_obj,
+            'filters': {
+                'alert': alert_filter,
+                'asin': asin_q,
+            },
+        },
+    )
+
+
+@login_required
+def asin_upload_page(request):
+    """上传 ASIN 页面：所有登录用户可见。"""
+    if request.method == 'POST':
+        up = request.FILES.get('asin_file')
+        if up is None:
+            messages.error(request, '请选择要上传的文件。')
+            return redirect('asin_upload')
+        raw = up.read()
+        if not raw:
+            messages.error(request, '文件为空。')
+            return redirect('asin_upload')
+        batch, err = ingest_asin_upload(request.user, getattr(up, 'name', '') or '', raw)
+        if err:
+            messages.error(request, err)
+            return redirect('asin_upload')
+        if batch.new_count == 0:
+            messages.warning(
+                request,
+                f'文件共识别 {batch.total_in_file} 个 ASIN，均已存在于库中，未新增。',
+            )
+        else:
+            msg = (
+                f'上传成功：文件内 {batch.total_in_file} 个 ASIN，'
+                f'新增 {batch.new_count} 个'
+            )
+            if batch.skipped_count:
+                msg += f'，跳过重复 {batch.skipped_count} 个'
+            msg += '。'
+            messages.success(request, msg)
+        return redirect('asin_upload')
+
+    qs = AsinUploadBatch.objects.select_related('user', 'downloaded_by').all()
+
+    uploader = (request.GET.get('uploader') or '').strip()
+    if uploader:
+        qs = qs.filter(user__username__iexact=uploader)
+
+    dl_status = (request.GET.get('download_status') or '').strip().lower()
+    if dl_status == 'yes':
+        qs = qs.filter(is_downloaded=True)
+    elif dl_status == 'no':
+        qs = qs.filter(is_downloaded=False)
+
+    paginator = Paginator(qs, 20)
+    page_obj = paginator.get_page(request.GET.get('page') or 1)
+
+    uploader_choices = list(
+        User.objects.filter(asin_upload_batches__isnull=False)
+        .distinct()
+        .order_by('username')
+        .values_list('username', flat=True)
+    )
+    total_catalog = AsinCatalogItem.objects.count()
+
+    kept = request.GET.copy()
+    kept.pop('page', None)
+    filter_qs = kept.urlencode()
+
+    return render(
+        request,
+        'auto_amazon/asin_upload.html',
+        {
+            'page_obj': page_obj,
+            'batches': page_obj.object_list,
+            'uploader_choices': uploader_choices,
+            'filter_qs': filter_qs,
+            'filters': {
+                'uploader': uploader,
+                'download_status': dl_status,
+            },
+            'total_catalog': total_catalog,
+            'total_batches': AsinUploadBatch.objects.count(),
+        },
+    )
+
+
+@login_required
+def asin_upload_export(request, batch_id: int):
+    """导出批次 ASIN 为 txt，并标记为已下载。"""
+    is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+    batch = AsinUploadBatch.objects.filter(pk=batch_id).first()
+    if batch is None:
+        if is_ajax:
+            return JsonResponse({'ok': False, 'error': '上传记录不存在'}, status=404)
+        raise Http404('上传记录不存在')
+    lines = batch_asin_lines(batch)
+    if not lines:
+        err = '该批次没有可导出的 ASIN（可能全部为重复未入库）。'
+        if is_ajax:
+            return JsonResponse({'ok': False, 'error': err}, status=400)
+        messages.warning(request, err)
+        return redirect('asin_upload')
+
+    if not batch.is_downloaded:
+        batch.is_downloaded = True
+        batch.downloaded_at = timezone.now()
+        batch.downloaded_by = request.user
+        batch.save(update_fields=['is_downloaded', 'downloaded_at', 'downloaded_by'])
+
+    content = '\n'.join(lines) + '\n'
+    fn = f'asin_batch_{batch_id}_{batch.created_at:%Y%m%d_%H%M%S}.txt'
+    resp = HttpResponse(content, content_type='text/plain; charset=utf-8')
+    resp['Content-Disposition'] = f'attachment; filename="{fn}"'
+    if is_ajax:
+        resp['X-Download-Username'] = request.user.username
+    return resp
+
+
+@login_required
 @user_passes_test(lambda u: bool(getattr(u, 'is_superuser', False)))
 def fetch_data_page(request):
-    return render(request, 'auto_amazon/fetch_data.html')
+    return redirect('asin_upload')
 
 
 @login_required
@@ -1923,6 +2250,8 @@ def excel_save_media(request):
     parent_asin = normalize_asin(path.parent.name)
     if re.match(r'^B0[A-Z0-9]{8}$', parent_asin):
         _touch_asin_updates({parent_asin})
+        if is_roi_us_pack_filename(path.name):
+            _sync_dashboard_from_roi_us_pack(request.user, parent_asin, rows)
     return JsonResponse({'ok': True, 'path': rel})
 
 
@@ -2049,6 +2378,7 @@ def excel_recalc_roi_media(request):
     parent_asin = normalize_asin(path.parent.name)
     if re.match(r'^B0[A-Z0-9]{8}$', parent_asin):
         _touch_asin_updates({parent_asin})
+        _sync_dashboard_from_roi_us_pack(request.user, parent_asin, rows)
     return JsonResponse({'ok': True, 'path': rel})
 
 
@@ -2124,8 +2454,8 @@ def dashboard_export_excel(request):
         return redirect('index')
     assigned = user_assigned_asin_codes(request.user)
     rows = list(
-        AsinDashboardRow.objects.filter(pk__in=ids)
-        .filter(Q(user=request.user) | Q(asin__in=assigned))
+        user_dashboard_rows_qs(request.user)
+        .filter(pk__in=ids)
         .select_related('user')
         .order_by('asin')
     )
