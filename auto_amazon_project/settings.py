@@ -38,6 +38,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'django_rq',
     'auto_amazon.apps.AutoAmazonConfig',
 ]
 
@@ -66,6 +67,7 @@ TEMPLATES = [
                 'django.template.context_processors.request',
                 'django.contrib.auth.context_processors.auth',
                 'django.contrib.messages.context_processors.messages',
+                'auto_amazon.context_processors.wizard_job_context',
             ],
         },
     },
@@ -158,7 +160,8 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 REDIS_HOST = os.environ.get('REDIS_HOST', '127.0.0.1')
 REDIS_PORT = os.environ.get('REDIS_PORT', '6379')
 REDIS_DB = os.environ.get('REDIS_DB', '1')
-REDIS_PASSWORD = os.environ.get('REDIS_PASSWORD', '201314')
+# 默认无密码；生产环境有密码时在 .env 设置 REDIS_PASSWORD
+REDIS_PASSWORD = os.environ.get('REDIS_PASSWORD', '')
 
 _redis_options = {
     'CLIENT_CLASS': 'django_redis.client.DefaultClient',
@@ -169,8 +172,8 @@ if REDIS_PASSWORD:
 CACHES = {
     'default': {
         'BACKEND': 'django_redis.cache.RedisCache',
-        'LOCATION': f'redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}'
-        # 'OPTIONS': _redis_options,
+        'LOCATION': f'redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}',
+        'OPTIONS': _redis_options,
     }
 }
 
@@ -180,3 +183,42 @@ PRIORITY_ROI_INTERVAL_DAYS = int(os.environ.get('PRIORITY_ROI_INTERVAL_DAYS', '7
 PRIORITY_AD_INTERVAL_DAYS = int(os.environ.get('PRIORITY_AD_INTERVAL_DAYS', '7'))
 USD_CNY_RATE_FALLBACK = float(os.environ.get('USD_CNY_RATE_FALLBACK', '7.2'))
 USD_CNY_RATE_CACHE_SECONDS = int(os.environ.get('USD_CNY_RATE_CACHE_SECONDS', '21600'))
+
+# ROI 批量：单 ASIN 失败隔离与重试（阶段 A）
+ROI_ASIN_MAX_RETRIES = int(os.environ.get('ROI_ASIN_MAX_RETRIES', '3'))
+ROI_ASIN_RETRY_DELAY_SEC = float(os.environ.get('ROI_ASIN_RETRY_DELAY_SEC', '5'))
+
+# RQ 任务队列（阶段 B）
+# 本地 DEBUG 默认不走 RQ（无需单独开 Worker）；Docker/生产在环境变量显式设 ROI_USE_RQ=true
+_roi_use_rq_raw = os.environ.get('ROI_USE_RQ')
+if _roi_use_rq_raw is None:
+    ROI_USE_RQ = not DEBUG
+else:
+    ROI_USE_RQ = _roi_use_rq_raw.lower() in ('1', 'true', 'yes', 'on')
+ROI_WIZARD_EXEC_MODE = os.environ.get('ROI_WIZARD_EXEC_MODE', 'subprocess')  # worker 容器设为 inprocess
+RQ_QUEUE_ROI_HIGH = os.environ.get('RQ_QUEUE_ROI_HIGH', 'roi_high')
+RQ_QUEUE_ROI_DEFAULT = os.environ.get('RQ_QUEUE_ROI_DEFAULT', 'roi_default')
+RQ_QUEUE_ROI_SCHEDULED = os.environ.get('RQ_QUEUE_ROI_SCHEDULED', 'roi_scheduled')
+RQ_JOB_TIMEOUT = int(os.environ.get('RQ_JOB_TIMEOUT', '86400'))  # 秒，默认 24h
+ROI_SELLERSPRITE_MAX_CONCURRENT = int(os.environ.get('ROI_SELLERSPRITE_MAX_CONCURRENT', '6'))
+ROI_SIF_MAX_CONCURRENT = int(os.environ.get('ROI_SIF_MAX_CONCURRENT', '4'))
+ROI_TAOBAO_MAX_CONCURRENT = int(os.environ.get('ROI_TAOBAO_MAX_CONCURRENT', '1'))
+
+_redis_url = f'redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}'
+if REDIS_PASSWORD:
+    _redis_url = f'redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}'
+
+RQ_QUEUES = {
+    RQ_QUEUE_ROI_HIGH: {
+        'URL': _redis_url,
+        'DEFAULT_TIMEOUT': RQ_JOB_TIMEOUT,
+    },
+    RQ_QUEUE_ROI_DEFAULT: {
+        'URL': _redis_url,
+        'DEFAULT_TIMEOUT': RQ_JOB_TIMEOUT,
+    },
+    RQ_QUEUE_ROI_SCHEDULED: {
+        'URL': _redis_url,
+        'DEFAULT_TIMEOUT': RQ_JOB_TIMEOUT,
+    },
+}

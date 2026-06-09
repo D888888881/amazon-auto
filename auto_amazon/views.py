@@ -1,7 +1,6 @@
 import json
 from datetime import datetime
 import shutil
-import threading
 import uuid
 import zipfile
 from io import BytesIO
@@ -29,12 +28,21 @@ from openpyxl import Workbook, load_workbook
 
 from .asin_job_lock import AsinComputeLock
 from .resilient_wizard import (
+    AsinFailure,
+    BatchRunResult,
+    batch_result_from_wizard_output,
     ordered_unique_asins,
     run_ad_difficulty_asins_sequential,
     run_roi_asins_sequential,
+    use_sequential_roi,
 )
 from .asin_wizard import run_seller_wizard
-from .excel_io import read_active_sheet_rich, save_sheet_values_preserving_format
+from .excel_io import (
+    read_active_sheet_rich,
+    save_sheet_values_preserving_format,
+    search_xlsx_save_is_rewrite,
+)
+from .excel_search_restore import build_origin_row_from_search, search_row_to_api_record
 from .forms import RegisterForm
 from .media_paths import media_root, parent_rel, safe_media_path_global
 from .dashboard_ops_filter import run_dashboard_ops_filter
@@ -75,9 +83,17 @@ from .roi_us_pack_recalc import (
 )
 from .utils import product_grade_from_monthly_profit1
 from .exchange_rate import fetch_usd_cny_rate
-
-
-WIZARD_JOB_TTL = 7200
+from .wizard_jobs import (
+    WIZARD_JOB_TTL,
+    clear_user_active_job as _clear_user_active_job,
+    dismiss_active_job,
+    get_active_job_for_user,
+    job_status_payload,
+    new_job_entry,
+    refresh_job_entry,
+    set_user_active_job as _set_user_active_job,
+    wizard_job_key as _wizard_job_key,
+)
 
 
 def _default_exchange_rate_for_form() -> str:
@@ -88,6 +104,32 @@ def _default_exchange_rate_for_form() -> str:
         rate = float(getattr(settings, 'USD_CNY_RATE_FALLBACK', 7.2))
     text = f'{rate:.4f}'.rstrip('0').rstrip('.')
     return text or '7.2'
+
+
+def _merge_cost_overrides_from_db(
+    asins: list[str] | None, cost_overrides: dict | None
+) -> dict:
+    """图搜失败时可用看板已填写的采购价/头程作为 unit_purchase_override。"""
+    merged: dict = {}
+    asin_set = {normalize_asin(a) for a in (asins or []) if normalize_asin(a)}
+    if asin_set:
+        for r in AsinDashboardRow.objects.filter(asin__in=asin_set).only(
+            'asin', 'unit_purchase', 'head_distance'
+        ):
+            a = normalize_asin(r.asin)
+            if not a:
+                continue
+            one = merged.setdefault(a, {})
+            if r.unit_purchase is not None:
+                one.setdefault('unit_purchase', float(r.unit_purchase))
+            if r.head_distance is not None:
+                one.setdefault('head_distance', float(r.head_distance))
+    for a, one in (cost_overrides or {}).items():
+        key = normalize_asin(a)
+        if not key or not isinstance(one, dict):
+            continue
+        merged.setdefault(key, {}).update(one)
+    return merged
 
 
 def _dashboard_per_page(request) -> int:
@@ -273,6 +315,64 @@ def _highlight_deleted_rows_for_search(payload: dict, deleted_asins: set[str]) -
                     one['css'] = (base_css + ';background-color:#fff3cd').strip(';')
             else:
                 row[j] = {'v': str(one or ''), 'style': {}, 'css': 'background-color:#fff3cd'}
+
+
+def _rows_to_plain(rows: list) -> list[list[str]]:
+    out: list[list[str]] = []
+    for r in rows or []:
+        if not isinstance(r, list):
+            r = [r]
+        one: list[str] = []
+        for c in r:
+            if isinstance(c, dict):
+                one.append(str(c.get('v', '') or ''))
+            else:
+                one.append('' if c is None else str(c))
+        out.append(one)
+    return out
+
+
+def _header_index_map(header: list[str]) -> dict[str, int]:
+    m: dict[str, int] = {}
+    for i, h in enumerate(header):
+        key = str(h or '').strip().lower()
+        if key and key not in m:
+            m[key] = i
+    return m
+
+
+def _map_row_to_target_header(src_header: list[str], src_row: list[str], tgt_header: list[str]) -> list[str]:
+    src_map = _header_index_map(src_header)
+    out: list[str] = []
+    for th in tgt_header:
+        key = str(th or '').strip().lower()
+        idx = src_map.get(key)
+        if idx is None or idx >= len(src_row):
+            out.append('')
+        else:
+            out.append(src_row[idx])
+    return out
+
+
+def _find_data_origin_path(keyword_dir: Path) -> Path | None:
+    cands = sorted(keyword_dir.glob('*_data_origin.xlsx'))
+    return cands[0] if cands else None
+
+
+def _asin_set_from_plain_rows(rows: list[list[str]]) -> set[str]:
+    if not rows:
+        return set()
+    header = rows[0]
+    idx = _header_index_map(header).get('asin', -1)
+    if idx < 0:
+        return set()
+    out: set[str] = set()
+    for r in rows[1:]:
+        if idx < len(r):
+            v = str(r[idx] or '').strip().upper()
+            if v:
+                out.add(v)
+    return out
 
 
 def register(request):
@@ -510,8 +610,31 @@ def _get_int(val: str | None):
         return None
 
 
+OPS_REVIEW_INTERVAL_OPTIONS = ('0-30', '31-50', '51-100', '101-200', '200以上')
+
+
+def _is_200_plus_review_label(label: str) -> bool:
+    t = str(label).strip()
+    return '200以上' in t or t.replace(' ', '') in ('200+', '200＋')
+
+
+def _review_labels_equivalent(selected: str, actual: str) -> bool:
+    """看板筛选用的评价数量区间与 JSON 内「区间」标签是否等同。"""
+    sel = str(selected).strip()
+    act = str(actual).strip()
+    if not sel or not act:
+        return False
+    if sel == act:
+        return True
+    if sel == '101-200' and act in ('101-150', '151-200'):
+        return True
+    if sel == '200以上' and _is_200_plus_review_label(act):
+        return True
+    return False
+
+
 def _parse_ops_json(raw: str) -> list[tuple[str, float]]:
-    """从运营难度 JSON 中提取(区间, 百分比)；忽略「200以上」区间。"""
+    """从运营难度 JSON 中提取(评价数量区间, 运营难度百分比)。"""
     if not raw or not str(raw).strip():
         return []
     s = str(raw).strip()
@@ -546,29 +669,37 @@ def _parse_ops_json(raw: str) -> list[tuple[str, float]]:
                     if ops:
                         for i, x in enumerate(ops):
                             label = str(labels[i]).strip() if i < len(labels) else f'idx-{i}'
-                            # 规则：200以上不参与；若没有标签信息，兜底忽略第5段(索引4)
-                            if '200以上' in label or i == 4:
-                                continue
                             v = _to_num(x)
                             if v is not None:
                                 out.append((label, v))
                         if out:
                             return out
 
-    # 兼容旧格式文本：兜底提取百分比，按前4段参与筛选（第5段通常是200以上）
+    # 兼容旧格式文本：兜底提取百分比
+    fallback_labels = ['0-30', '31-50', '51-100', '101-200', '200以上']
     nums = re.findall(r'(\d+(?:\.\d+)?)\s*[%％]', s)
     for i, n in enumerate(nums):
-        if i >= 4:
-            break
-        out.append((f'idx-{i}', float(n)))
+        label = fallback_labels[i] if i < len(fallback_labels) else f'idx-{i}'
+        out.append((label, float(n)))
     return out
 
 
-def _ops_match(raw: str, lo: float | None, hi: float | None) -> bool:
+def _ops_match(
+    raw: str,
+    lo: float | None,
+    hi: float | None,
+    *,
+    review_interval: str = 'all',
+) -> bool:
     pairs = _parse_ops_json(raw)
     if not pairs:
         return False
-    for _, v in pairs:
+    for label, v in pairs:
+        if review_interval == 'all':
+            if _is_200_plus_review_label(label):
+                continue
+        elif not _review_labels_equivalent(review_interval, label):
+            continue
         if lo is not None and v < lo:
             continue
         if hi is not None and v > hi:
@@ -638,10 +769,13 @@ def index(request):
             if not ids:
                 messages.error(request, '请先勾选需要计算 ROI 的 ASIN。')
                 return redirect('index')
-            active = cache.get(_user_active_job_key(request.user.id))
+            active = get_active_job_for_user(request.user.id)
             if active:
-                messages.error(request, '已有任务在运行中，请等待当前任务完成后再发起新的计算。')
-                return redirect(f"{reverse('compute_roi')}?job_id={active}")
+                messages.warning(
+                    request,
+                    f'已有 ROI 任务进行中（{active["status_label"]}）。已跳转到进度页。',
+                )
+                return redirect(f"{reverse('compute_roi')}?job_id={active['job_id']}")
             parity, err = _parse_compute_local_form(request)
             if err:
                 messages.error(request, err)
@@ -685,23 +819,31 @@ def index(request):
             _set_user_active_job(request.user.id, jid)
             cache.set(
                 key,
-                {
-                    'status': 'running',
-                    'user_id': request.user.id,
-                    'progress': [
-                        '看板 ROI 计算任务已创建，正在启动分析子进程…',
+                new_job_entry(
+                    request.user.id,
+                    [
+                        '看板 ROI 计算任务已创建…',
                         f'当前汇率：{parity}。',
                         f'本次勾选 ASIN：{len(asins)} 个。',
                     ],
-                },
+                    task_type='wizard',
+                    parity=parity,
+                    asins=asins,
+                    cost_overrides=cost_overrides,
+                    target_row_ids=target_row_ids,
+                ),
                 WIZARD_JOB_TTL,
             )
-            t = threading.Thread(
-                target=_run_wizard_job,
-                args=(jid, request.user.id, asins, parity, cost_overrides, target_row_ids),
-                daemon=True,
+            from .rq_enqueue import dispatch_wizard_job
+
+            dispatch_wizard_job(
+                jid,
+                request.user.id,
+                asins,
+                parity,
+                cost_overrides=cost_overrides,
+                target_row_ids=target_row_ids,
             )
-            t.start()
             messages.success(request, f'已开始计算 {len(asins)} 个 ASIN 的 ROI，已跳转到进度页。')
             return redirect(f"{reverse('compute_roi')}?job_id={jid}")
         elif action == 'calc_ranking_selected':
@@ -709,10 +851,13 @@ def index(request):
             if not ids:
                 messages.error(request, '请先勾选需要计算广告难度的 ASIN。')
                 return redirect('index')
-            active = cache.get(_user_active_job_key(request.user.id))
+            active = get_active_job_for_user(request.user.id)
             if active:
-                messages.error(request, '已有任务在运行中，请等待当前任务完成后再发起新的计算。')
-                return redirect(f"{reverse('compute_roi')}?job_id={active}")
+                messages.warning(
+                    request,
+                    f'已有任务进行中（{active["status_label"]}）。已跳转到进度页。',
+                )
+                return redirect(f"{reverse('compute_roi')}?job_id={active['job_id']}")
             accessible = user_dashboard_rows_qs(request.user)
             rows_sel = list(accessible.filter(pk__in=ids).only('pk', 'asin'))
             rows_sel = [r for r in rows_sel if user_can_operate_dashboard_row(request.user, r)]
@@ -726,22 +871,23 @@ def index(request):
             _set_user_active_job(request.user.id, jid)
             cache.set(
                 key,
-                {
-                    'status': 'running',
-                    'user_id': request.user.id,
-                    'progress': [
-                        '广告难度计算任务已创建，正在启动分析子进程…',
+                new_job_entry(
+                    request.user.id,
+                    [
+                        '广告难度计算任务已创建…',
                         f'本次勾选 ASIN：{len(asins)} 个。',
                     ],
-                },
+                    task_type='ad_difficulty',
+                    asins=asins,
+                    target_row_pks=target_row_pks,
+                ),
                 WIZARD_JOB_TTL,
             )
-            t = threading.Thread(
-                target=_run_ad_difficulty_job,
-                args=(jid, request.user.id, asins, target_row_pks),
-                daemon=True,
+            from .rq_enqueue import dispatch_ad_difficulty_job
+
+            dispatch_ad_difficulty_job(
+                jid, request.user.id, asins, target_row_pks=target_row_pks
             )
-            t.start()
             messages.success(request, f'已开始计算 {len(asins)} 个 ASIN 的广告难度，已跳转到进度页。')
             return redirect(f"{reverse('compute_roi')}?job_id={jid}")
         elif action == 'delete_one':
@@ -877,9 +1023,12 @@ def index(request):
         rows_qs = rows_qs.order_by(order_by)
         rows = rows_qs
 
-    # 运营难度筛选（列选择 + 区间）
+    # 运营难度筛选（列选择 + 百分比区间 + 评价数量区间）
     ops_slot = (request.GET.get('ops_slot') or 'any').strip()
     ops_range = (request.GET.get('ops_range') or 'all').strip()
+    ops_review_interval = (request.GET.get('ops_review_interval') or 'all').strip()
+    if ops_review_interval not in OPS_REVIEW_INTERVAL_OPTIONS:
+        ops_review_interval = 'all'
     ops_min = None
     ops_max = None
     preset = {
@@ -910,7 +1059,12 @@ def index(request):
         for r in src_rows:
             hit = False
             for fn in fields:
-                if _ops_match(getattr(r, fn, ''), ops_min, ops_max):
+                if _ops_match(
+                    getattr(r, fn, ''),
+                    ops_min,
+                    ops_max,
+                    review_interval=ops_review_interval,
+                ):
                     hit = True
                     break
             if hit:
@@ -971,6 +1125,7 @@ def index(request):
             'filters': {
                 'ops_slot': ops_slot,
                 'ops_range': ops_range,
+                'ops_review_interval': ops_review_interval,
                 'selected_grades': allowed,
                 'roi_verified': roi_verified_f if roi_verified_f in ('yes', 'no') else '',
                 'follow_filter': follow_f if follow_f in (
@@ -1010,22 +1165,57 @@ def dashboard_ops_filter(request):
 
 
 
-def _wizard_job_key(job_id: str) -> str:
-    return f'wizard_job_{job_id}'
+def _batch_failures_to_json(failures: list[AsinFailure]) -> list[dict]:
+    return [
+        {'asin': f.asin, 'error': f.error, 'attempts': f.attempts}
+        for f in failures
+    ]
 
 
-def _user_active_job_key(user_id: int) -> str:
-    return f'active_job_user_{user_id}'
+def _apply_batch_result_to_job(
+    key: str,
+    *,
+    user_id: int,
+    batch: BatchRunResult,
+    rows_written: int,
+    ttl: int = 900,
+) -> None:
+    """根据批量执行结果写入 job 状态（done / done_with_errors / error）。"""
+    ent = cache.get(key) or {}
+    ent['success_count'] = batch.success_count
+    ent['fail_count'] = batch.fail_count
+    ent['failed_asins'] = batch.failed_asins
+    ent['failures'] = _batch_failures_to_json(batch.failures)
+    ent['rows_written'] = rows_written
+    ent['redirect'] = reverse('index')
+    ent['user_id'] = user_id
 
+    prog = list(ent.get('progress') or [])
+    summary = batch.summary_text()
+    if summary and (not prog or prog[-1] != summary):
+        prog.append(summary)
+    ent['progress'] = prog[-160:]
 
-def _set_user_active_job(user_id: int, job_id: str) -> None:
-    cache.set(_user_active_job_key(user_id), job_id, WIZARD_JOB_TTL)
+    if batch.success_count == 0 and batch.fail_count > 0:
+        ent['status'] = 'error'
+        ent['error'] = batch.summary_text()
+        detail_lines = [f'{f.asin}: {f.error}' for f in batch.failures[:50]]
+        if len(batch.failures) > 50:
+            detail_lines.append(f'… 另有 {len(batch.failures) - 50} 个失败 ASIN')
+        ent['error_detail'] = '\n'.join(detail_lines)
+        cache.set(key, ent, 3600)
+        return
 
+    if batch.fail_count > 0:
+        ent['status'] = 'done_with_errors'
+        ent['error'] = batch.summary_text()
+        cache.set(key, ent, ttl)
+        return
 
-def _clear_user_active_job(user_id: int, job_id: str) -> None:
-    cur = cache.get(_user_active_job_key(user_id))
-    if cur == job_id:
-        cache.delete(_user_active_job_key(user_id))
+    ent['status'] = 'done'
+    ent.pop('error', None)
+    ent.pop('error_detail', None)
+    cache.set(key, ent, ttl)
 
 
 def _json_sanitize(obj):
@@ -1129,6 +1319,8 @@ def _persist_wizard_results(
     row_id_map = target_row_ids or {}
     user = User.objects.filter(pk=user_id).first()
     for asin, data in result.items():
+        if str(asin).startswith('__'):
+            continue
         if not isinstance(data, dict):
             continue
         mr = _to_float(data.get('monthly_results'))
@@ -1140,8 +1332,8 @@ def _persist_wizard_results(
         hd = _to_float(data.get('head_distance'))
         ac = _to_float(data.get('actual_cost'))
         ad_roi = _to_float(data.get('ad_removed_roi'))
-        if ad_roi is None:
-            ad_roi = 0.5
+        if ad_roi is not None:
+            ad_roi = ad_roi * 100
 
         existing = resolve_dashboard_row_for_persist(user, asin, row_id_map) if user else None
         if existing is None:
@@ -1184,7 +1376,7 @@ def _persist_wizard_results(
             'head_distance': hd,
             'actual_cost': ac,
             'head_actual_total': hat,
-            'ad_removed_roi': ad_roi * 100,
+            'ad_removed_roi': ad_roi,
             'product_grade': product_grade_from_monthly_profit1(mp1),
             'sales_trend_json': '',
             'exchange_rate': parity,
@@ -1224,6 +1416,8 @@ def _run_wizard_job(
     try:
 
         def on_line(line: str) -> None:
+            if line.startswith('PROGRESS:'):
+                line = line[9:].strip() or line
             ent = cache.get(key) or {}
             prog = ent.get('progress', [])
             short = line[:500] if len(line) > 500 else line
@@ -1235,29 +1429,93 @@ def _run_wizard_job(
             ent['user_id'] = user_id
             cache.set(key, ent, WIZARD_JOB_TTL)
 
+        ent = cache.get(key) or {}
+        if ent.get('status') == 'queued':
+            ent['status'] = 'running'
+            prog = ent.get('progress', [])
+            prog.append('Worker 已开始执行 ROI 计算…')
+            ent['progress'] = prog
+            cache.set(key, ent, WIZARD_JOB_TTL)
+
         def on_progress(msg: str) -> None:
             on_line(msg)
 
         asin_list = ordered_unique_asins(asins)
+        cost_overrides = _merge_cost_overrides_from_db(asin_list or asins, cost_overrides)
         written = 0
 
         if asin_list:
-            def _persist_one(asin: str, part: dict) -> None:
-                nonlocal written
-                row_ids = None
-                if target_row_ids and asin in target_row_ids:
-                    row_ids = {asin: target_row_ids[asin]}
-                written += _persist_wizard_results(
-                    user_id, part, parity, target_row_ids=row_ids
-                )
+            if use_sequential_roi():
+                def _persist_one(asin: str, part: dict) -> None:
+                    nonlocal written
+                    row_ids = None
+                    if target_row_ids and asin in target_row_ids:
+                        row_ids = {asin: target_row_ids[asin]}
+                    written += _persist_wizard_results(
+                        user_id, part, parity, target_row_ids=row_ids
+                    )
 
-            run_roi_asins_sequential(
-                asin_list,
-                parity,
-                cost_overrides=cost_overrides,
-                on_stderr_line=on_line,
-                on_progress=on_progress,
-                on_asin_done=_persist_one,
+                def _on_asin_failed(failure: AsinFailure) -> None:
+                    ent = cache.get(key) or {}
+                    ent['success_count'] = len(ent.get('succeeded_asins', []))
+                    failed = list(ent.get('failed_asins', []))
+                    if failure.asin not in failed:
+                        failed.append(failure.asin)
+                    ent['failed_asins'] = failed
+                    ent['fail_count'] = len(failed)
+                    failures = list(ent.get('failures', []))
+                    failures.append(
+                        {
+                            'asin': failure.asin,
+                            'error': failure.error,
+                            'attempts': failure.attempts,
+                        }
+                    )
+                    ent['failures'] = failures[-200:]
+                    cache.set(key, ent, WIZARD_JOB_TTL)
+
+                batch = run_roi_asins_sequential(
+                    asin_list,
+                    parity,
+                    cost_overrides=cost_overrides,
+                    on_stderr_line=on_line,
+                    on_progress=on_progress,
+                    on_asin_done=_persist_one,
+                    on_asin_failed=_on_asin_failed,
+                )
+            else:
+                on_progress(
+                    f'批量计算 ROI：共 {len(asin_list)} 个 ASIN'
+                    f'（一次拉取卖家精灵数据，请勿与逐个模式混淆）…'
+                )
+                merged = run_seller_wizard(
+                    asin_list,
+                    parity,
+                    cost_overrides=cost_overrides,
+                    on_stderr_line=on_line,
+                )
+                failure_details = None
+                if isinstance(merged, dict):
+                    failure_details = merged.pop('__roi_failures__', None)
+                written = _persist_wizard_results(
+                    user_id,
+                    merged,
+                    parity,
+                    target_row_ids=target_row_ids,
+                )
+                batch = batch_result_from_wizard_output(
+                    asin_list, merged, failure_details
+                )
+                on_progress(batch.summary_text())
+                for failure in batch.failures[:30]:
+                    on_progress(f'  {failure.asin}: {failure.error}')
+                if len(batch.failures) > 30:
+                    on_progress(f'  … 另有 {len(batch.failures) - 30} 个失败 ASIN')
+            _apply_batch_result_to_job(
+                key,
+                user_id=user_id,
+                batch=batch,
+                rows_written=written,
             )
         else:
             result = run_seller_wizard(
@@ -1266,13 +1524,16 @@ def _run_wizard_job(
             written = _persist_wizard_results(
                 user_id, result, parity, target_row_ids=target_row_ids
             )
-
-        ent = cache.get(key) or {}
-        ent['status'] = 'done'
-        ent['rows_written'] = written
-        ent['redirect'] = reverse('index')
-        ent['user_id'] = user_id
-        cache.set(key, ent, 900)
+            ent = cache.get(key) or {}
+            ent['status'] = 'done'
+            ent['rows_written'] = written
+            ent['success_count'] = written
+            ent['fail_count'] = 0
+            ent['failed_asins'] = []
+            ent['failures'] = []
+            ent['redirect'] = reverse('index')
+            ent['user_id'] = user_id
+            cache.set(key, ent, 900)
     except Exception as e:
         import traceback
 
@@ -1309,7 +1570,17 @@ def _run_ad_difficulty_job(
         close_old_connections()
         return
     try:
+        ent = cache.get(key) or {}
+        if ent.get('status') == 'queued':
+            ent['status'] = 'running'
+            prog = ent.get('progress', [])
+            prog.append('Worker 已开始执行广告难度计算…')
+            ent['progress'] = prog
+            cache.set(key, ent, WIZARD_JOB_TTL)
+
         def on_line(line: str) -> None:
+            if line.startswith('PROGRESS:'):
+                line = line[9:].strip() or line
             ent = cache.get(key) or {}
             prog = ent.get('progress', [])
             short = line[:500] if len(line) > 500 else line
@@ -1352,20 +1623,39 @@ def _run_ad_difficulty_job(
             AsinDashboardRow.objects.filter(pk=pk).update(ranking_percent=rp_num)
             updated += 1
 
-        run_ad_difficulty_asins_sequential(
+        def _on_ad_failed(failure: AsinFailure) -> None:
+            ent = cache.get(key) or {}
+            failed = list(ent.get('failed_asins', []))
+            if failure.asin not in failed:
+                failed.append(failure.asin)
+            ent['failed_asins'] = failed
+            ent['fail_count'] = len(failed)
+            failures = list(ent.get('failures', []))
+            failures.append(
+                {
+                    'asin': failure.asin,
+                    'error': failure.error,
+                    'attempts': failure.attempts,
+                }
+            )
+            ent['failures'] = failures[-200:]
+            cache.set(key, ent, WIZARD_JOB_TTL)
+
+        batch = run_ad_difficulty_asins_sequential(
             asin_list,
             on_stderr_line=on_line,
             on_progress=on_progress,
             on_asin_done=_persist_ad,
+            on_asin_failed=_on_ad_failed,
         )
-        _touch_asin_updates(asin_list)
+        _touch_asin_updates(batch.succeeded)
 
-        ent = cache.get(key) or {}
-        ent['status'] = 'done'
-        ent['rows_written'] = updated
-        ent['redirect'] = reverse('index')
-        ent['user_id'] = user_id
-        cache.set(key, ent, 900)
+        _apply_batch_result_to_job(
+            key,
+            user_id=user_id,
+            batch=batch,
+            rows_written=updated,
+        )
     except Exception as e:
         import traceback
 
@@ -1438,15 +1728,19 @@ def _compute_allowed_asins_for_user(user) -> set[str] | None:
 @login_required
 @require_POST
 def upload_start(request):
-    active = cache.get(_user_active_job_key(request.user.id))
+    active = get_active_job_for_user(request.user.id)
     if active:
         return JsonResponse(
             {
                 'ok': False,
-                'error': '已有任务在运行中，请等待完成后再发起新任务。',
-                'job_id': active,
+                'error': (
+                    f'已有任务进行中（{active["status_label"]}），'
+                    f'请查看进度或解除占用后再发起新任务。'
+                ),
+                'job_id': active['job_id'],
+                'active_job': active,
             },
-            status=400,
+            status=409,
         )
     parity, err = _parse_compute_local_form(request)
     if err:
@@ -1474,8 +1768,9 @@ def upload_start(request):
     jid = str(job_id)
     key = _wizard_job_key(jid)
     _set_user_active_job(request.user.id, jid)
+    cost_overrides = _merge_cost_overrides_from_db(asins, None)
     prog = [
-        '本地计算任务已创建，正在启动分析子进程…',
+        '本地计算任务已创建…',
         f'当前汇率：{parity}。',
         f'本次待计算 ASIN：{len(asins)} 个。',
     ]
@@ -1483,44 +1778,53 @@ def upload_start(request):
         prog.append(f'当前未计算列表之外（已存在 ROI-US-pack）：{len(skipped)} 个。')
     cache.set(
         key,
-        {
-            'status': 'running',
-            'user_id': request.user.id,
-            'progress': prog,
-        },
+        new_job_entry(
+            request.user.id,
+            prog,
+            task_type='wizard',
+            parity=parity,
+            asins=asins,
+            cost_overrides=cost_overrides,
+        ),
         WIZARD_JOB_TTL,
     )
-    t = threading.Thread(
-        target=_run_wizard_job,
-        args=(jid, request.user.id, asins, parity),
-        daemon=True,
-    )
-    t.start()
+    from .rq_enqueue import dispatch_wizard_job
+
+    dispatch_wizard_job(jid, request.user.id, asins, parity, cost_overrides=cost_overrides)
     return JsonResponse({'ok': True, 'job_id': jid, 'selected_count': len(asins), 'skipped_count': len(skipped)})
 
 
 @login_required
 def upload_job_status(request, job_id):
-    key = _wizard_job_key(str(job_id))
-    ent = cache.get(key)
+    ent = refresh_job_entry(str(job_id))
     if not ent:
         return JsonResponse({'ok': False, 'error': '任务不存在或已过期'}, status=404)
     if ent.get('user_id') != request.user.id:
         return JsonResponse({'ok': False, 'error': '无权访问该任务'}, status=403)
-    err_tail = ent.get('error_detail') or ''
-    if len(err_tail) > 8000:
-        err_tail = err_tail[-8000:]
-    return JsonResponse(
-        {
-            'ok': True,
-            'status': ent.get('status'),
-            'progress': ent.get('progress', []),
-            'error': ent.get('error'),
-            'error_detail': err_tail if ent.get('status') == 'error' else None,
-            'rows_written': ent.get('rows_written'),
-            'redirect': ent.get('redirect') or reverse('index'),
-        }
-    )
+    payload = job_status_payload(str(job_id), ent)
+    payload['ok'] = True
+    return JsonResponse(payload)
+
+
+@login_required
+@require_GET
+def active_wizard_job(request):
+    """当前用户占用中的 ROI/广告难度任务（用于页面提示条）。"""
+    active = get_active_job_for_user(request.user.id)
+    if not active:
+        return JsonResponse({'ok': True, 'has_active': False, 'active_job': None})
+    return JsonResponse({'ok': True, 'has_active': True, 'active_job': active})
+
+
+@login_required
+@require_POST
+def dismiss_active_wizard_job(request):
+    """解除任务占用（Worker 未启动导致长期 queued 时可手动释放）。"""
+    job_id = (request.POST.get('job_id') or '').strip() or None
+    ok, msg = dismiss_active_job(request.user.id, job_id)
+    if not ok:
+        return JsonResponse({'ok': False, 'error': msg}, status=403)
+    return JsonResponse({'ok': True, 'message': msg})
 
 
 @login_required
@@ -1546,6 +1850,7 @@ def compute_roi_page(request):
     kept = request.GET.copy()
     kept.pop('page', None)
     filter_qs = kept.urlencode()
+    active_job = get_active_job_for_user(request.user.id)
     return render(
         request,
         'auto_amazon/compute_roi.html',
@@ -1559,6 +1864,7 @@ def compute_roi_page(request):
             'total_all': len(all_asins),
             'include_recomputed': include_recomputed,
             'default_exchange_rate': _default_exchange_rate_for_form(),
+            'active_job': active_job,
         },
     )
 
@@ -2252,7 +2558,11 @@ def excel_save_media(request):
         _touch_asin_updates({parent_asin})
         if is_roi_us_pack_filename(path.name):
             _sync_dashboard_from_roi_us_pack(request.user, parent_asin, rows)
-    return JsonResponse({'ok': True, 'path': rel})
+    return JsonResponse({
+        'ok': True,
+        'path': rel,
+        'rewritten': search_xlsx_save_is_rewrite(path),
+    })
 
 
 @login_required
@@ -2342,6 +2652,101 @@ def excel_import_data_origin(request):
     if re.match(r'^B0[A-Z0-9]{8}$', parent_asin):
         _touch_asin_updates({parent_asin})
     return JsonResponse({'ok': True, 'path': rel, 'imported_rows': len(normalized_import)})
+
+
+@login_required
+@require_POST
+def excel_restore_search_row(request):
+    """将 Search 表中被标记删除（黄底）的一行恢复写入同目录 *_data_origin.xlsx。"""
+    try:
+        payload = json.loads(request.body.decode('utf-8'))
+    except json.JSONDecodeError:
+        return JsonResponse({'ok': False, 'error': '无效的 JSON'}, status=400)
+    rel = (payload.get('path') or '').strip().replace('\\', '/')
+    if not rel:
+        return JsonResponse({'ok': False, 'error': '缺少 path'}, status=400)
+    if not _require_superuser_for_excel_audit(request) and not user_can_access_excel_media_path(
+        request.user, rel
+    ):
+        return JsonResponse({'ok': False, 'error': '无权限操作该文件'}, status=403)
+    search_path = safe_media_path_global(rel)
+    if search_path is None or not search_path.is_file():
+        return JsonResponse({'ok': False, 'error': '文件不存在或路径非法'}, status=400)
+    if not _is_search_sheet_filename(search_path.name):
+        return JsonResponse({'ok': False, 'error': '仅支持 Search(...) 表恢复数据'}, status=400)
+
+    try:
+        row_index = int(payload.get('row_index'))
+    except (TypeError, ValueError):
+        return JsonResponse({'ok': False, 'error': '缺少有效的 row_index'}, status=400)
+    if row_index < 1:
+        return JsonResponse({'ok': False, 'error': '请选择数据行（不能选表头）'}, status=400)
+
+    origin_path = _find_data_origin_path(search_path.parent)
+    if origin_path is None or not origin_path.is_file():
+        return JsonResponse({'ok': False, 'error': '同目录下未找到 *_data_origin.xlsx'}, status=400)
+
+    search_payload, err = read_active_sheet_rich(search_path)
+    if err:
+        return JsonResponse({'ok': False, 'error': f'读取 Search 表失败：{err}'}, status=400)
+    search_plain = _rows_to_plain(search_payload.get('rows') or [])
+    if row_index >= len(search_plain):
+        return JsonResponse({'ok': False, 'error': '行号超出范围'}, status=400)
+    if len(search_plain) < 2:
+        return JsonResponse({'ok': False, 'error': 'Search 表无数据行'}, status=400)
+
+    search_header = search_plain[0]
+    search_row = search_plain[row_index]
+
+    api_record = search_row_to_api_record(search_header, search_row)
+    asin = str(api_record.get('asin') or '').strip().upper()
+    if not asin:
+        return JsonResponse({'ok': False, 'error': '该行缺少 ASIN，无法恢复'}, status=400)
+
+    origin_payload, err = read_active_sheet_rich(origin_path)
+    if err:
+        return JsonResponse({'ok': False, 'error': f'读取 data_origin 失败：{err}'}, status=400)
+    origin_plain = _rows_to_plain(origin_payload.get('rows') or [])
+    if not origin_plain:
+        return JsonResponse({'ok': False, 'error': 'data_origin 表为空'}, status=400)
+
+    origin_header = origin_plain[0]
+    mapped = build_origin_row_from_search(search_header, search_row, origin_header)
+    if not any(str(x or '').strip() for x in mapped):
+        return JsonResponse({'ok': False, 'error': '该行无有效数据'}, status=400)
+
+    existing = _asin_set_from_plain_rows(origin_plain)
+    if asin in existing:
+        return JsonResponse({'ok': False, 'error': f'ASIN {asin} 已在 data_origin 中，无需重复恢复'}, status=400)
+
+    deleted_asins = _deleted_asin_set_from_data_origin(search_path)
+    if asin not in deleted_asins:
+        return JsonResponse({'ok': False, 'error': '该行并非「已删除」数据（黄底行才可恢复）'}, status=400)
+
+    final_cols = max(len(r) for r in origin_plain)
+    normalized = []
+    for r in origin_plain:
+        one = list(r)
+        while len(one) < final_cols:
+            one.append('')
+        normalized.append(one[:final_cols])
+    new_row = list(mapped)
+    while len(new_row) < final_cols:
+        new_row.append('')
+    normalized.append(new_row[:final_cols])
+
+    ok, save_err = save_sheet_values_preserving_format(origin_path, normalized)
+    if not ok:
+        return JsonResponse({'ok': False, 'error': save_err or '写入 data_origin 失败'}, status=400)
+
+    parent_asin = normalize_asin(search_path.parent.parent.name)
+    if re.match(r'^B0[A-Z0-9]{8}$', parent_asin):
+        _touch_asin_updates({parent_asin})
+    return JsonResponse({
+        'ok': True,
+        'asin': asin,
+        'data_origin_path': str(origin_path.relative_to(media_root())).replace('\\', '/'),
+    })
 
 
 @login_required

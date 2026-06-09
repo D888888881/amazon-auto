@@ -13,6 +13,7 @@ import asyncio
 import io
 import json
 import sys
+import traceback
 
 from async_seller_wizard_api import seller_wizard_main
 
@@ -72,5 +73,6 @@ if __name__ == '__main__':
         sys.stdout.write(json.dumps(out, ensure_ascii=False))
         sys.stdout.flush()
     except Exception as e:
+        traceback.print_exc(file=sys.stderr)
         sys.stderr.write(f'{type(e).__name__}: {e}\n')
         sys.exit(1)

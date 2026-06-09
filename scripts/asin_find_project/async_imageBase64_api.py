@@ -43,7 +43,7 @@ async def convert_to_jpeg_base64_async(image_path, quality=92, bg_color=(255, 25
 # 使用示例
 async def main():
     # 异步执行转换
-    jpeg_json = await convert_to_jpeg_base64_async("images/图片2.jpeg")
+    jpeg_json = await convert_to_jpeg_base64_async("images/B0F6MTPQVG.jpg")
     print(jpeg_json)
 
 # 运行异步主函数

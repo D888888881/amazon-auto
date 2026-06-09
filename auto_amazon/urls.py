@@ -16,6 +16,8 @@ urlpatterns = [
 
     path('upload/start/', views.upload_start, name='upload_start'),
     path('upload/status/<uuid:job_id>/', views.upload_job_status, name='upload_job_status'),
+    path('upload/active/', views.active_wizard_job, name='active_wizard_job'),
+    path('upload/dismiss/', views.dismiss_active_wizard_job, name='dismiss_active_wizard_job'),
     path('upload/', views.upload_page, name='upload'),
     path('compute-roi/', views.compute_roi_page, name='compute_roi'),
     path('fetch-data/', views.fetch_data_page, name='fetch_data'),
@@ -42,6 +44,7 @@ urlpatterns = [
 
     path('excel/save_media/', views.excel_save_media, name='excel_save_media'),
     path('excel/import_data_origin/', views.excel_import_data_origin, name='excel_import_data_origin'),
+    path('excel/restore_search_row/', views.excel_restore_search_row, name='excel_restore_search_row'),
 
     path('excel/recalc_roi_media/', views.excel_recalc_roi_media, name='excel_recalc_roi_media'),
 

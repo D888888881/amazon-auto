@@ -1,11 +1,11 @@
 import asyncio
-import random
+import os
 
 import aiohttp
 from typing import List, Dict, Any
 
 # from async_read_config import read_main
-from seller_wizard_set_cookie import set_cookie_main
+from seller_account_guard import apply_login_config, apply_login_headers, ensure_seller_login
 
 
 # ---------- 全局配置 ----------
@@ -82,9 +82,10 @@ data_totalUnits = {
 
 
 async def random_sleep():
-    """随机延迟：模拟真人操作，核心反检测"""
-    delay = random.uniform(1, 2)
-    await asyncio.sleep(delay)
+    """批量模式下默认不延迟；可通过 ROI_AD_REQUEST_DELAY_SEC 恢复节流。"""
+    delay = float(os.environ.get('ROI_AD_REQUEST_DELAY_SEC', '0'))
+    if delay > 0:
+        await asyncio.sleep(delay)
 
 
 async def fetch_source(session: aiohttp.ClientSession, asin: str, retries: int = 2, timeout: int = 10) -> Dict[
@@ -292,10 +293,10 @@ async def fetch_multiple_asins_totalUnits(asin_list: List[str], max_concurrent: 
 # ---------- 使用示例 ----------
 async def advertisement_main(asins: List[str], max_concurrent: int = 1) -> Dict[str, Any]:
     # 假设要查询的 ASIN 列表
-    config =  await set_cookie_main('ITBM000067', 'ITBM000067')
+    config = await ensure_seller_login()
     print(config)
-    COOKIES['rank-login-user'] = config['rank-login-user']
-    COOKIES['rank-login-user-info'] = config['rank-login-user-info']
+    apply_login_config(COOKIES, config)
+    apply_login_headers(HEADERS, config)
     # totalUnits_dict = await fetch_multiple_asins_totalUnits(asins, max_concurrent=max_concurrent)
     result_dict = await fetch_multiple_asins(asins, max_concurrent=max_concurrent)
     # for asin, value in totalUnits_dict.items():

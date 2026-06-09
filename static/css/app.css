@@ -809,6 +809,106 @@ body.body-guest .main {
   background: #f8fafc;
 }
 
+.roi-active-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+  padding: 1rem 1.15rem;
+  border-radius: 12px;
+  border: 1px solid #fcd34d;
+  background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%);
+}
+
+.roi-active-banner[hidden] {
+  display: none !important;
+}
+
+.roi-active-banner__title {
+  display: block;
+  font-size: 1rem;
+  color: #92400e;
+  margin-bottom: 0.35rem;
+}
+
+.roi-active-banner__status {
+  display: inline-block;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  background: #f59e0b;
+  color: #fff;
+  margin-left: 0.35rem;
+}
+
+.roi-active-banner__hint,
+.roi-active-banner__last {
+  margin: 0.35rem 0 0;
+  font-size: 0.875rem;
+  color: #78350f;
+  line-height: 1.45;
+}
+
+.roi-active-banner__last {
+  font-family: ui-monospace, monospace;
+  font-size: 0.8rem;
+  opacity: 0.9;
+}
+
+.roi-active-banner__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.roi-active-banner__btn {
+  padding: 0.45rem 0.9rem !important;
+  font-size: 0.875rem !important;
+  min-height: auto !important;
+}
+
+.nav-wizard-job {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.25rem 0.65rem;
+  margin-left: 0.35rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-decoration: none;
+  color: #92400e;
+  background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%);
+  border: 1px solid #fcd34d;
+  animation: nav-wizard-pulse 2s ease-in-out infinite;
+}
+
+.nav-wizard-job[hidden] {
+  display: none !important;
+}
+
+.nav-wizard-job:hover {
+  color: #78350f;
+  border-color: #f59e0b;
+}
+
+.nav-wizard-job__dot {
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 50%;
+  background: #f59e0b;
+  flex-shrink: 0;
+}
+
+@keyframes nav-wizard-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.82; }
+}
+
 /* 飞书风格 · 文件工作区（media 根目录） */
 body.fs-body .main--fs {
   max-width: none;

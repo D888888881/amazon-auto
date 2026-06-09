@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 
 import aiohttp
@@ -16,11 +17,16 @@ from openpyxl.utils import get_column_letter
 from openpyxl.styles import PatternFill, Font, Alignment
 from async_image_search_api import async_price_info_main
 from async_fba_api import async_fba_batch
-from async_return_rale_api import async_return_rale_main
+from async_return_rale_api import fetch_refund_rate_for_path, prefetch_refund_rates_batch
+from seller_account_guard import is_seller_account_banned_error
+from shared_rate_limit import async_api_slot, env_max_concurrent
 from taobao__m_h5_tk import get_taobao_tokens
+from wizard_progress import emit_progress
 # 本地数据根目录：相对本脚本所在目录的 file/，避免「在别的 cwd 运行脚本」时扫不到 Excel
 # FILE_DATA_ROOT = Path(r"E:\py_projiect\auto_amazon_project\media\file")
-FILE_DATA_ROOT = Path(__file__).resolve().parent.parent.parent / "media" / "file"
+SCRIPT_DIR = Path(__file__).resolve().parent
+IMAGES_DIR = SCRIPT_DIR / "images"
+FILE_DATA_ROOT = SCRIPT_DIR.parent.parent / "media" / "file"
 
 # 卖家精灵导出 Excel 列名 -> 内部 API 风格字段（与 colum_mapping.json 中译名对齐）
 COLUMN_MAPPING_EXCEL_TO_API = {
@@ -242,6 +248,13 @@ async def save_top5_market_capacity_to_excel(price_cleaning_data: pd.DataFrame, 
     # 2. 按销量降序排序，取前5名
     top5 = price_cleaning_data.sort_values('totalUnits', ascending=False).head(5).copy()
     top5.reset_index(drop=True, inplace=True)
+
+    if top5.empty:
+        print(
+            f"警告: ASIN {asin} 关键词「{keyword}」清洗后无有效月销量(totalUnits)，"
+            f"跳过 top5 市场容量分析，目标月销记为 0。"
+        )
+        return 0.0
 
     # 3. 初始化新列
     top5['实际增长倍数'] = np.nan
@@ -760,6 +773,261 @@ async def collect_node_label_paths(
     return asin_to_path
 
 
+def asin_image_file(asin: str) -> Path:
+    """ASIN 主图绝对路径：scripts/asin_find_project/images/<ASIN>.jpg"""
+    return IMAGES_DIR / f"{str(asin).strip().upper()}.jpg"
+
+
+def _parse_unit_purchase_cell(raw) -> float | None:
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        return None
+    t = str(raw).replace('￥', '').replace(',', '').strip()
+    if not t or t.upper() in ('N/A', 'NA', '-', '—'):
+        return None
+    try:
+        return float(t)
+    except (TypeError, ValueError):
+        return None
+
+
+def _positive_float(val) -> float | None:
+    """解析为正数；0/空/无效视为缺失。"""
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return None
+    try:
+        n = float(val)
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
+
+
+def _parse_money(val) -> float | None:
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return None
+    try:
+        s = str(val).replace('$', '').replace('￥', '').replace(',', '').strip()
+        if not s or s.upper() in ('N/A', 'NA', '-', '—'):
+            return None
+        n = float(s)
+        return n if n > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_percent(val) -> float | None:
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return None
+    try:
+        s = str(val).replace('%', '').replace(',', '').strip()
+        if not s or s.upper() in ('N/A', 'NA', '-', '—'):
+            return None
+        n = float(s)
+        return n if n >= 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def read_labeled_field_from_roi_pack(asin: str, label: str) -> float | None:
+    """从 ROI-US-pack 任意列组读取带「字段/值」结构的数值。"""
+    a = str(asin).strip().upper()
+    pack = FILE_DATA_ROOT / a / f"{a}_ROI-US-pack.xlsx"
+    if not pack.is_file():
+        return None
+    try:
+        df = pd.read_excel(pack)
+        for _, row in df.iterrows():
+            for col_idx in range(len(row)):
+                field = str(row.iloc[col_idx]).strip() if pd.notna(row.iloc[col_idx]) else ''
+                if field != label:
+                    continue
+                val_col = col_idx + 1
+                if val_col < len(row):
+                    cell = row.iloc[val_col]
+                    if label == '退款率':
+                        parsed = _parse_percent(cell)
+                    else:
+                        parsed = _parse_money(cell)
+                    if parsed is None:
+                        parsed = _parse_unit_purchase_cell(cell)
+                    if parsed is not None:
+                        return parsed
+    except Exception as e:
+        print(f"读取 ROI 字段「{label}」失败 ({pack}): {e}")
+    return None
+
+
+def read_text_field_from_roi_pack(asin: str, label: str) -> str | None:
+    a = str(asin).strip().upper()
+    pack = FILE_DATA_ROOT / a / f"{a}_ROI-US-pack.xlsx"
+    if not pack.is_file():
+        return None
+    try:
+        df = pd.read_excel(pack)
+        for _, row in df.iterrows():
+            for col_idx in range(len(row)):
+                field = str(row.iloc[col_idx]).strip() if pd.notna(row.iloc[col_idx]) else ''
+                if field != label:
+                    continue
+                val_col = col_idx + 1
+                if val_col < len(row) and pd.notna(row.iloc[val_col]):
+                    url = str(row.iloc[val_col]).strip()
+                    if url and url.upper() not in ('N/A', 'NA', 'NAN'):
+                        return url
+    except Exception as e:
+        print(f"读取 ROI 文本字段「{label}」失败 ({pack}): {e}")
+    return None
+
+
+def build_local_product_hints(nested_result: dict, asin: str) -> dict:
+    """从本地 Excel 提取类目路径（供退款率接口入参，不作数值回落）。"""
+    hints: dict = {}
+    a = str(asin).strip().upper()
+    kw_map = nested_result.get(a) or nested_result.get(asin) or {}
+    for products in kw_map.values():
+        for rec in products or []:
+            if not isinstance(rec, dict):
+                continue
+            if not hints.get('nodeLabelPath'):
+                path = _node_path_from_record(rec)
+                if path:
+                    hints['nodeLabelPath'] = path
+                    break
+        if hints.get('nodeLabelPath'):
+            break
+    return hints
+
+
+def _resolve_image_url_for_roi(
+    asin: str,
+    info: dict | None,
+) -> str:
+    url = str((info or {}).get('imageUrl') or '').strip()
+    if url and url.upper() not in ('N/A', 'NA', 'NAN'):
+        return url
+    raise ValueError(
+        f'ASIN {asin} 无法获取图片链接（卖家精灵广告接口未返回 imageUrl）'
+    )
+
+
+async def _resolve_refund_rate(
+    asin: str,
+    node_label_path: str,
+    hints: dict | None,
+    refund_cache: dict[str, float] | None = None,
+) -> float:
+    path = (node_label_path or '').strip() or str((hints or {}).get('nodeLabelPath') or '').strip()
+    if not path:
+        raise ValueError(
+            f'ASIN {asin} 无法获取退款率：缺少类目路径（nodeLabelPath）'
+        )
+    if refund_cache is not None and path in refund_cache:
+        return refund_cache[path]
+    refund_raw = await fetch_refund_rate_for_path(path)
+    text = str(refund_raw or '').replace('%', '').strip()
+    if not text:
+        raise ValueError(
+            f'ASIN {asin or path} 卖家精灵退款率接口无数据（类目: {path[:80]}…）'
+        )
+    val = float(text)
+    if val <= 0:
+        raise ValueError(f'ASIN {asin} 卖家精灵退款率无效: {val}')
+    if refund_cache is not None:
+        refund_cache[path] = val
+    return val
+
+
+async def prefetch_refund_rates(
+    paths: list[str],
+    *,
+    max_concurrent: int | None = None,
+) -> dict[str, float]:
+    """按类目路径批量预取退款率（同一路径只请求一次；失败类目不中断整批）。"""
+    limit = max_concurrent or env_max_concurrent('sellersprite', 6)
+    out, failures = await prefetch_refund_rates_batch(paths, max_concurrent=limit)
+    if failures:
+        emit_progress(
+            f'退款率：{len(out)} 个类目成功，{len(failures)} 个类目无数据（相关 ASIN 将单独失败）'
+        )
+        for row in failures[:8]:
+            emit_progress(f"  退款率跳过: {str(row.get('path', ''))[:55]}…")
+        if len(failures) > 8:
+            emit_progress(f'  … 另有 {len(failures) - 8} 个类目无退款率')
+    return out
+
+
+async def _resolve_fba_and_head(
+    asin: str,
+    fba_info_dict: dict,
+    head_distance_override: float | None,
+) -> tuple[float, float]:
+    info = fba_info_dict.get(asin) or {}
+    if not isinstance(info, dict):
+        info = {}
+
+    fba_fee = _parse_money(info.get('FBA'))
+    head_distance = info.get('head_distance')
+    if head_distance is not None:
+        try:
+            head_distance = float(head_distance)
+        except (TypeError, ValueError):
+            head_distance = None
+
+    if fba_fee is None or fba_fee <= 0:
+        raise ValueError(
+            f'ASIN {asin} 无法获取 FBA 配送费（卖家精灵 FBA 批量接口无有效数据）'
+        )
+
+    if head_distance_override is not None:
+        head_distance = head_distance_override
+    elif head_distance is None:
+        head_distance = 0.0
+
+    return float(fba_fee), float(head_distance)
+
+
+def read_unit_purchase_from_roi_pack(asin: str) -> float | None:
+    """从已有 ROI-US-pack 表读取「单件采购」，供图搜失败时回落。"""
+    return read_labeled_field_from_roi_pack(asin, '单件采购')
+
+
+def read_image_url_from_roi_pack(asin: str) -> str | None:
+    """从已有 ROI-US-pack 读取「图片链接」。"""
+    return read_text_field_from_roi_pack(asin, '图片链接')
+
+
+async def ensure_asin_image_path(
+    asin: str,
+    info: dict | None,
+    current_path: str = "",
+) -> str | None:
+    """确保 ASIN 主图存在；仅使用卖家精灵广告接口返回的 imageUrl。"""
+    p = Path(current_path) if current_path else asin_image_file(asin)
+    if p.is_file():
+        return str(p.resolve())
+
+    url = str((info or {}).get('imageUrl') or '').strip()
+    if not url or url.upper() in ('N/A', 'NA', 'NAN'):
+        return None
+
+    got = await download_one(asin, {'imageUrl': url})
+    if got:
+        return got
+    return None
+
+
+async def _fetch_unit_purchase_via_taobao(image_file: str, tokens: list[str]) -> float | None:
+    """1688 以图搜价；失败时用 prefer_network 刷新 token 再试一次。"""
+    if not tokens or len(tokens) < 2:
+        print('淘宝 token 不可用，跳过图搜')
+        return None
+    val = await async_price_info_main(image_file, tokens[0], tokens[1])
+    if val is not None:
+        return val
+    print('图搜无结果或 token 失效，尝试刷新淘宝 token 后重试…')
+    fresh = await asyncio.to_thread(lambda: get_taobao_tokens(prefer_network=True))
+    return await async_price_info_main(image_file, fresh['_m_h5_tk'], fresh['_m_h5_tk_enc'])
+
+
 async def save_roi_us_pack(nodeLabelPath: str,
                            fba_info_dict: dict,
                            asin: str,
@@ -770,55 +1038,50 @@ async def save_roi_us_pack(nodeLabelPath: str,
                            exchange_rate: float = 7.2,
                            asin_info_dict: dict = None,
                            unit_purchase_override: float | None = None,
-                           head_distance_override: float | None = None):
+                           head_distance_override: float | None = None,
+                           local_hints: dict | None = None,
+                           refund_cache: dict[str, float] | None = None):
     """
     生成 ROI-US-pack 表，输出三组并排数据：左侧基础成本、中间广告相关、右侧流量与利润指标，
     每组包含字段、值、单位三列。
     """
     product_asin = asin
-    node_label_path = nodeLabelPath
+    hints = local_hints or {}
+    node_label_path = (nodeLabelPath or '').strip() or str(hints.get('nodeLabelPath') or '').strip()
 
     # ==================== 1. 获取基础数据 ====================
-    fba_info = fba_info_dict.get(product_asin, {})
-    head_distance = fba_info.get('head_distance')
-    if head_distance is None:
-        head_distance = 0.0
-    if head_distance_override is not None:
-        head_distance = head_distance_override
-    fba_fee = fba_info.get('FBA', 0.0) or 0.0
+    fba_fee, head_distance = await _resolve_fba_and_head(
+        product_asin,
+        fba_info_dict,
+        head_distance_override,
+    )
 
     if unit_purchase_override is not None:
         unit_purchase = unit_purchase_override
     else:
-        try:
-            unit_purchase = await async_price_info_main(
-                image_path,
-                tokens[0],
-                tokens[1],
+        resolved_image = await ensure_asin_image_path(
+            product_asin, asin_info_dict or {}, image_path or ''
+        )
+        if not resolved_image:
+            raise ValueError(
+                f'ASIN {asin} 无法获取单件采购价：主图不可用'
+                f'（{asin_image_file(asin)}），图搜无法执行'
             )
-            print(unit_purchase,asin,'3333')
-        except Exception as e:
-            print(f"获取单件采购失败: {e}")
-            unit_purchase = None
+        unit_purchase = await _fetch_unit_purchase_via_taobao(resolved_image, tokens)
+        print(unit_purchase, asin, '3333')
+        if unit_purchase is None:
+            raise ValueError(
+                f'ASIN {asin} 无法获取单件采购价（1688 图搜无结果），'
+                f'无法计算利润率/去广告毛利率'
+            )
 
     platform_commission = 15
 
-    # 退款率
-    try:
-        refund_raw = await async_return_rale_main(node_label_path)
-        if isinstance(refund_raw, str):
-            refund_rate = float(refund_raw.replace('%', '').strip())
-        else:
-            refund_rate = float(refund_raw)
-    except Exception as e:
-        print(f"获取退款率失败: {e}")
-        refund_rate = 0.0
+    refund_rate = await _resolve_refund_rate(
+        product_asin, node_label_path, hints, refund_cache=refund_cache
+    )
 
-    asin_price = None
-    try:
-        asin_price = asin_info_dict.get("avg_price",0)
-    except Exception as e:
-        print(f"<UNK>: {e}")
+    asin_price = _positive_float((asin_info_dict or {}).get('avg_price'))
 
     # 计算基础售价
     if unit_purchase is not None and head_distance is not None:
@@ -831,12 +1094,13 @@ async def save_roi_us_pack(nodeLabelPath: str,
         lowest_price = total_cost / denominator
     else:
         lowest_price = None
-        product_price = None
 
-    if asin_price is None:
-        product_price = lowest_price * 2 if lowest_price is not None else None
-    else:
+    if asin_price is not None:
         product_price = asin_price * 1.02
+    elif lowest_price is not None:
+        product_price = lowest_price * 2
+    else:
+        product_price = None
 
     discount = 0
     if product_price is not None:
@@ -860,9 +1124,18 @@ async def save_roi_us_pack(nodeLabelPath: str,
         actual_profit = None
         actual_cost = None
 
+    if actual_profit is None or discounted_price is None or discounted_price <= 0:
+        raise ValueError(
+            f'ASIN {asin} 无法计算利润率：折后价格={discounted_price}，'
+            f'实际利润={actual_profit}（请检查单件采购/头程/FBA/售价数据）'
+        )
+
     # ==================== 2. 广告相关计算 ====================
     asin_cpc_dict = {}
-    for item in asin_cpc_list:
+    cpc_items = asin_cpc_list if isinstance(asin_cpc_list, list) else []
+    for item in cpc_items:
+        if not isinstance(item, dict):
+            continue
         for asin_key, info in item.items():
             cpc_info = info.get('cpc', {})
             cpc_median = cpc_info.get('median', 0.0)
@@ -876,8 +1149,8 @@ async def save_roi_us_pack(nodeLabelPath: str,
     ad_cpc = cpc_info.get('cpc_median', 0.0)
     click_purchase_ratio = cpc_info.get('clickPurchaseRatio', 0.0)
 
-    monthly_sales = monthly_sales_dict.get(product_asin, 0.0)
-    daily_orders = monthly_sales / 30 if monthly_sales > 0 else 0.0
+    monthly_sales = monthly_sales_dict.get(product_asin, 0.0) or 0.0
+    daily_orders = monthly_sales / 30.0 if monthly_sales > 0 else 0.0
 
     conversion_rate = click_purchase_ratio
 
@@ -896,23 +1169,20 @@ async def save_roi_us_pack(nodeLabelPath: str,
 
     ad_budget = ad_cpc * ad_clicks
 
-    # 日利润、月利润
-    if actual_profit is not None and daily_orders > 0:
-        daily_profit1 = actual_profit * daily_orders - ad_budget
-    else:
-        daily_profit1 = None
-    if daily_profit1 is not None:
-        daily_profit2 = daily_profit1 * exchange_rate
-        monthly_profit1 = daily_profit1 * 30
-        monthly_profit2 = daily_profit2 * 30
-    else:
-        daily_profit2 = monthly_profit1 = monthly_profit2 = None
+    # 日利润、月利润（出单量为 0 时按 0 计，仍保留单位经济学指标）
+    daily_profit1 = actual_profit * daily_orders - ad_budget
+    daily_profit2 = daily_profit1 * exchange_rate
+    monthly_profit1 = daily_profit1 * 30
+    monthly_profit2 = daily_profit2 * 30
 
-    # 广告费占比
-    if discounted_price is not None and discounted_price > 0 and daily_orders > 0:
-        ad_cost_ratio = ad_budget / (discounted_price * daily_orders) * 100
+    # 广告费占比（出单量为 0 时广告占比为 0，去广告毛利率 = 利润率）
+    if discounted_price > 0:
+        if daily_orders > 0:
+            ad_cost_ratio = ad_budget / (discounted_price * daily_orders) * 100
+        else:
+            ad_cost_ratio = 0.0
     else:
-        ad_cost_ratio = None
+        ad_cost_ratio = 0.0
 
     # ==================== 3. 右侧新增字段计算 ====================
     cost_cny_total = (
@@ -937,35 +1207,29 @@ async def save_roi_us_pack(nodeLabelPath: str,
         clicks_per_order = None
 
     # 去广告投产
-    if daily_profit1 is not None and cost_cny_total is not None and daily_orders is not None and daily_orders > 0:
+    if cost_cny_total is not None and cost_cny_total > 0 and daily_orders > 0:
         profit_cny = daily_profit1 * exchange_rate
         ad_removed_roi = profit_cny / (cost_cny_total * daily_orders)
+    elif cost_cny_total is not None and cost_cny_total > 0:
+        ad_removed_roi = 0.0
     else:
         ad_removed_roi = None
 
     # 每单利润
-    if daily_profit2 is not None and daily_orders is not None and daily_orders > 0:
+    if daily_orders > 0:
         profit_per_order = daily_profit2 / daily_orders
     else:
-        profit_per_order = None
+        profit_per_order = 0.0
 
     # 投产比
-    if actual_profit is not None and cost_cny_total is not None and cost_cny_total > 0:
+    if cost_cny_total is not None and cost_cny_total > 0:
         roi_ratio = (actual_profit * exchange_rate) / cost_cny_total * 100
     else:
         roi_ratio = None
 
-    # 利润率
-    if actual_profit is not None and discounted_price is not None and discounted_price > 0:
-        profit_margin = (actual_profit / discounted_price) * 100
-    else:
-        profit_margin = None
-
-    # 去广告毛利率
-    if profit_margin is not None and ad_cost_ratio is not None:
-        ad_removed_gross_margin = profit_margin - ad_cost_ratio
-    else:
-        ad_removed_gross_margin = None
+    # 利润率 / 去广告毛利率（正常流程必须产出数值）
+    profit_margin = (actual_profit / discounted_price) * 100
+    ad_removed_gross_margin = profit_margin - (ad_cost_ratio or 0.0)
     # 单件采购+单件头程
     unit_head_price = (
         unit_purchase + head_distance
@@ -974,11 +1238,7 @@ async def save_roi_us_pack(nodeLabelPath: str,
     )
     target_asin_url = f'https://www.amazon.com/DP/{asin}'
     link1688 = 'https://aibuy.1688.com/landingpage/home/inventory/products.html?bizType=selectionTool&customerId=sellerspriteLP&lang=zh&currency=CNY'
-    imageUrl = None
-    try:
-        imageUrl = asin_info_dict.get('imageUrl', ' ')
-    except Exception as e:
-        print('图片请求出差', e)
+    imageUrl = _resolve_image_url_for_roi(product_asin, asin_info_dict)
 
     # ==================== 4. 构建三组带单位的 DataFrame ====================
     # 左侧：基础成本与售价
@@ -991,8 +1251,8 @@ async def save_roi_us_pack(nodeLabelPath: str,
         f"{unit_purchase:.2f}" if unit_purchase is not None else 'N/A',
         f"{head_distance:.2f}" if head_distance is not None else 'N/A',
         f"{platform_commission}",
-        f"{refund_rate:.2f}" if refund_rate is not None else 'N/A',
-        f"{fba_fee:.2f}" if fba_fee is not None else 'N/A',
+        f"{refund_rate:.2f}",
+        f"{fba_fee:.2f}",
         f"{lowest_price:.2f}" if lowest_price is not None else 'N/A',
         f"{product_price:.2f}" if product_price is not None else 'N/A',
         f"{discount}",
@@ -1027,7 +1287,7 @@ async def save_roi_us_pack(nodeLabelPath: str,
         f"{monthly_profit1:.2f}" if monthly_profit1 is not None else 'N/A',
         f"{monthly_profit2:.2f}" if monthly_profit2 is not None else 'N/A',
         f"{ad_cost_ratio:.2f}" if ad_cost_ratio is not None else 'N/A',
-        f"{imageUrl}" if imageUrl is not None else 'N/A',
+        imageUrl,
         f"{target_asin_url}" if target_asin_url is not None else 'N/A',
         f"{link1688}" if link1688 is not None else 'N/A'
     ]
@@ -1049,8 +1309,8 @@ async def save_roi_us_pack(nodeLabelPath: str,
         f"{ad_removed_roi * 100:.2f}" if ad_removed_roi is not None else 'N/A',
         f"{profit_per_order:.2f}" if profit_per_order is not None else 'N/A',
         f"{unit_head_price:.2f}" if unit_head_price is not None else 'N/A',
-        f"{profit_margin:.2f}" if profit_margin is not None else 'N/A',
-        f"{ad_removed_gross_margin :.2f}" if ad_removed_gross_margin is not None else 'N/A'
+        f"{profit_margin:.2f}",
+        f"{ad_removed_gross_margin:.2f}"
     ]
     extra_units = [
         '次', '次', '次', '%',
@@ -1065,127 +1325,140 @@ async def save_roi_us_pack(nodeLabelPath: str,
     # 水平合并
     result_df = pd.concat([left_df, middle_df, extra_df], axis=1)
 
-    # 保存 Excel
+    # 保存 Excel（先写临时文件，成功后再替换，避免失败时覆盖旧 ROI-US-pack）
     output_dir = await verify_path(asin=asin)
     os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, f'{product_asin}_ROI-US-pack.xlsx')
-    result_df.to_excel(output_path, index=False)
+    output_path = Path(output_dir) / f'{product_asin}_ROI-US-pack.xlsx'
+    tmp_path = output_path.with_suffix('.part.xlsx')
+    if tmp_path.is_file():
+        tmp_path.unlink(missing_ok=True)
+    try:
+        result_df.to_excel(tmp_path, index=False)
+
+        # ==================== 样式设置（含移动右侧特殊字段） ====================
+        wb = load_workbook(tmp_path)
+        ws = wb.active
+
+        # 特殊字段名称
+        special_field_names = ['去广告投产', '采购总价格', '每单利润', '利润率', '去广告毛利率']
+
+        # 右侧三列的列号（假设三组列分别为 1-3, 4-6, 7-9）
+        right_cols = [7, 8, 9]  # 字段列、值列、单位列
+
+        # 找到右侧字段列中所有特殊字段的行
+        special_rows = []
+        for row in range(2, ws.max_row + 1):
+            field_cell = ws.cell(row=row, column=right_cols[0])
+            if field_cell.value in special_field_names:
+                special_rows.append(row)
+
+        if special_rows:
+            # 收集这些行的右侧三列数据
+            special_data = []
+            for row in special_rows:
+                row_data = []
+                for col in right_cols:
+                    row_data.append(ws.cell(row=row, column=col).value)
+                special_data.append(row_data)
+
+            # 在原位置清空这些单元格
+            for row in special_rows:
+                for col in right_cols:
+                    ws.cell(row=row, column=col).value = ''
+
+            # 找到表格末尾行（最后一行的下一行）
+            last_row = ws.max_row
+            # 将特殊数据追加到底部
+            for i, row_data in enumerate(special_data):
+                new_row = last_row + 1 + i
+                for j, col in enumerate(right_cols):
+                    ws.cell(row=new_row, column=col).value = row_data[j]
+
+            # 为移动后的特殊行设置样式（行高、字体）
+            for i, row_data in enumerate(special_data):
+                new_row = last_row + 1 + i
+                ws.row_dimensions[new_row].height = 50
+                for col in right_cols:
+                    cell = ws.cell(row=new_row, column=col)
+                    cell.font = Font(size=36, bold=True)
+                    cell.alignment = Alignment(horizontal='center', vertical='center')
+
+        # 1. 设置列宽
+        for col in range(1, ws.max_column + 1):
+            col_letter = get_column_letter(col)
+            cell_value = ws.cell(row=1, column=col).value
+            if cell_value == '单位':
+                ws.column_dimensions[col_letter].width = 10
+            else:
+                ws.column_dimensions[col_letter].width = 25
+
+        # 右侧值列（第8列）宽45
+        right_value_col = 8
+        ws.column_dimensions[get_column_letter(right_value_col)].width = 45
+        ws.column_dimensions[get_column_letter(7)].width = 45
+
+        # 2. 设置行高（所有行先30）
+        for row in range(1, ws.max_row + 1):
+            ws.row_dimensions[row].height = 30
+
+        # 3. 设置全局字体（所有单元格18加粗，居中）
+        bold_font = Font(size=18, bold=True)
+        for row in ws.iter_rows():
+            for cell in row:
+                cell.font = bold_font
+                cell.alignment = Alignment(horizontal='center', vertical='center')
+
+        # 4. 重新为移动后的特殊行设置样式（避免被全局覆盖）
+        if special_rows:
+            for i, row_data in enumerate(special_data):
+                new_row = last_row + 1 + i
+                ws.row_dimensions[new_row].height = 50
+                for col in right_cols:
+                    cell = ws.cell(row=new_row, column=col)
+                    cell.font = Font(size=36, bold=True)
+                    cell.alignment = Alignment(horizontal='center', vertical='center')
+
+        # 5. 高亮指定字段
+        yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+        highlight_fields = [
+            '最低售价', '折后价格', '平台佣金', '实际利润', '销售回款', '实际成本',
+            '广告预算', '广告点击', '出单量', '日利润1', '日利润2', '月利润1', '月利润2',
+            '广告费占比', '总流量', '日自然流量', '每单需点击', '去广告投产', '每单利润',
+            '投产比', '利润率', '去广告毛利率', '采购总价格'
+        ]
+
+        # 找到所有“值”列
+        value_cols = []
+        for col in range(1, ws.max_column + 1):
+            if ws.cell(row=1, column=col).value == '值':
+                value_cols.append(col)
+
+        for row in range(2, ws.max_row + 1):
+            for val_col in value_cols:
+                field_col = val_col - 1
+                field_cell = ws.cell(row=row, column=field_col)
+                if field_cell.value in highlight_fields:
+                    value_cell = ws.cell(row=row, column=val_col)
+                    value_cell.fill = yellow_fill
+
+        # 保存最终样式
+        wb.save(tmp_path)
+        shutil.move(str(tmp_path), str(output_path))
+    except Exception:
+        if tmp_path.is_file():
+            tmp_path.unlink(missing_ok=True)
+        raise
+
     print(f"ROI-US-pack 表已保存至: {output_path}")
-
-    # ==================== 样式设置（含移动右侧特殊字段） ====================
-    wb = load_workbook(output_path)
-    ws = wb.active
-
-    # 特殊字段名称
-    special_field_names = ['去广告投产', '采购总价格', '每单利润', '利润率', '去广告毛利率']
-
-    # 右侧三列的列号（假设三组列分别为 1-3, 4-6, 7-9）
-    right_cols = [7, 8, 9]  # 字段列、值列、单位列
-
-    # 找到右侧字段列中所有特殊字段的行
-    special_rows = []
-    for row in range(2, ws.max_row + 1):
-        field_cell = ws.cell(row=row, column=right_cols[0])
-        if field_cell.value in special_field_names:
-            special_rows.append(row)
-
-    if special_rows:
-        # 收集这些行的右侧三列数据
-        special_data = []
-        for row in special_rows:
-            row_data = []
-            for col in right_cols:
-                row_data.append(ws.cell(row=row, column=col).value)
-            special_data.append(row_data)
-
-        # 在原位置清空这些单元格
-        for row in special_rows:
-            for col in right_cols:
-                ws.cell(row=row, column=col).value = ''
-
-        # 找到表格末尾行（最后一行的下一行）
-        last_row = ws.max_row
-        # 将特殊数据追加到底部
-        for i, row_data in enumerate(special_data):
-            new_row = last_row + 1 + i
-            for j, col in enumerate(right_cols):
-                ws.cell(row=new_row, column=col).value = row_data[j]
-
-        # 为移动后的特殊行设置样式（行高、字体）
-        for i, row_data in enumerate(special_data):
-            new_row = last_row + 1 + i
-            ws.row_dimensions[new_row].height = 50
-            for col in right_cols:
-                cell = ws.cell(row=new_row, column=col)
-                cell.font = Font(size=36, bold=True)
-                cell.alignment = Alignment(horizontal='center', vertical='center')
-
-    # 1. 设置列宽
-    for col in range(1, ws.max_column + 1):
-        col_letter = get_column_letter(col)
-        cell_value = ws.cell(row=1, column=col).value
-        if cell_value == '单位':
-            ws.column_dimensions[col_letter].width = 10
-        else:
-            ws.column_dimensions[col_letter].width = 25
-
-    # 右侧值列（第8列）宽45
-    right_value_col = 8
-    ws.column_dimensions[get_column_letter(right_value_col)].width = 45
-    ws.column_dimensions[get_column_letter(7)].width = 45
-
-    # 2. 设置行高（所有行先30）
-    for row in range(1, ws.max_row + 1):
-        ws.row_dimensions[row].height = 30
-
-    # 3. 设置全局字体（所有单元格18加粗，居中）
-    bold_font = Font(size=18, bold=True)
-    for row in ws.iter_rows():
-        for cell in row:
-            cell.font = bold_font
-            cell.alignment = Alignment(horizontal='center', vertical='center')
-
-    # 4. 重新为移动后的特殊行设置样式（避免被全局覆盖）
-    if special_rows:
-        for i, row_data in enumerate(special_data):
-            new_row = last_row + 1 + i
-            ws.row_dimensions[new_row].height = 50
-            for col in right_cols:
-                cell = ws.cell(row=new_row, column=col)
-                cell.font = Font(size=36, bold=True)
-                cell.alignment = Alignment(horizontal='center', vertical='center')
-
-    # 5. 高亮指定字段
-    yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
-    highlight_fields = [
-        '最低售价', '折后价格', '平台佣金', '实际利润', '销售回款', '实际成本',
-        '广告预算', '广告点击', '出单量', '日利润1', '日利润2', '月利润1', '月利润2',
-        '广告费占比', '总流量', '日自然流量', '每单需点击', '去广告投产', '每单利润',
-        '投产比', '利润率', '去广告毛利率', '采购总价格'
-    ]
-
-    # 找到所有“值”列
-    value_cols = []
-    for col in range(1, ws.max_column + 1):
-        if ws.cell(row=1, column=col).value == '值':
-            value_cols.append(col)
-
-    for row in range(2, ws.max_row + 1):
-        for val_col in value_cols:
-            field_col = val_col - 1
-            field_cell = ws.cell(row=row, column=field_col)
-            if field_cell.value in highlight_fields:
-                value_cell = ws.cell(row=row, column=val_col)
-                value_cell.fill = yellow_fill
-
-    # 保存最终样式
-    wb.save(output_path)
-    print("样式设置完成：右侧特殊字段已移到底部，列宽45/行高50/字体36加粗，其余字段居中对齐")
+    emit_progress(f'ASIN {product_asin} ROI-US-pack 已生成')
     return {
         asin: {
-            'profit_margin': round(ad_removed_gross_margin, 2) if ad_removed_gross_margin is not None else None,
+            # 看板「去广告毛利率」列对应 profit_margin 字段
+            'profit_margin': round(ad_removed_gross_margin, 2),
+            'gross_profit_rate': round(profit_margin, 2),
             'unit_purchase': unit_purchase,
             'monthly_profit1': monthly_profit1,
+            'monthly_results': monthly_sales,
             'profit_per_order': profit_per_order,
             'head_distance': head_distance,
             'actual_cost': actual_cost,
@@ -1213,32 +1486,42 @@ async def get_month_number(asin_list: list, data_nested: dict, key_list: dict):
     return asin_month
 
 
-# 并发下载图片到本地
-# images / 文件夹
+# 并发下载图片到本地（绝对路径：scripts/asin_find_project/images/<ASIN>.jpg）
 async def download_one(asin, info):
-    local_path = f"images/{asin}.jpg"
-    # 如果本地文件已存在，直接返回路径，跳过下载
-    if os.path.exists(local_path):
+    IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+    local_path = asin_image_file(asin)
+    if local_path.is_file():
         print(f"图片已存在: {local_path}")
-        return local_path
+        return str(local_path)
 
     image_url = info.get('imageUrl')
     if not image_url:
-        print(f"警告: ASIN {asin} 无图片 URL")
+        print(f"警告: ASIN {asin} 无图片 URL，无法下载主图到 {local_path}")
         return None
 
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(image_url) as resp:
+        async with aiohttp.ClientSession(
+            headers={
+                'User-Agent': (
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                    '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                ),
+                'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+                'Referer': 'https://www.amazon.com/',
+            }
+        ) as session:
+            timeout = aiohttp.ClientTimeout(total=90)
+            async with session.get(image_url, timeout=timeout) as resp:
                 if resp.status == 200:
                     content = await resp.read()
-                    os.makedirs(os.path.dirname(local_path), exist_ok=True)
-                    with open(local_path, 'wb') as f:
-                        f.write(content)
-                    print(f"图片已下载: {local_path}")
-                    return local_path
+                    if len(content) < 256:
+                        print(f"下载 {asin} 主图过小({len(content)} bytes)，可能不是有效图片")
+                        return None
+                    local_path.write_bytes(content)
+                    print(f"图片已下载: {local_path} ({len(content)} bytes)")
+                    return str(local_path)
                 else:
-                    print(f"下载失败 {asin}: HTTP {resp.status}")
+                    print(f"下载失败 {asin}: HTTP {resp.status} url={image_url[:120]}")
     except Exception as e:
         print(f"下载异常 {asin}: {e}")
     return None
@@ -1438,8 +1721,12 @@ async def seller_wizard_main(
 ):
     FILE_DATA_ROOT.mkdir(parents=True, exist_ok=True)
     print(f"本地 Excel 根目录: {FILE_DATA_ROOT.resolve()}")
-    taobao_config = await asyncio.to_thread(get_taobao_tokens)
-    tokens = [taobao_config["_m_h5_tk"], taobao_config["_m_h5_tk_enc"]]
+    try:
+        taobao_config = await asyncio.to_thread(get_taobao_tokens)
+        tokens = [taobao_config["_m_h5_tk"], taobao_config["_m_h5_tk_enc"]]
+    except Exception as e:
+        print(f"警告: 获取淘宝 token 失败，图搜将尝试回落已有采购价: {e}")
+        tokens = []
 
     # 1. 从 file/{ASIN}/{关键词}/ 自动扫描 Excel（关键词列表由目录结构决定）
     nested_result, keyword_dict, source_map = await asyncio.to_thread(load_products_from_local_files)
@@ -1448,16 +1735,47 @@ async def seller_wizard_main(
         nested_result = {a: m for a, m in nested_result.items() if a.upper() in allow}
         keyword_dict = {a: kws for a, kws in keyword_dict.items() if a.upper() in allow}
         source_map = {a: m for a, m in source_map.items() if a.upper() in allow}
-    target_asins = list(nested_result.keys())
+    target_asins = [str(a).strip().upper() for a in nested_result.keys()]
+    emit_progress(f'已扫描本地数据：共 {len(target_asins)} 个 ASIN')
     print("从本地扫描得到的 keyword_dict:", keyword_dict)
     if not target_asins:
+        emit_progress(f'未在 {FILE_DATA_ROOT} 下发现 ASIN 数据')
         print(f"未在 {FILE_DATA_ROOT} 下发现符合 B0XXXXXXXXX 结构的 ASIN 数据，结束。")
-        return
+        return {}
 
-    fba_info_dict = await async_fba_batch(target_asins)
-    print(fba_info_dict,'666666')
+    from seller_account_guard import ensure_seller_login
 
-    asin_info_dict = await advertisement_main(target_asins, max_concurrent=1)
+    emit_progress('正在登录卖家精灵并批量拉取 FBA / 广告数据…')
+    await ensure_seller_login()
+    max_ss = env_max_concurrent('sellersprite', 6)
+
+    try:
+        async with async_api_slot('sellersprite'):
+            fba_info_dict, asin_info_dict = await asyncio.gather(
+                async_fba_batch(target_asins, max_concurrent=max_ss),
+                advertisement_main(target_asins, max_concurrent=max_ss),
+            )
+    except Exception as e:
+        if is_seller_account_banned_error(e):
+            raise
+        raise RuntimeError(f'卖家精灵 FBA/广告批量获取失败: {e}') from e
+    print(fba_info_dict, '666666')
+    if not isinstance(asin_info_dict, dict):
+        asin_info_dict = {}
+    asin_info_dict = {
+        str(k).strip().upper(): v
+        for k, v in asin_info_dict.items()
+        if isinstance(v, dict)
+    }
+    if isinstance(fba_info_dict, dict):
+        fba_info_dict = {
+            str(k).strip().upper(): v
+            for k, v in fba_info_dict.items()
+        }
+    emit_progress(
+        f'卖家精灵数据就绪：FBA {len(fba_info_dict)}/{len(target_asins)}，'
+        f'广告 {len(asin_info_dict)}/{len(target_asins)}'
+    )
 
     download_tasks = [download_one(asin, info) for asin, info in asin_info_dict.items()]
     local_paths = await asyncio.gather(*download_tasks)
@@ -1469,38 +1787,57 @@ async def seller_wizard_main(
     }
 
     # 2. SIF：CPC 等（关键词以本地扫描为准）
-    asin_cpc, _ = await async_sif_api.sif_main(target_asins)
+    try:
+        async with async_api_slot('sif'):
+            asin_cpc, _ = await async_sif_api.sif_main(target_asins)
+    except Exception as e:
+        print(f"警告: SIF CPC 获取失败，广告 CPC 将使用默认值: {e}")
+        asin_cpc = []
+    if not isinstance(asin_cpc, list):
+        asin_cpc = []
 
     asin_path_dict = await collect_node_label_paths(keyword_dict, nested_result, target_asins)
+
+    emit_progress('正在批量获取退款率…')
+    refund_cache = await prefetch_refund_rates(
+        list(asin_path_dict.values()),
+        max_concurrent=max_ss,
+    )
+    emit_progress(f'退款率预取完成：{len(refund_cache)} 个类目')
+
+    roi_failures: list[dict[str, str]] = []
 
     # ========== 3. 并发处理每个 (ASIN, 关键词) ==========
     async def process_one_keyword(asin: str, keyword: str, products: list):
         """清洗 -> 市场容量 -> 评论区间 -> 广告效率表，输出写入 file/{asin}/"""
-        print(f"\n处理 ASIN={asin} 关键词: {keyword}")
-        print(f"清洗前的数据行数：{len(products)}")
-        df = pd.DataFrame(products)
-        ranking_percent = 0
-        if df.empty:
-            return None
-        source_kind = (source_map.get(asin, {}) or {}).get(keyword, "search")
-        if source_kind == "data_origin":
-            clean_data = df
-            print(f"ASIN={asin} 关键词={keyword} 检测到 ROI 表，直接使用 data_origin 作为数据源。")
-        else:
-            clean_data = await save_cleaned_data_orign_to_excel(df, keyword, asin)
-        target_monthly = await save_top5_market_capacity_to_excel(clean_data, keyword, asin)
-        review_interval = await save_review_interval_analysis_to_excel(clean_data, keyword, asin)
-        # 第一阶段：上传主流程不计算广告难度，默认置 0；后续在看板按勾选 ASIN 单独计算。
-        ranking_percent = 0
+        try:
+            print(f"\n处理 ASIN={asin} 关键词: {keyword}")
+            print(f"清洗前的数据行数：{len(products)}")
+            df = pd.DataFrame(products)
+            ranking_percent = 0
+            if df.empty:
+                return None
+            source_kind = (source_map.get(asin, {}) or {}).get(keyword, "search")
+            if source_kind == "data_origin":
+                clean_data = df
+                print(f"ASIN={asin} 关键词={keyword} 检测到 ROI 表，直接使用 data_origin 作为数据源。")
+            else:
+                clean_data = await save_cleaned_data_orign_to_excel(df, keyword, asin)
+            target_monthly = await save_top5_market_capacity_to_excel(clean_data, keyword, asin)
+            review_interval = await save_review_interval_analysis_to_excel(clean_data, keyword, asin)
+            ranking_percent = 0
 
-        print(f"<UNK> review_interval={review_interval}")
-        return {
-            "asin": asin,
-            "keyword": keyword,
-            'review_interval': review_interval,
-            "monthly_results": {keyword: target_monthly},
-            "ranking_percent": ranking_percent,
-        }
+            print(f"<UNK> review_interval={review_interval}")
+            return {
+                "asin": asin,
+                "keyword": keyword,
+                'review_interval': review_interval,
+                "monthly_results": {keyword: target_monthly},
+                "ranking_percent": ranking_percent,
+            }
+        except Exception as e:
+            print(f"警告: ASIN={asin} 关键词={keyword} 处理失败，已跳过: {e}")
+            return None
 
     keyword_tasks = [
         process_one_keyword(asin, kw, products)
@@ -1512,7 +1849,14 @@ async def seller_wizard_main(
             f"警告：未加载到任何关键词 Excel 数据（请确认 xlsx 在 {FILE_DATA_ROOT}/{{ASIN}}/{{关键词}}/ 下，"
             f"且从脚本/项目目录运行）。"
         )
-    monthly_results = await asyncio.gather(*keyword_tasks)
+    monthly_results_raw = await asyncio.gather(*keyword_tasks, return_exceptions=True)
+    monthly_results = []
+    for item in monthly_results_raw:
+        if isinstance(item, Exception):
+            print(f"警告: 关键词任务异常: {item}")
+            continue
+        if item:
+            monthly_results.append(item)
     print(monthly_results, "wangxian1")
 
     info_dict = await async_return_info(asin_dict=keyword_dict, info_list=monthly_results)
@@ -1528,27 +1872,105 @@ async def seller_wizard_main(
 
     monthly_sales_dict = await get_month_number(target_asins, target_monthly_sales, keyword_dict)
     print(monthly_sales_dict)
+    emit_progress(f'关键词 Excel 处理完成，开始生成 ROI-US-pack（0/{len(target_asins)}）…')
 
-    # ========== 5. 并发生成每个 ASIN 的 ROI 表 ==========
+    async def save_roi_safe(
+        asin: str,
+        node_label_path: str,
+        info: dict,
+        path: str,
+        up_val,
+        hd_val,
+    ):
+        try:
+            hints = build_local_product_hints(nested_result, asin)
+            result = await save_roi_us_pack(
+                node_label_path,
+                fba_info_dict,
+                asin,
+                asin_cpc,
+                monthly_sales_dict,
+                tokens,
+                path,
+                parity,
+                info,
+                unit_purchase_override=up_val,
+                head_distance_override=hd_val,
+                local_hints=hints,
+                refund_cache=refund_cache,
+            )
+            return result
+        except Exception as e:
+            if is_seller_account_banned_error(e):
+                raise
+            err = f'{type(e).__name__}: {e}'
+            roi_failures.append({'asin': asin, 'error': err})
+            emit_progress(f'失败 {asin}：{e}')
+            print(f"警告: ASIN {asin} ROI-US-pack 生成失败: {e}")
+            return None
+
+    # ========== 5. 并发生成每个 ASIN 的 ROI 表（单个 ASIN 缺数据则跳过，不中断整批）==========
     roi_tasks = []
-    for asin, path in asin_to_image_path.items():
-        co = (cost_overrides or {}).get(asin) or {}
+    roi_task_asins: list[str] = []
+    for asin in target_asins:
+        asin_key = str(asin).strip().upper()
+        info = dict(asin_info_dict.get(asin_key) or {})
+        if not info:
+            msg = '无卖家精灵 advertisement 数据'
+            roi_failures.append({'asin': asin_key, 'error': msg})
+            emit_progress(f'跳过 {asin_key}：{msg}')
+            print(f"警告: ASIN {asin_key} {msg}，已跳过")
+            continue
+        path = asin_to_image_path.get(asin_key, "")
+        co = (cost_overrides or {}).get(asin) or (cost_overrides or {}).get(asin_key) or {}
         up = pd.to_numeric(co.get('unit_purchase'), errors='coerce') if isinstance(co, dict) else np.nan
         hd = pd.to_numeric(co.get('head_distance'), errors='coerce') if isinstance(co, dict) else np.nan
         up_val = None if pd.isna(up) else float(up)
         hd_val = None if pd.isna(hd) else float(hd)
+        roi_task_asins.append(asin_key)
         roi_tasks.append(
-            save_roi_us_pack(
-                asin_path_dict.get(asin, ""), fba_info_dict, asin, asin_cpc,
-                monthly_sales_dict, tokens, path, parity,asin_info_dict[asin],
-                unit_purchase_override=up_val,
-                head_distance_override=hd_val,
-            )
+            save_roi_safe(asin_key, asin_path_dict.get(asin_key, ""), info, path, up_val, hd_val)
         )
-    info_result = await asyncio.gather(*roi_tasks)
+
+    if not roi_tasks:
+        emit_progress('没有任何 ASIN 具备广告数据，ROI 表未生成')
+        print("警告: 没有任何 ASIN 成功获取 advertisement 数据，ROI 表未生成")
+        out = info_dict if isinstance(info_dict, dict) else {}
+        if isinstance(out, dict):
+            out['__roi_failures__'] = roi_failures
+        return out
+
+    done_count = 0
+    info_result_raw = await asyncio.gather(*roi_tasks, return_exceptions=True)
+    info_result = []
+    for asin_key, item in zip(roi_task_asins, info_result_raw):
+        if isinstance(item, Exception):
+            err = f'{type(item).__name__}: {item}'
+            roi_failures.append({'asin': asin_key, 'error': err})
+            emit_progress(f'失败 {asin_key}：{item}')
+            print(f"警告: ROI 任务异常 ({asin_key}): {item}")
+            continue
+        if item:
+            info_result.append(item)
+            done_count += 1
+            emit_progress(f'进度 {done_count}/{len(roi_task_asins)}：{asin_key} ROI 已完成')
+        else:
+            if not any(f.get('asin') == asin_key for f in roi_failures):
+                roi_failures.append({'asin': asin_key, 'error': 'ROI-US-pack 生成失败'})
     print(info_result, 'wangxian2')
 
     merging_data = await async_merging_data(info_result, info_dict)
+    if not isinstance(merging_data, dict):
+        merging_data = {}
+    merging_data['__roi_failures__'] = roi_failures
+    ok_n = len(info_result)
+    fail_n = len(roi_failures)
+    emit_progress(f'全部完成：成功 {ok_n} 个，失败 {fail_n} 个')
+    if roi_failures:
+        for row in roi_failures[:15]:
+            emit_progress(f"  失败 {row.get('asin')}: {row.get('error')}")
+        if len(roi_failures) > 15:
+            emit_progress(f'  … 另有 {len(roi_failures) - 15} 个失败 ASIN')
     print(merging_data, 'www')
     print("所有表创建完成！")
     return merging_data

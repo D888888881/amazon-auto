@@ -1,9 +1,6 @@
 import requests
 
 
-
-
-
 def get_sif_cookie():
     headers = {
         "Accept": "application/json, text/plain, */*",

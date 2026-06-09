@@ -7,6 +7,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}Amazon 自动化{% endblock %}</title>
     <link rel="stylesheet" href="{% static 'css/app.css' %}">
+    {% if user.is_authenticated %}
+    <script src="{% static 'js/wizard_active_job_banner.js' %}"></script>
+    {% endif %}
     {% block extra_head %}{% endblock %}
     <link rel="shortcut icon" href="{% static 'images/20260401-174406_24x24.ico' %}" type="image/x-icon">
 </head>
@@ -20,6 +23,13 @@
         <a href="{% url 'asin_upload' %}" class="{% if request.resolver_match.url_name == 'asin_upload' or request.resolver_match.url_name == 'fetch_data' %}active{% endif %}">上传ASIN</a>
         <a href="{% url 'excel' %}" class="{% if request.resolver_match.url_name == 'excel' %}active{% endif %}">数据审核</a>
         <a href="{% url 'schedule_messages' %}" class="{% if request.resolver_match.url_name == 'schedule_messages' %}active{% endif %}">消息</a>
+        <a id="nav-wizard-job" class="nav-wizard-job" hidden
+           href="{% url 'compute_roi' %}"
+           data-active-url="{% url 'active_wizard_job' %}"
+           data-compute-url="{% url 'compute_roi' %}">
+            <span class="nav-wizard-job__dot" aria-hidden="true"></span>
+            <span class="nav-wizard-job__label">计算任务</span>
+        </a>
         {% if user.is_superuser %}
         <a href="{% url 'pending_registrations' %}" class="{% if request.resolver_match.url_name == 'pending_registrations' %}active{% endif %}">注册审核</a>
         <a href="{% url 'user_management' %}" class="{% if request.resolver_match.url_name == 'user_management' %}active{% endif %}">用户管理</a>
@@ -35,5 +45,15 @@
 <main class="main {% block main_class %}{% endblock %}">
     {% block content %}{% endblock %}
 </main>
+{% if user.is_authenticated %}
+<script>
+(function () {
+  if (window.WizardActiveJob) {
+    WizardActiveJob.initNavIndicator();
+  }
+})();
+</script>
+{% block page_scripts %}{% endblock %}
+{% endif %}
 </body>
 </html>

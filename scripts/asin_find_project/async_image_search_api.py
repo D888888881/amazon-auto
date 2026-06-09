@@ -189,35 +189,40 @@ async def async_price_info_main(image_path, _m_h5_tk, _m_h5_tk_enc):
     try:
         new_sign = _m_h5_tk.split('_')[0]
         print(new_sign)
-        global result_price
-        search_object = AsyncImageSearchAPI(_m_h5_tk,_m_h5_tk_enc,new_sign,image_path)
+        search_object = AsyncImageSearchAPI(_m_h5_tk, _m_h5_tk_enc, new_sign, image_path)
         response_json = await search_object.get_price_info()
-        price_list = []
-        # 收集所有价格
-        price_list = [float(i['price']) for i in response_json['data']['result']['data']]
-        print(price_list)
+        if not isinstance(response_json, dict):
+            print('图搜返回非 dict:', type(response_json))
+            return None
+        data_block = response_json.get('data') or {}
+        result_block = data_block.get('result') if isinstance(data_block, dict) else {}
+        items = result_block.get('data') if isinstance(result_block, dict) else None
+        if not items:
+            print('图搜结果为空:', str(response_json)[:500])
+            return None
+        price_list = [float(i['price']) for i in items if i.get('price') is not None]
+        if not price_list:
+            print('图搜未解析到有效价格')
+            return None
 
-        # 计算平均值
-        price_avg = sum(price_list) / len(price_list) if price_list else 0
-        print("最初", price_avg)
+        price_avg = sum(price_list) / len(price_list)
+        print('最初', price_avg)
 
-        # 筛选：保留在 [price_avg/2, price_avg*1.5] 范围内的价格
         filtered_prices = [p for p in price_list if not ((price_avg / 2) >= p or (price_avg * 1.5) <= p)]
-
         print('--------------------------------------------------------------------')
         print(filtered_prices)
 
         if filtered_prices:
             result_price = sum(filtered_prices) / (len(filtered_prices) + 1)
-            print("筛选后", round(result_price, 2))
-        else:
-            print("筛选后无数据")
-        return round(result_price, 2)
+            print('筛选后', round(result_price, 2))
+            return round(result_price, 2)
+        print('筛选后无数据')
+        return None
     except Exception as e:
-        print(e, '令牌过期')
+        print(e, '图搜/令牌异常')
         return None
 
 
 
 if __name__ == "__main__":
-    asyncio.run(async_price_info_main("images/B0F6MTPQVG.jpg", "da3c4d7d59b3b4ba242dbaa98d60f5ec_1780649370650", "f1c2182e0e2424b378482a13118e9d35"))
+    asyncio.run(async_price_info_main("images/B0F6MTPQVG.jpg", "5a394f1afba01c9de5705ba18a20cdac_1780914039892", "da5806747f575576edcf68cc6e4cb1ef"))

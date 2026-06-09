@@ -114,6 +114,7 @@ def _read_inputs(rows: list[list[Any]], field_cells: dict[str, list[tuple[int, i
         '优惠折扣',
         '广告cpc',
         '转化率',
+        '月出单量',
         '出单量',
         '日利润1',
         '日利润2',
@@ -231,7 +232,13 @@ def recalc_roi_us_pack_rows(rows: list[list[Any]]) -> tuple[bool, str]:
     disc_pct = inp['优惠折扣'] or 0.0
     ad_cpc = inp['广告cpc'] or 0.0
     conv_display = inp['转化率']
+    # 月出单量以表内值为准（用户可在编辑器中手工调整）；仅在其为空时才用出单量×30
+    monthly_vol = inp['月出单量']
     daily_orders = inp['出单量']
+    if monthly_vol is not None:
+        daily_orders = monthly_vol / 30.0
+    elif daily_orders is not None:
+        monthly_vol = daily_orders * 30.0
 
     cost_cny = None
     if unit_p is not None and head is not None:
@@ -299,9 +306,11 @@ def recalc_roi_us_pack_rows(rows: list[list[Any]]) -> tuple[bool, str]:
         and disc_price is not None
         and disc_price > 1e-9
         and daily_orders is not None
-        and daily_orders > 1e-9
     ):
-        ad_ratio = ad_budget / (disc_price * daily_orders) * 100.0
+        if daily_orders > 1e-9:
+            ad_ratio = ad_budget / (disc_price * daily_orders) * 100.0
+        else:
+            ad_ratio = 0.0
 
     ad_removed = None
     if (
@@ -309,25 +318,26 @@ def recalc_roi_us_pack_rows(rows: list[list[Any]]) -> tuple[bool, str]:
         and cost_cny is not None
         and cost_cny > 1e-9
         and daily_orders is not None
-        and daily_orders > 1e-9
     ):
-        ad_removed = daily_p1 * ex / (cost_cny * daily_orders) * 100.0
+        if daily_orders > 1e-9:
+            ad_removed = daily_p1 * ex / (cost_cny * daily_orders) * 100.0
+        else:
+            ad_removed = 0.0
 
     ppo = None
-    if daily_p2 is not None and daily_orders is not None and daily_orders > 1e-9:
-        ppo = daily_p2 / daily_orders
+    if daily_p2 is not None and daily_orders is not None:
+        if daily_orders > 1e-9:
+            ppo = daily_p2 / daily_orders
+        else:
+            ppo = 0.0
 
     pm = None
     if act_profit is not None and disc_price is not None and disc_price > 1e-9:
         pm = act_profit / disc_price * 100.0
 
     ad_gross = None
-    if pm is not None and ad_ratio is not None:
-        ad_gross = pm - ad_ratio
-
-    monthly_vol = None
-    if daily_orders is not None:
-        monthly_vol = daily_orders * 30.0
+    if pm is not None:
+        ad_gross = pm - (ad_ratio if ad_ratio is not None else 0.0)
 
     _set_field(rows, field_cells, '最低售价', _fmt(lowest))
     _set_field(rows, field_cells, '折后价格', _fmt(disc_price))
@@ -339,6 +349,7 @@ def recalc_roi_us_pack_rows(rows: list[list[Any]]) -> tuple[bool, str]:
     _set_field(rows, field_cells, '广告预算', _fmt(ad_budget))
     _set_field(rows, field_cells, '广告点击', _fmt(ad_clicks))
     _set_field(rows, field_cells, '月出单量', _fmt(monthly_vol))
+    _set_field(rows, field_cells, '出单量', _fmt(daily_orders))
     _set_field(rows, field_cells, '日利润1', _fmt(daily_p1))
     _set_field(rows, field_cells, '日利润2', _fmt(daily_p2))
     _set_field(rows, field_cells, '月利润1', _fmt(mp1))

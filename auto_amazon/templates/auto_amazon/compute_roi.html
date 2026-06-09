@@ -8,6 +8,8 @@
         <p class="upload-hero__desc">默认仅展示未计算 ASIN；勾选“计算已计算过数据”后会同时展示已计算与未计算 ASIN。</p>
     </header>
 
+    {% include 'auto_amazon/_wizard_active_banner.html' %}
+
     <section class="upload-panel upload-panel--accent">
         <form method="get" class="upload-form" style="margin-bottom: .8rem;">
             <div class="upload-field">
@@ -41,7 +43,9 @@
 
         <form id="upload-form" method="post" class="upload-form" novalidate
               data-upload-start="{% url 'upload_start' %}"
-              data-status-url-template="{% url 'upload_job_status' job_id='00000000-0000-0000-0000-000000000000' %}">
+              data-status-url-template="{% url 'upload_job_status' job_id='00000000-0000-0000-0000-000000000000' %}"
+              data-active-url="{% url 'active_wizard_job' %}"
+              data-dismiss-url="{% url 'dismiss_active_wizard_job' %}">
             {% csrf_token %}
             <input type="hidden" name="recompute_existing" value="{% if include_recomputed %}1{% else %}0{% endif %}">
             <div class="upload-field">
@@ -168,12 +172,52 @@
           if (timer) clearInterval(timer);
           return;
         }
-        logEl.textContent = (data.progress || []).join('\n');
+        var titleEl = document.getElementById('upload-progress-title');
+        if (titleEl && data.status_label) {
+          titleEl.textContent = '分析任务 · ' + data.status_label;
+        }
+        if (data.status_hint && data.status === 'queued') {
+          logEl.textContent = data.status_hint + '\n\n' + (data.progress || []).join('\n');
+        } else {
+          logEl.textContent = (data.progress || []).join('\n');
+        }
         logEl.scrollTop = logEl.scrollHeight;
-        if (data.status === 'done') {
+        if (window.__roiActiveBannerCtrl) window.__roiActiveBannerCtrl.updateFromJob(data);
+        if (data.status === 'done' || data.status === 'done_with_errors') {
           if (timer) clearInterval(timer);
           if (spinner) spinner.style.display = 'none';
-          window.location.href = data.redirect || '{% url "index" %}';
+          var summaryParts = (data.progress || []).slice(-40);
+          if (data.status === 'done_with_errors') {
+            logEl.className = 'upload-progress-log upload-progress-log--error';
+            var parts = summaryParts.length ? summaryParts : [data.error || '部分 ASIN 计算失败'];
+            if (data.success_count != null && summaryParts.indexOf('成功') === -1) {
+              parts.unshift('成功 ' + data.success_count + '，失败 ' + (data.fail_count || 0));
+            }
+            if (data.failures && data.failures.length) {
+              parts.push('');
+              parts.push('失败 ASIN：');
+              data.failures.slice(0, 40).forEach(function (f) {
+                parts.push((f.asin || '?') + ': ' + (f.error || ''));
+              });
+              if (data.failures.length > 40) {
+                parts.push('… 另有 ' + (data.failures.length - 40) + ' 个');
+              }
+            }
+            logEl.textContent = parts.join('\n');
+            closeBtn.hidden = false;
+            setTimeout(function () {
+              window.location.href = data.redirect || '{% url "index" %}';
+            }, 5000);
+            return;
+          }
+          if (data.success_count != null) {
+            summaryParts.push('成功 ' + data.success_count + ' 个' + (data.fail_count ? ('，失败 ' + data.fail_count + ' 个') : ''));
+          }
+          logEl.textContent = summaryParts.join('\n');
+          closeBtn.hidden = false;
+          setTimeout(function () {
+            window.location.href = data.redirect || '{% url "index" %}';
+          }, 2500);
           return;
         }
         if (data.status === 'error') {
@@ -196,6 +240,12 @@
         if (timer) clearInterval(timer);
       });
   }
+
+  window.__roiShowProgressOverlay = function (jid) {
+    showOverlay();
+    poll(jid);
+  };
+
   closeBtn.addEventListener('click', hideOverlay);
   form.addEventListener('submit', function (e) {
     e.preventDefault();
@@ -233,6 +283,13 @@
       .catch(function (err) {
         submitBtn.disabled = false;
         submitBtn.removeAttribute('aria-busy');
+        if (err.jobId) {
+          alert((err.message || '已有任务进行中') + '\n\n将打开当前任务进度。');
+          showOverlay();
+          poll(err.jobId);
+          if (window.__roiActiveBannerCtrl) window.__roiActiveBannerCtrl.refresh();
+          return;
+        }
         alert(err.message || String(err));
       });
   });
@@ -248,5 +305,26 @@
   } catch (e) {}
 })();
 </script>
+{% block page_scripts %}
+<script>
+(function () {
+  if (!window.WizardActiveJob) {
+    console.error('wizard_active_job_banner.js 未加载，任务状态按钮不可用');
+    return;
+  }
+  window.__roiActiveBannerCtrl = WizardActiveJob.initBanner({
+    csrfInput: document.querySelector('#upload-form [name=csrfmiddlewaretoken]'),
+    computeUrl: '{% url "compute_roi" %}',
+    onViewProgress: function (jid) {
+      if (typeof window.__roiShowProgressOverlay === 'function') {
+        window.__roiShowProgressOverlay(jid);
+      } else {
+        window.location.href = '{% url "compute_roi" %}?job_id=' + encodeURIComponent(jid);
+      }
+    }
+  });
+})();
+</script>
+{% endblock %}
 {% endblock %}
 

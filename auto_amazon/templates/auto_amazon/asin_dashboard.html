@@ -21,6 +21,8 @@
     </ul>
     {% endif %}
 
+    {% include 'auto_amazon/_wizard_active_banner.html' %}
+
     <form id="dash-batch-form" method="post" action="{% url 'index' %}">
         {% csrf_token %}
         <input type="hidden" name="action" id="dash-action" value="">
@@ -141,6 +143,15 @@
                 </select>
                 <input type="number" step="0.01" name="ops_custom_min" placeholder="自定义最小%" value="{{ request.GET.ops_custom_min }}">
                 <input type="number" step="0.01" name="ops_custom_max" placeholder="自定义最大%" value="{{ request.GET.ops_custom_max }}">
+                <span>评价数量：</span>
+                <select name="ops_review_interval">
+                    <option value="all" {% if filters.ops_review_interval == 'all' %}selected{% endif %}>不限</option>
+                    <option value="0-30" {% if filters.ops_review_interval == '0-30' %}selected{% endif %}>0-30</option>
+                    <option value="31-50" {% if filters.ops_review_interval == '31-50' %}selected{% endif %}>31-50</option>
+                    <option value="51-100" {% if filters.ops_review_interval == '51-100' %}selected{% endif %}>51-100</option>
+                    <option value="101-200" {% if filters.ops_review_interval == '101-200' %}selected{% endif %}>101-200</option>
+                    <option value="200以上" {% if filters.ops_review_interval == '200以上' %}selected{% endif %}>200以上</option>
+                </select>
             </div>
             <div class="dash-filter-actions">
                 <button type="submit" class="dash-btn dash-btn--primary">筛选</button>
@@ -647,4 +658,15 @@
   refreshBatch();
 })();
 </script>
+{% block page_scripts %}
+<script>
+(function () {
+  if (!window.WizardActiveJob) return;
+  WizardActiveJob.initBanner({
+    csrfInput: document.querySelector('[name=csrfmiddlewaretoken]'),
+    computeUrl: '{% url "compute_roi" %}'
+  });
+})();
+</script>
+{% endblock %}
 {% endblock %}

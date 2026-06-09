@@ -139,9 +139,32 @@
         }
         logEl.textContent = (data.progress || []).join('\n');
         logEl.scrollTop = logEl.scrollHeight;
-        if (data.status === 'done') {
+        if (data.status === 'done' || data.status === 'done_with_errors') {
           if (timer) clearInterval(timer);
           if (spinner) spinner.style.display = 'none';
+          if (data.status === 'done_with_errors') {
+            logEl.className = 'upload-progress-log upload-progress-log--error';
+            var parts = [data.error || '部分 ASIN 计算失败'];
+            if (data.success_count != null) {
+              parts.push('成功 ' + data.success_count + '，失败 ' + (data.fail_count || 0));
+            }
+            if (data.failures && data.failures.length) {
+              parts.push('');
+              parts.push('失败 ASIN：');
+              data.failures.slice(0, 40).forEach(function (f) {
+                parts.push((f.asin || '?') + ': ' + (f.error || ''));
+              });
+              if (data.failures.length > 40) {
+                parts.push('… 另有 ' + (data.failures.length - 40) + ' 个');
+              }
+            }
+            logEl.textContent = parts.join('\n');
+            closeBtn.hidden = false;
+            setTimeout(function () {
+              window.location.href = data.redirect || '{% url "index" %}';
+            }, 5000);
+            return;
+          }
           window.location.href = data.redirect || '{% url "index" %}';
           return;
         }

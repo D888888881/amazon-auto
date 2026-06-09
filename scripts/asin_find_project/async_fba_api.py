@@ -2,7 +2,7 @@ import asyncio
 import aiohttp
 # from async_read_config import read_main
 
-from seller_wizard_set_cookie import set_cookie_main
+from seller_account_guard import apply_login_config, apply_login_headers, ensure_seller_login
 
 
 """异步发起单个 ASIN 的 FBA 计算请求"""
@@ -69,6 +69,20 @@ async def fetch_fba_search(asin):
         async with session.post(url, params=params) as resp:
             return await resp.json()
 
+
+def _parse_fba_fee(raw) -> float | None:
+    if raw is None:
+        return None
+    try:
+        s = str(raw).replace('$', '').replace(',', '').strip()
+        if not s:
+            return None
+        n = float(s)
+        return n if n > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
 async def process_asin(asin):
     """
     处理单个 ASIN，返回 (asin, result) 元组，result 包含 FBA 费用和头程费用
@@ -76,9 +90,13 @@ async def process_asin(asin):
     """
     try:
         response_json = await fetch_fba_search(asin)
+        data = response_json.get('data') or {}
+        fba_val = _parse_fba_fee(data.get('fba'))
+        if fba_val is None:
+            raise ValueError(f"FBA 费用无效: {data.get('fba')!r}")
         # 提取尺寸和重量
-        pkgDimensions = response_json['data']['pkgDimensions']
-        pkgWeight = float(response_json['data']['pkgWeight'].replace('pounds', '').strip()) * 0.45359237  # 转为 kg
+        pkgDimensions = data['pkgDimensions']
+        pkgWeight = float(data['pkgWeight'].replace('pounds', '').strip()) * 0.45359237  # 转为 kg
         # 解析尺寸（英寸）
         dims = pkgDimensions.split('x')
         h = float(dims[0].strip()) * 2.54          # 高 cm
@@ -91,7 +109,7 @@ async def process_asin(asin):
         # 头程费用（假设单价 5 元/kg）
         head_distance = chargeable_weight * 5
         result = {
-            "FBA": response_json['data']['fba'],
+            "FBA": fba_val,
             "head_distance": head_distance
         }
         return asin, result
@@ -106,9 +124,9 @@ async def async_fba_batch(asin_list, max_concurrent=5):
     :param max_concurrent: 最大并发数
     :return: 字典，键为 ASIN，值为 {"FBA": ..., "head_distance": ...} 或 None
     """
-    config = await set_cookie_main('ITBM000067', 'ITBM000067')
-    cookies['rank-login-user'] = config['rank-login-user']
-    cookies['rank-login-user-info'] = config['rank-login-user-info']
+    config = await ensure_seller_login()
+    apply_login_config(cookies, config)
+    apply_login_headers(headers, config)
     semaphore = asyncio.Semaphore(max_concurrent)
 
     async def bounded_process(asin):

@@ -12,7 +12,7 @@ from django.utils import timezone
 
 from .asin_access import normalize_asin
 from .asin_job_lock import AsinComputeLock
-from .asin_wizard import run_ad_difficulty_for_asins, run_seller_wizard
+from .asin_wizard import run_ad_difficulty_for_asins
 from .exchange_rate import fetch_usd_cny_rate
 from .media_paths import media_root
 from .models import (
@@ -157,17 +157,103 @@ def _execute_ad_for_row(row: AsinDashboardRow) -> None:
 
 
 def _execute_roi_for_row(row: AsinDashboardRow, parity: float) -> None:
-    from .views import _persist_wizard_results
+    from .resilient_wizard import run_roi_asins_sequential
+    from .views import _merge_cost_overrides_from_db, _persist_wizard_results
 
     asin = normalize_asin(row.asin)
-    cost_overrides = _build_cost_overrides(row)
-    result = run_seller_wizard([asin], parity, cost_overrides=cost_overrides or None)
+    cost_overrides = _merge_cost_overrides_from_db([asin], _build_cost_overrides(row))
+    batch = run_roi_asins_sequential(
+        [asin],
+        parity,
+        cost_overrides=cost_overrides or None,
+    )
+    if batch.success_count == 0:
+        err = batch.failures[0].error if batch.failures else 'ROI 计算无结果'
+        raise RuntimeError(err)
     _persist_wizard_results(
         row.user_id,
-        result,
+        batch.merged,
         parity,
         target_row_ids={asin: row.pk},
     )
+
+
+def execute_scheduled_asin_worker(
+    *,
+    row_pk: int,
+    job_log_id: int,
+    ad_due: bool,
+    roi_due: bool,
+    recipient_id: int | None,
+) -> None:
+    """Worker 内执行定时 ASIN 任务（广告难度 / ROI / 消息）。"""
+    row = AsinDashboardRow.objects.select_related('user').filter(pk=row_pk).first()
+    if not row:
+        ScheduledJobLog.objects.filter(pk=job_log_id).update(
+            status=ScheduledJobLog.Status.FAILED,
+            detail='dashboard row not found',
+            finished_at=timezone.now(),
+        )
+        return
+
+    asin = normalize_asin(row.asin)
+    recipient = None
+    if recipient_id:
+        recipient = User.objects.filter(pk=recipient_id).first()
+    if not recipient:
+        recipient = resolve_asin_message_recipient(asin) or row.user
+
+    job_log = ScheduledJobLog.objects.filter(pk=job_log_id).first()
+    if not job_log:
+        return
+
+    detail_lines: list[str] = []
+    ran_any = False
+
+    try:
+        row.refresh_from_db()
+        before = row_metrics_snapshot(row)
+
+        if ad_due:
+            detail_lines.append('run ad difficulty')
+            _execute_ad_for_row(row)
+            AsinDashboardRow.objects.filter(pk=row.pk).update(last_scheduled_ad_at=timezone.now())
+            ran_any = True
+
+        row.refresh_from_db()
+
+        if roi_due:
+            parity = fetch_usd_cny_rate()
+            detail_lines.append(f'run roi parity={parity}')
+            _execute_roi_for_row(row, parity)
+            refresh_row_ops_from_media(row)
+            AsinDashboardRow.objects.filter(pk=row.pk).update(last_scheduled_roi_at=timezone.now())
+            ran_any = True
+
+        if ran_any:
+            row.refresh_from_db()
+            after = row_metrics_snapshot(row, media_fallback=True)
+            _create_task_message(
+                recipient=recipient,
+                row=row,
+                before=before,
+                after=after,
+                job_log=job_log,
+            )
+            job_log.status = ScheduledJobLog.Status.SUCCESS
+        else:
+            job_log.status = ScheduledJobLog.Status.SKIPPED
+
+        job_log.detail = '; '.join(detail_lines)
+        job_log.finished_at = timezone.now()
+        job_log.save(update_fields=['status', 'detail', 'finished_at'])
+    except Exception as exc:
+        logger.exception('scheduled worker failed for %s', asin)
+        job_log.status = ScheduledJobLog.Status.FAILED
+        job_log.detail = f'{type(exc).__name__}: {exc}'
+        job_log.finished_at = timezone.now()
+        job_log.save(update_fields=['status', 'detail', 'finished_at'])
+        raise
 
 
 def _create_task_message(
@@ -254,6 +340,33 @@ def _process_one_row(
         asin_list=[asin],
         detail='',
     )
+
+    from .rq_enqueue import dispatch_scheduled_asin, roi_use_rq
+
+    if roi_use_rq():
+        try:
+            dispatch_scheduled_asin(
+                row_pk=row.pk,
+                asin=asin,
+                lock_owner=owner,
+                job_log_id=job_log.pk,
+                ad_due=ad_due,
+                roi_due=roi_due,
+                recipient_id=recipient.pk if recipient else None,
+            )
+            stats['enqueued'] = stats.get('enqueued', 0) + 1
+            job_log.detail = 'enqueued to RQ worker'
+            job_log.save(update_fields=['detail'])
+        except Exception as exc:
+            logger.exception('enqueue scheduled asin failed %s', asin)
+            job_log.status = ScheduledJobLog.Status.FAILED
+            job_log.detail = f'enqueue failed: {exc}'
+            job_log.finished_at = timezone.now()
+            job_log.save(update_fields=['status', 'detail', 'finished_at'])
+            lock.release_all()
+            stats['errors'] += 1
+        return
+
     detail_lines: list[str] = []
     ran_any = False
 
@@ -319,7 +432,15 @@ def run_scheduled_asin_jobs(*, due_only: bool = True, dry_run: bool = False) -> 
     )
     rows = dedupe_priority_rows_for_scheduler(rows)
 
-    stats = {'enabled': True, 'processed': 0, 'skipped': 0, 'errors': 0, 'messages': 0, 'candidates': len(rows)}
+    stats = {
+        'enabled': True,
+        'processed': 0,
+        'skipped': 0,
+        'errors': 0,
+        'messages': 0,
+        'enqueued': 0,
+        'candidates': len(rows),
+    }
     for row in rows:
         try:
             _process_one_row(row, due_only=due_only, dry_run=dry_run, stats=stats)

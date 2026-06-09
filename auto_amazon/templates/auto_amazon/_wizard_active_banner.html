@@ -1,0 +1,21 @@
+<section id="roi-active-job-banner" class="roi-active-banner" {% if not active_job %}hidden{% endif %}
+         data-active-url="{% url 'active_wizard_job' %}"
+         data-dismiss-url="{% url 'dismiss_active_wizard_job' %}"
+         {% if active_job %}data-job-id="{{ active_job.job_id }}"{% endif %}>
+    <div class="roi-active-banner__main">
+        <strong class="roi-active-banner__title">当前有进行中的计算任务</strong>
+        <span id="roi-active-status" class="roi-active-banner__status">
+            {% if active_job %}{{ active_job.status_label }}{% endif %}
+        </span>
+        <p id="roi-active-hint" class="roi-active-banner__hint">
+            {% if active_job %}{{ active_job.status_hint }}{% endif %}
+        </p>
+        <p id="roi-active-last" class="roi-active-banner__last">
+            {% if active_job and active_job.last_progress %}{{ active_job.last_progress }}{% endif %}
+        </p>
+    </div>
+    <div class="roi-active-banner__actions">
+        <button type="button" class="upload-submit roi-active-banner__btn" id="btn-view-active-job">查看详细进度</button>
+        <button type="button" class="upload-progress-close roi-active-banner__btn" id="btn-dismiss-active-job">解除占用</button>
+    </div>
+</section>

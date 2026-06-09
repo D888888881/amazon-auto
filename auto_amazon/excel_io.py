@@ -1,5 +1,8 @@
 """Excel 读取（样式/图片）与保留格式的保存。"""
 import base64
+import os
+import shutil
+import stat
 
 from openpyxl import load_workbook
 from openpyxl.utils import range_boundaries
@@ -287,40 +290,132 @@ def _clear_rect(ws, r1: int, r2: int, c1: int, c2: int) -> None:
                 ws.cell(r, c).value = None
 
 
+def _is_search_xlsx_path(path) -> bool:
+    name = (getattr(path, 'name', None) or str(path)).lower()
+    return name.startswith('search(') and name.endswith('.xlsx')
+
+
+def _atomic_replace_file(tmp_path, dest_path) -> None:
+    """Windows 下替换 xlsx 时解除只读并尽量原子覆盖。"""
+    dest = os.fspath(dest_path)
+    tmp = os.fspath(tmp_path)
+    if os.path.isfile(dest):
+        try:
+            os.chmod(dest, stat.S_IWRITE | stat.S_IREAD)
+        except OSError:
+            pass
+    try:
+        os.replace(tmp, dest)
+    except OSError:
+        if os.path.isfile(dest):
+            os.remove(dest)
+        shutil.move(tmp, dest)
+
+
+def _normalize_save_rows(rows: list) -> tuple[list[list], int, int]:
+    if not rows:
+        rows = [['']]
+    norm: list[list] = []
+    for row in rows:
+        if not isinstance(row, list):
+            norm.append([row])
+        else:
+            norm.append(list(row))
+    new_max_row = len(norm)
+    lengths = [len(r) for r in norm]
+    new_max_col = max(lengths) if lengths else 1
+    new_max_col = max(1, new_max_col)
+    for r in norm:
+        while len(r) < new_max_col:
+            r.append('')
+        del r[new_max_col:]
+    return norm, new_max_row, new_max_col
+
+
+def _read_active_sheet_title(path) -> str:
+    try:
+        wb = load_workbook(path, read_only=True, data_only=True, keep_links=False)
+        title = wb.active.title
+        wb.close()
+        return title or 'Sheet1'
+    except Exception:
+        return 'Sheet1'
+
+
+def _save_rows_rewrite_workbook(path, rows: list, sheet_name: str = 'Sheet1') -> tuple[bool, str | None]:
+    """openpyxl 无法打开原文件时的降级：按表内数据重写 xlsx（会丢失嵌入图片与部分样式）。"""
+    from openpyxl import Workbook
+
+    norm, new_max_row, new_max_col = _normalize_save_rows(rows)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = (sheet_name or 'Sheet1')[:31]
+    for r_idx in range(1, new_max_row + 1):
+        row = norm[r_idx - 1]
+        for c_idx in range(1, new_max_col + 1):
+            ws.cell(r_idx, c_idx).value = _extract_cell_val(row[c_idx - 1])
+    tmp_path = path.with_name(path.stem + '.part.xlsx')
+    if tmp_path.is_file():
+        tmp_path.unlink(missing_ok=True)
+    try:
+        wb.save(tmp_path)
+        wb.close()
+        _atomic_replace_file(tmp_path, path)
+        return True, None
+    except Exception as e:
+        try:
+            wb.close()
+        except Exception:
+            pass
+        if tmp_path.is_file():
+            tmp_path.unlink(missing_ok=True)
+        return False, str(e)
+
+
+def search_xlsx_save_is_rewrite(path) -> bool:
+    """Search 表保存是否走重写路径（不尝试打开原 corrupt XML）。"""
+    return _is_search_xlsx_path(path)
+
+
 def save_sheet_values_preserving_format(path, rows: list):
     """
     在原文件上按网格写回文本值，并删去网格外的多余行列，尽量保留样式、图片。
+    若原文件 XML 损坏无法打开，则降级为按表内数据重写（与 read_active_sheet_rich 只读降级一致）。
+    Search(...) 表卖家精灵导出 XML 常不规范，一律重写保存，避免 openpyxl 读写失败。
     rows: 二维数组，元素为字符串或 {v: ...}
     """
-    try:
-        wb = load_workbook(path, read_only=False, data_only=False, keep_links=True)
-    except Exception as e:
-        return False, str(e)
+    norm, new_max_row, new_max_col = _normalize_save_rows(rows)
+
+    if _is_search_xlsx_path(path):
+        sheet_name = _read_active_sheet_title(path)
+        return _save_rows_rewrite_workbook(path, norm, sheet_name)
+
+    load_err: Exception | None = None
+    wb = None
+    for kwargs in (
+        {'read_only': False, 'data_only': False, 'keep_links': True},
+        {'read_only': False, 'data_only': False, 'keep_links': False},
+    ):
+        try:
+            wb = load_workbook(path, **kwargs)
+            load_err = None
+            break
+        except Exception as e:
+            load_err = e
+            wb = None
+
+    if wb is None:
+        sheet_name = _read_active_sheet_title(path)
+        ok, err = _save_rows_rewrite_workbook(path, norm, sheet_name)
+        if ok:
+            return True, None
+        return False, str(load_err or err or '无法保存')
+
     try:
         ws = wb.active
         old_max_row = ws.max_row or 1
         old_max_col = ws.max_column or 1
-
-        if not rows:
-            rows = [['']]
-
-        norm = []
-        for row in rows:
-            if not isinstance(row, list):
-                norm.append([row])
-            else:
-                norm.append(list(row))
         rows = norm
-
-        new_max_row = len(rows)
-        lengths = [len(r) for r in rows]
-        new_max_col = max(lengths) if lengths else 1
-        new_max_col = max(1, new_max_col)
-
-        for r in rows:
-            while len(r) < new_max_col:
-                r.append('')
-            del r[new_max_col:]
 
         for r_idx in range(1, new_max_row + 1):
             row = rows[r_idx - 1]
@@ -353,4 +448,8 @@ def save_sheet_values_preserving_format(path, rows: list):
             wb.close()
         except Exception:
             pass
+        sheet_name = _read_active_sheet_title(path)
+        ok, err = _save_rows_rewrite_workbook(path, norm, sheet_name)
+        if ok:
+            return True, None
         return False, str(e)

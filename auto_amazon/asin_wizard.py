@@ -1,7 +1,8 @@
-"""调用 scripts/asin_find_project 中的 seller_wizard_main（子进程，避免污染 Django 进程）。"""
+"""调用 scripts/asin_find_project 中的 seller_wizard（子进程或 Worker 内 in-process）。"""
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -11,6 +12,11 @@ from typing import Callable
 from django.conf import settings
 
 from .seller_unlock import execute_with_seller_unlock_retry
+
+
+def _wizard_exec_mode() -> str:
+    """subprocess | inprocess（Worker 推荐 inprocess，省子进程启动开销）。"""
+    return os.environ.get('ROI_WIZARD_EXEC_MODE', 'subprocess').strip().lower()
 
 
 def _parse_stdout_json(text: str, stderr_lines: list[str]) -> dict:
@@ -167,6 +173,34 @@ def _run_ad_difficulty_subprocess(
     return _parse_stdout_json(out, stderr_lines)
 
 
+def _run_seller_wizard_impl(
+    asins: list[str] | None,
+    parity: float,
+    cost_overrides: dict | None = None,
+    on_stderr_line: Callable[[str], None] | None = None,
+) -> dict:
+    if _wizard_exec_mode() == 'inprocess':
+        from .wizard_runtime import run_seller_wizard_inprocess
+
+        return run_seller_wizard_inprocess(
+            asins, parity, cost_overrides, on_stderr_line
+        )
+    return _run_seller_wizard_subprocess(
+        asins, parity, cost_overrides, on_stderr_line
+    )
+
+
+def _run_ad_difficulty_impl(
+    asins: list[str],
+    on_stderr_line: Callable[[str], None] | None = None,
+) -> dict:
+    if _wizard_exec_mode() == 'inprocess':
+        from .wizard_runtime import run_ad_difficulty_inprocess
+
+        return run_ad_difficulty_inprocess(asins, on_stderr_line)
+    return _run_ad_difficulty_subprocess(asins, on_stderr_line)
+
+
 def run_seller_wizard(
     asins: list[str] | None,
     parity: float,
@@ -174,11 +208,13 @@ def run_seller_wizard(
     on_stderr_line: Callable[[str], None] | None = None,
 ) -> dict:
     """
-    运行 ROI 分析子进程。
+    运行 ROI 分析。
     遇 rank-login-user（子账号被禁）时自动执行解禁并重试一次。
     """
     return execute_with_seller_unlock_retry(
-        lambda: _run_seller_wizard_subprocess(asins, parity, cost_overrides, on_stderr_line),
+        lambda: _run_seller_wizard_impl(
+            asins, parity, cost_overrides, on_stderr_line
+        ),
         on_log=on_stderr_line,
     )
 
@@ -188,10 +224,10 @@ def run_ad_difficulty_for_asins(
     on_stderr_line: Callable[[str], None] | None = None,
 ) -> dict:
     """
-    运行广告难度计算子进程。
+    运行广告难度计算。
     遇 rank-login-user（子账号被禁）时自动执行解禁并重试一次。
     """
     return execute_with_seller_unlock_retry(
-        lambda: _run_ad_difficulty_subprocess(asins, on_stderr_line),
+        lambda: _run_ad_difficulty_impl(asins, on_stderr_line),
         on_log=on_stderr_line,
     )

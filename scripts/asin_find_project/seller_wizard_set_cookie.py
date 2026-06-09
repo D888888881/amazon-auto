@@ -81,20 +81,21 @@ async def get_seller_wizard_set_cookie(username: str, password: str =''):
         for cookie in set_cookies:
             print(cookie)
 
+        auth_names = {
+            'rank-login-user',
+            'rank-login-user-info',
+            'Sprite-X-Token',
+            'ao_lo_to_n',
+            'JSESSIONID',
+        }
         user_info = {}
-        found_count = 0
-
-        # 从响应 cookies 中提取需要的字段
         for cookie in response.cookies.jar:
+            if cookie.name not in auth_names:
+                continue
+            val = cookie.value
             if cookie.name == 'rank-login-user-info':
-                user_info['rank-login-user-info'] = cookie.value.replace('"', '')  # 去掉引号
-                found_count += 1
-            elif cookie.name == 'rank-login-user':
-                user_info['rank-login-user'] = cookie.value
-                found_count += 1
-
-            if found_count == 2:
-                break
+                val = val.replace('"', '')
+            user_info[cookie.name] = val
 
         return user_info
 

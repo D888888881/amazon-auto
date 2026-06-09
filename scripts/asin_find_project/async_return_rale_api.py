@@ -1,8 +1,12 @@
 import asyncio
+import os
+import re
+
 import aiohttp
 from lxml import html
-from typing import Optional, Dict, Any
-from seller_wizard_set_cookie import set_cookie_main
+from typing import Optional
+
+from seller_account_guard import apply_login_config, apply_login_headers, ensure_seller_login
 
 
 # ---------- 默认配置 ----------
@@ -48,36 +52,133 @@ cookies = {
     "_gaf_fp": "446d18f8171dc955925786036784aa71",
     "rank-login-user": 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
     "rank-login-user-info": 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
-    "Sprite-X-Token": "eyJhbGciOiJSUzI1NiIsImtpZCI6IjE2Nzk5NjI2YmZlMDQzZTBiYzI5NTEwMTE4ODA3YWExIn0.eyJqdGkiOiJObTNjYmpmVXRuVG1lX0hWRzdocFp3IiwiaWF0IjoxNzc0NTA5NTk1LCJleHAiOjE3NzQ1OTU5OTUsIm5iZiI6MTc3NDUwOTUzNSwic3ViIjoieXVueWEiLCJpc3MiOiJyYW5rIiwiYXVkIjoic2VsbGVyU3BhY2UiLCJpZCI6MTI5NDI1LCJwaSI6bnVsbCwibm4iOiLmt7HlnLPpmL_mlrnntKLnp5HmioDmnInpmZDlhazlj7giLCJzeXMiOiJTU19DTiIsImVkIjoiTiIsInBobiI6IjEzNzI0MzMzODAzIiwiZW0iOiJxdWlnZW5nbmFAMTI2LmNvbSIsIm1sIjoiViIsImVuZCI6MTc4MjU0NDc5NTg2OH0.WSErMY_l_7JOxDOFXM0uOaRAxHVxlcmebSa1rfsa3hdy1NX1ChTW-Wmt6h2WDjrLXqu_TVB1O-cKeY53Wnp7QvGh1Ex-MEZkoHpWnXQBI3tQrgBeDO70P6T8e0l-dMHWV-YOXerrQ8wZh7z7kGNTz4qkNCt6_idSPnyEbD2Zr4IIOOYaEBCt11Kdb_bSOmmHjl9Aix8POfe-e5t2jDcuUPdwOvbntcN2yEKdoEGC-h3BxW5WqcdXl_-zfwHyMDSLF0M9JYcOieQbMOatASBn4Vlqb6r116wcp-S2meH9UKDZwhJaDN3vXo2El18R8fD0oXvWOBOkEuSUtxTwM9tRrg",
-    "ao_lo_to_n": "\"5917654771sTlVc5v9oyTCeXLRrg0WdYpTS2iYglYvULffNNNMBcyHnQMKABbi8gc20FarG0A5qB1vaKgTD4Qow5Xanaje96PAVd71/f+h3p9Ry7rrE4U=\"",
+    "Sprite-X-Token": "",
+    "ao_lo_to_n": "",
+    "JSESSIONID": "",
     "_ga_CN0F80S6GL": "GS2.1.s1774509573$o29$g1$t1774509843$j60$l0$h0",
     "Hm_lpvt_e0dfc78949a2d7c553713cb5c573a486": "1774509844",
     "_clsk": "1tig1ea%5E1774509845396%5E7%5E1%5Ei.clarity.ms%2Fcollect",
-    "JSESSIONID": "2DA1183136557EA50651E0A7E3FEA475",
     "_ga_38NCVF2XST": "GS2.1.s1774509573$o39$g1$t1774509928$j60$l0$h1584007809"
 }
 BASE_URL = "https://www.sellersprite.com/v2/market-research"
+DEFAULT_MONTH_NAME = os.environ.get(
+    'SELLER_MARKET_RESEARCH_MONTH',
+    'bsr_sales_nearly',
+)
+FALLBACK_MONTH_NAMES = (
+    'bsr_sales_nearly',
+    'bsr_sales_monthly_202601',
+    'bsr_sales_monthly_202512',
+)
 
 
+def _normalize_rate_text(raw: str) -> str:
+    text = str(raw or '').replace('%', '').strip()
+    if not text:
+        return ''
+    m = re.search(r'(\d+(?:\.\d+)?)', text)
+    return m.group(1) if m else ''
 
 
+def _looks_like_login_page(html_content: str) -> bool:
+    lowered = (html_content or '').lower()
+    return (
+        'user/signin' in lowered
+        or 'name="password"' in lowered
+        or 'rank-login-user' in lowered and 'table-condition-search' not in lowered
+    )
 
 
+def _category_keyword_variants(path: str) -> list[str]:
+    """同一路径的多种写法 + 上级类目回落。"""
+    path = (path or '').strip()
+    if not path:
+        return []
 
-async def extract_table_value(html_content: str) -> str:
+    variants: list[str] = []
+    seen: set[str] = set()
+
+    def add(p: str) -> None:
+        p = (p or '').strip()
+        if p and p not in seen:
+            seen.add(p)
+            variants.append(p)
+
+    add(path)
+    if "'" in path:
+        add(path.replace("'", "\u2019"))  # ’
+        add(path.replace("'", "`"))
+    if '&' in path:
+        add(path.replace('&', 'and'))
+
+    parts = path.split(':')
+    while len(parts) > 1:
+        parts = parts[:-1]
+        add(':'.join(parts))
+
+    return variants
+
+
+def extract_table_value(html_content: str) -> str:
     """
-    从 SellerSprite 市场调研返回的 HTML 中提取指定 XPath 的文本内容
-    XPath: //*[@id="table-condition-search"]/tbody/tr[1]/td[14]/div/div[1]/text()
+    从 SellerSprite 市场调研 HTML 提取退款率/退货率。
+    优先按表头定位列，再回退到历史 XPath / 首行百分比扫描。
     """
-    # 解析 HTML
+    if not html_content or _looks_like_login_page(html_content):
+        return ''
+    if 'table-condition-search' not in html_content:
+        return ''
+
     tree = html.fromstring(html_content)
-    # 执行 XPath 查询，返回元素列表（此处 text() 会返回文本节点列表）
-    elements = tree.xpath('//*[@id="table-condition-search"]/tbody/tr[1]/td[14]/div/div[1]/text()')
-    if elements:
-        # 如果有多个文本节点，通常取第一个，或合并所有
-        return elements[0].strip() if elements[0] else ""
-    else:
-        return ""  # 或 None，根据需求
+    table = tree.xpath('//*[@id="table-condition-search"]')
+    if not table:
+        return ''
+
+    header_cells = table[0].xpath('.//thead//th')
+    target_idx = None
+    for idx, th in enumerate(header_cells, start=1):
+        label = ''.join(th.itertext()).strip()
+        lowered = label.lower()
+        if (
+            '退款' in label
+            or '退货' in label
+            or 'return rate' in lowered
+            or 'refund rate' in lowered
+            or (('return' in lowered or 'refund' in lowered) and 'rate' in lowered)
+        ):
+            target_idx = idx
+            break
+
+    row_cells = table[0].xpath('.//tbody/tr[1]/td')
+    if not row_cells:
+        return ''
+
+    candidates: list[str] = []
+    if target_idx and target_idx <= len(row_cells):
+        candidates.append(''.join(row_cells[target_idx - 1].itertext()))
+
+    legacy = tree.xpath(
+        '//*[@id="table-condition-search"]/tbody/tr[1]/td[14]//text()'
+    )
+    if legacy:
+        candidates.append(''.join(legacy))
+
+    # 首行中带 % 的单元格（表头改版时的兜底）
+    for td in row_cells:
+        text = ''.join(td.itertext()).strip()
+        if '%' in text:
+            candidates.append(text)
+
+    for raw in candidates:
+        val = _normalize_rate_text(raw)
+        if val:
+            try:
+                num = float(val)
+                if 0 < num < 100:
+                    return val
+            except ValueError:
+                continue
+    return ''
 
 
 async def fetch_market_research(
@@ -89,25 +190,10 @@ async def fetch_market_research(
     order_field: str = "total_sales",
     order_desc: str = "true",
     tab: str = "1",
-    month_name: str = "bsr_sales_monthly_202512",
+    month_name: str | None = None,
     **extra_data
 ) -> str:
-    """
-    异步发送 POST 请求到 sellerSprite 市场调研接口
-
-    :param session: 可选的 aiohttp.ClientSession，如果为 None 则内部创建
-    :param market_id: 市场ID，默认 "1" (美国)
-    :param department_keyword: 类目关键词路径
-    :param topn: TOP N 数量
-    :param new_release_num: New Release 数量
-    :param order_field: 排序字段
-    :param order_desc: 排序方向
-    :param tab: 标签页
-    :param month_name: 月份名称
-    :param extra_data: 其他可选参数，会合并到表单数据中
-    :return: 响应文本
-    """
-    # 构建表单数据
+    month_name = month_name or DEFAULT_MONTH_NAME
     data = {
         "marketId": market_id,
         "nodeIdPath": "",
@@ -121,7 +207,6 @@ async def fetch_market_research(
         "newReleaseNumSelect": new_release_num,
         "topNSelect": topn,
         "departmentKeyword": department_keyword,
-        # 以下为大量空字段（可根据需要覆盖）
         "minAvgSales": "",
         "maxAvgSales": "",
         "minAvgBsr": "",
@@ -183,34 +268,130 @@ async def fetch_market_research(
         "maxNewAvgReviews": "",
         "minNewAvgSales": "",
         "maxNewAvgSales": "",
-        # 允许额外参数覆盖或补充
         **extra_data
     }
 
     async def _request(sess: aiohttp.ClientSession) -> str:
         async with sess.post(BASE_URL, data=data) as resp:
-            text = await resp.text()
-            return text
+            return await resp.text()
 
     if session:
         return await _request(session)
-    else:
-        async with aiohttp.ClientSession(headers=headers, cookies=cookies) as new_session:
-            return await _request(new_session)
+    async with aiohttp.ClientSession(headers=headers, cookies=cookies) as new_session:
+        return await _request(new_session)
 
 
-async def async_return_rale_main(department_keyword: str)->str:
-    config = await set_cookie_main('ITBM000067', 'ITBM000067')
-    cookies['rank-login-user'] = config['rank-login-user']
-    cookies['rank-login-user-info'] = config['rank-login-user-info']
+async def fetch_refund_rate_for_path(
+    department_keyword: str,
+    session: aiohttp.ClientSession | None = None,
+) -> str:
+    """
+    拉取类目退款率；尝试路径变体、上级类目、多种 monthName。
+    失败返回空字符串，不抛异常。
+    """
+    keywords = _category_keyword_variants(department_keyword)
+    if not keywords:
+        return ''
 
-    async with aiohttp.ClientSession(headers=headers, cookies=cookies) as session:
-        result2 = await fetch_market_research(session=session, department_keyword=department_keyword)
+    owns_session = session is None
+    if owns_session:
+        config = await ensure_seller_login()
+        apply_login_config(cookies, config)
+        req_headers = dict(headers)
+        apply_login_headers(req_headers, config)
+        session = aiohttp.ClientSession(headers=req_headers, cookies=cookies)
 
-        target_value = await extract_table_value(result2)
-        return target_value
+    assert session is not None
+    try:
+        for kw in keywords:
+            for month_name in FALLBACK_MONTH_NAMES:
+                html_text = await fetch_market_research(
+                    session=session,
+                    department_keyword=kw,
+                    month_name=month_name,
+                )
+                target_value = extract_table_value(html_text)
+                if target_value:
+                    if kw != department_keyword.strip():
+                        print(f'退款率回落成功: {department_keyword[:50]}… -> {kw[:50]}…')
+                    return target_value
+                if os.environ.get('ROI_DEBUG_REFUND_HTML') == '1':
+                    snippet = (html_text or '')[:500].replace('\n', ' ')
+                    print(f'退款率空 ({kw[:40]}… month={month_name}): {snippet}')
+        return ''
+    finally:
+        if owns_session and session is not None:
+            await session.close()
+
+
+async def async_return_rale_main(department_keyword: str) -> str:
+    return await fetch_refund_rate_for_path(department_keyword)
+
+
+async def prefetch_refund_rates_batch(
+    paths: list[str],
+    *,
+    max_concurrent: int = 6,
+) -> tuple[dict[str, float], list[dict[str, str]]]:
+    """
+    批量预取退款率；单类目失败不中断整批。
+    返回 (path->rate, 失败列表)。
+    """
+    unique: list[str] = []
+    seen: set[str] = set()
+    for raw in paths:
+        path = (raw or '').strip()
+        if path and path not in seen:
+            seen.add(path)
+            unique.append(path)
+    if not unique:
+        return {}, []
+
+    config = await ensure_seller_login()
+    apply_login_config(cookies, config)
+    req_headers = dict(headers)
+    apply_login_headers(req_headers, config)
+
+    out: dict[str, float] = {}
+    failures: list[dict[str, str]] = []
+    sem = asyncio.Semaphore(max(1, max_concurrent))
+
+    async with aiohttp.ClientSession(headers=req_headers, cookies=cookies) as session:
+        async def _one(path: str) -> None:
+            async with sem:
+                text = await fetch_refund_rate_for_path(path, session=session)
+                if not text:
+                    failures.append({
+                        'path': path,
+                        'error': '卖家精灵退款率接口无数据',
+                    })
+                    print(f'警告: 类目退款率无数据: {path[:80]}…')
+                    return
+                try:
+                    val = float(text)
+                except ValueError:
+                    failures.append({
+                        'path': path,
+                        'error': f'退款率无效: {text!r}',
+                    })
+                    return
+                if val <= 0:
+                    failures.append({
+                        'path': path,
+                        'error': f'退款率无效: {val}',
+                    })
+                    return
+                out[path] = val
+
+        await asyncio.gather(*[_one(p) for p in unique], return_exceptions=False)
+
+    return out, failures
 
 
 if __name__ == "__main__":
-    keyword = "Health & Household:Health Care:Sleep & Snoring:Sleeping Masks"
-    print(asyncio.run(async_return_rale_main(keyword)))
+    keyword = (
+        "Home & Kitchen:Kids' Home Store:Kids' Bath:"
+        "Kids' Bathroom Accessories:Kids' Bath Towel Hooks"
+    )
+    val = asyncio.run(async_return_rale_main(keyword))
+    print('退货率:', val or '为空')
