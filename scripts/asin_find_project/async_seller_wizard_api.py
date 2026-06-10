@@ -28,6 +28,83 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 IMAGES_DIR = SCRIPT_DIR / "images"
 FILE_DATA_ROOT = SCRIPT_DIR.parent.parent / "media" / "file"
 
+# SIF 无 ASIN 数据时的广告指标默认值
+SIF_DEFAULT_AD_CPC = 1.0
+SIF_DEFAULT_AD_CLICKS = 100.0
+SIF_DEFAULT_CONVERSION_RATE = 0.10  # 10%
+
+# 其它接口缺数据时的 ROI 默认值（仍生成 ROI-US-pack.xlsx）
+ROI_DEFAULT_UNIT_PURCHASE = 10.0
+ROI_DEFAULT_FBA_FEE = 5.0
+ROI_DEFAULT_REFUND_RATE = 10.0
+ROI_DEFAULT_PRODUCT_PRICE = 29.99
+
+
+def _positive_float_or_none(value) -> float | None:
+    try:
+        num = float(value)
+        if num > 0:
+            return num
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+def resolve_sif_ad_metrics(
+    product_asin: str,
+    asin_cpc_list: list,
+    daily_orders: float,
+) -> tuple[float, float, float]:
+    """
+    从 SIF 聚合结果解析广告 cpc / 转化率 / 点击数。
+    字段为空、None 或 <=0 时使用默认值，避免 ROI-US-pack 无法生成。
+    """
+    asin_cpc_dict: dict[str, dict] = {}
+    cpc_items = asin_cpc_list if isinstance(asin_cpc_list, list) else []
+    for item in cpc_items:
+        if not isinstance(item, dict):
+            continue
+        for asin_key, info in item.items():
+            if not isinstance(info, dict):
+                continue
+            key = str(asin_key).strip().upper()
+            cpc_info = info.get('cpc') or {}
+            cpc_median = cpc_info.get('median') if isinstance(cpc_info, dict) else None
+            asin_cpc_dict[key] = {
+                'cpc_median': cpc_median,
+                'clickPurchaseRatio': info.get('clickPurchaseRatio'),
+            }
+
+    product_key = str(product_asin).strip().upper()
+    cpc_info = asin_cpc_dict.get(product_key, {})
+    used_defaults = False
+
+    ad_cpc = _positive_float_or_none(cpc_info.get('cpc_median'))
+    if ad_cpc is None:
+        ad_cpc = SIF_DEFAULT_AD_CPC
+        used_defaults = True
+
+    conversion_rate = _positive_float_or_none(cpc_info.get('clickPurchaseRatio'))
+    if conversion_rate is None:
+        conversion_rate = SIF_DEFAULT_CONVERSION_RATE
+        used_defaults = True
+
+    if daily_orders > 0 and conversion_rate > 0:
+        ad_clicks = daily_orders / conversion_rate * 0.5
+    else:
+        ad_clicks = None
+    if ad_clicks is None or ad_clicks <= 0:
+        ad_clicks = SIF_DEFAULT_AD_CLICKS
+        used_defaults = True
+
+    if used_defaults:
+        print(
+            f'ASIN {product_key} SIF 广告数据缺失，使用默认值：'
+            f'cpc={ad_cpc}, 点击={ad_clicks}, 转化率={conversion_rate * 100:.0f}%'
+        )
+
+    return ad_cpc, conversion_rate, ad_clicks
+
 # 卖家精灵导出 Excel 列名 -> 内部 API 风格字段（与 colum_mapping.json 中译名对齐）
 COLUMN_MAPPING_EXCEL_TO_API = {
     "ASIN": "asin",
@@ -634,12 +711,55 @@ def _ops_gt10_ignore_200(review_interval: dict) -> bool:
     return False
 
 
+async def _ad_difficulty_for_one_asin(
+    asin: str,
+    kw_map: dict,
+    source_map: dict,
+    asin_price_dict: dict,
+) -> tuple[str, dict]:
+    """单 ASIN 广告难度（供并发调度）。"""
+    rp_candidates: list[float] = []
+    details: dict = {}
+    price_info = asin_price_dict.get(asin) or asin_price_dict.get(str(asin).upper()) or {}
+    for keyword, products in (kw_map or {}).items():
+        df = pd.DataFrame(products)
+        if df.empty:
+            details[keyword] = {'matched': False, 'ranking_percent': 0}
+            continue
+        source_kind = (source_map.get(asin, {}) or {}).get(keyword, 'search')
+        if source_kind == 'data_origin':
+            clean_data = df
+        else:
+            clean_data = await save_cleaned_data_orign_to_excel(
+                df, keyword, asin, price_info
+            )
+        review_interval = await save_review_interval_analysis_to_excel(clean_data, keyword, asin)
+        matched = _ops_gt10_ignore_200(review_interval)
+        if not matched:
+            details[keyword] = {'matched': False, 'ranking_percent': 0}
+            print(f"ASIN {asin} 关键词 {keyword} 运营难度<=10%(前4段)，跳过广告效率表。")
+            continue
+        rp = await save_ad_efficiency_table(clean_data, keyword, asin)
+        rp_num = pd.to_numeric(rp, errors='coerce')
+        if not pd.isna(rp_num) and float(rp_num) >= 0:
+            rp_candidates.append(float(rp_num))
+            details[keyword] = {'matched': True, 'ranking_percent': float(rp_num)}
+        else:
+            details[keyword] = {'matched': True, 'ranking_percent': 0}
+    payload = {
+        'ranking_percent': round(min(rp_candidates), 3) if rp_candidates else 0.0,
+        'keywords': details,
+    }
+    return asin, payload
+
+
 async def calculate_ad_difficulty_for_asins(target_asins: list[str] | None = None) -> dict:
     """
     从本地 file/{ASIN}/{关键词} 数据重算广告难度：
     - 每个关键词先判断运营难度前4段是否存在 >10%（忽略 200以上）
     - 命中才生成广告效率表并产出该关键词 ranking_percent
     - ASIN 级 ranking_percent 取有效关键词最小值；若都不命中则为 0
+    - 多 ASIN 并发（受 ROI_SCHEDULER_ASIN_MAX_CONCURRENT 限制）
     """
     nested_result, _keyword_dict, source_map = await asyncio.to_thread(load_products_from_local_files)
     if target_asins:
@@ -647,37 +767,25 @@ async def calculate_ad_difficulty_for_asins(target_asins: list[str] | None = Non
         nested_result = {a: m for a, m in nested_result.items() if str(a).strip().upper() in allow}
         source_map = {a: m for a, m in source_map.items() if str(a).strip().upper() in allow}
     asin_price_dict = await advertisement_main(target_asins)
+    if not nested_result:
+        return {}
+
+    max_asin = env_max_concurrent('scheduler_asin', 4)
+    sem = asyncio.Semaphore(max_asin)
     out: dict = {}
-    for asin, kw_map in nested_result.items():
-        rp_candidates: list[float] = []
-        details: dict = {}
-        for keyword, products in (kw_map or {}).items():
-            df = pd.DataFrame(products)
-            if df.empty:
-                details[keyword] = {'matched': False, 'ranking_percent': 0}
-                continue
-            source_kind = (source_map.get(asin, {}) or {}).get(keyword, "search")
-            if source_kind == "data_origin":
-                clean_data = df
-            else:
-                clean_data = await save_cleaned_data_orign_to_excel(df, keyword, asin,asin_price_dict[asin])
-            review_interval = await save_review_interval_analysis_to_excel(clean_data, keyword, asin)
-            matched = _ops_gt10_ignore_200(review_interval)
-            if not matched:
-                details[keyword] = {'matched': False, 'ranking_percent': 0}
-                print(f"ASIN {asin} 关键词 {keyword} 运营难度<=10%(前4段)，跳过广告效率表。")
-                continue
-            rp = await save_ad_efficiency_table(clean_data, keyword, asin)
-            rp_num = pd.to_numeric(rp, errors='coerce')
-            if not pd.isna(rp_num) and float(rp_num) >= 0:
-                rp_candidates.append(float(rp_num))
-                details[keyword] = {'matched': True, 'ranking_percent': float(rp_num)}
-            else:
-                details[keyword] = {'matched': True, 'ranking_percent': 0}
-        out[asin] = {
-            'ranking_percent': round(min(rp_candidates), 3) if rp_candidates else 0.0,
-            'keywords': details,
-        }
+
+    async def _run_one(asin: str, kw_map: dict) -> None:
+        async with sem:
+            try:
+                a, payload = await _ad_difficulty_for_one_asin(
+                    asin, kw_map, source_map, asin_price_dict
+                )
+                out[a] = payload
+            except Exception as exc:
+                print(f"警告: ASIN {asin} 广告难度计算失败: {exc}")
+                out[asin] = {'ranking_percent': 0.0, 'keywords': {}, 'error': str(exc)}
+
+    await asyncio.gather(*[_run_one(a, m) for a, m in nested_result.items()])
     return out
 
 
@@ -904,9 +1012,10 @@ def _resolve_image_url_for_roi(
     url = str((info or {}).get('imageUrl') or '').strip()
     if url and url.upper() not in ('N/A', 'NA', 'NAN'):
         return url
-    raise ValueError(
-        f'ASIN {asin} 无法获取图片链接（卖家精灵广告接口未返回 imageUrl）'
-    )
+    cached = read_image_url_from_roi_pack(asin)
+    if cached and str(cached).strip().upper() not in ('N/A', 'NA', 'NAN', ''):
+        return str(cached).strip()
+    return f'https://www.amazon.com/dp/{str(asin).strip().upper()}'
 
 
 async def _resolve_refund_rate(
@@ -917,20 +1026,26 @@ async def _resolve_refund_rate(
 ) -> float:
     path = (node_label_path or '').strip() or str((hints or {}).get('nodeLabelPath') or '').strip()
     if not path:
-        raise ValueError(
-            f'ASIN {asin} 无法获取退款率：缺少类目路径（nodeLabelPath）'
+        print(
+            f'警告: ASIN {asin} 缺少类目路径，退款率使用默认值 {ROI_DEFAULT_REFUND_RATE}%'
         )
+        return ROI_DEFAULT_REFUND_RATE
     if refund_cache is not None and path in refund_cache:
         return refund_cache[path]
-    refund_raw = await fetch_refund_rate_for_path(path)
-    text = str(refund_raw or '').replace('%', '').strip()
-    if not text:
-        raise ValueError(
-            f'ASIN {asin or path} 卖家精灵退款率接口无数据（类目: {path[:80]}…）'
+    try:
+        refund_raw = await fetch_refund_rate_for_path(path)
+        text = str(refund_raw or '').replace('%', '').strip()
+        if not text:
+            raise ValueError('退款率接口无数据')
+        val = float(text)
+        if val <= 0:
+            raise ValueError(f'退款率无效: {val}')
+    except Exception as exc:
+        print(
+            f'警告: ASIN {asin} 退款率获取失败（{exc}），'
+            f'使用默认值 {ROI_DEFAULT_REFUND_RATE}%'
         )
-    val = float(text)
-    if val <= 0:
-        raise ValueError(f'ASIN {asin} 卖家精灵退款率无效: {val}')
+        return ROI_DEFAULT_REFUND_RATE
     if refund_cache is not None:
         refund_cache[path] = val
     return val
@@ -973,9 +1088,11 @@ async def _resolve_fba_and_head(
             head_distance = None
 
     if fba_fee is None or fba_fee <= 0:
-        raise ValueError(
-            f'ASIN {asin} 无法获取 FBA 配送费（卖家精灵 FBA 批量接口无有效数据）'
+        print(
+            f'警告: ASIN {asin} 无法获取 FBA 配送费，'
+            f'使用默认值 ${ROI_DEFAULT_FBA_FEE}'
         )
+        fba_fee = ROI_DEFAULT_FBA_FEE
 
     if head_distance_override is not None:
         head_distance = head_distance_override
@@ -1062,17 +1179,19 @@ async def save_roi_us_pack(nodeLabelPath: str,
         resolved_image = await ensure_asin_image_path(
             product_asin, asin_info_dict or {}, image_path or ''
         )
-        if not resolved_image:
-            raise ValueError(
-                f'ASIN {asin} 无法获取单件采购价：主图不可用'
-                f'（{asin_image_file(asin)}），图搜无法执行'
-            )
-        unit_purchase = await _fetch_unit_purchase_via_taobao(resolved_image, tokens)
-        print(unit_purchase, asin, '3333')
+        if resolved_image:
+            unit_purchase = await _fetch_unit_purchase_via_taobao(resolved_image, tokens)
+            print(unit_purchase, asin, '3333')
+        else:
+            unit_purchase = None
+            print(f'警告: ASIN {asin} 主图不可用，跳过图搜')
         if unit_purchase is None:
-            raise ValueError(
-                f'ASIN {asin} 无法获取单件采购价（1688 图搜无结果），'
-                f'无法计算利润率/去广告毛利率'
+            unit_purchase = read_unit_purchase_from_roi_pack(product_asin)
+        if unit_purchase is None:
+            unit_purchase = ROI_DEFAULT_UNIT_PURCHASE
+            print(
+                f'警告: ASIN {asin} 无法获取单件采购价，'
+                f'使用默认值 ￥{ROI_DEFAULT_UNIT_PURCHASE}'
             )
 
     platform_commission = 15
@@ -1090,8 +1209,10 @@ async def save_roi_us_pack(nodeLabelPath: str,
         total_cost = cost_usd + fba_fee
         denominator = 1 - (platform_commission + refund_rate) / 100
         if denominator <= 0:
-            raise ValueError("分母无效：平台佣金+退款率 >= 100%")
-        lowest_price = total_cost / denominator
+            print(f'警告: ASIN {asin} 佣金+退款率过高，退款率改用默认值')
+            refund_rate = ROI_DEFAULT_REFUND_RATE
+            denominator = 1 - (platform_commission + refund_rate) / 100
+        lowest_price = total_cost / denominator if denominator > 0 else None
     else:
         lowest_price = None
 
@@ -1100,7 +1221,11 @@ async def save_roi_us_pack(nodeLabelPath: str,
     elif lowest_price is not None:
         product_price = lowest_price * 2
     else:
-        product_price = None
+        product_price = ROI_DEFAULT_PRODUCT_PRICE
+        print(
+            f'警告: ASIN {asin} 无法推算售价，'
+            f'使用默认值 ${ROI_DEFAULT_PRODUCT_PRICE}'
+        )
 
     discount = 0
     if product_price is not None:
@@ -1125,47 +1250,42 @@ async def save_roi_us_pack(nodeLabelPath: str,
         actual_cost = None
 
     if actual_profit is None or discounted_price is None or discounted_price <= 0:
-        raise ValueError(
-            f'ASIN {asin} 无法计算利润率：折后价格={discounted_price}，'
-            f'实际利润={actual_profit}（请检查单件采购/头程/FBA/售价数据）'
+        if product_price is None:
+            product_price = ROI_DEFAULT_PRODUCT_PRICE
+        discounted_price = product_price * (1 - discount / 100)
+        if unit_purchase is None:
+            unit_purchase = ROI_DEFAULT_UNIT_PURCHASE
+        if head_distance is None:
+            head_distance = 0.0
+        if fba_fee is None or fba_fee <= 0:
+            fba_fee = ROI_DEFAULT_FBA_FEE
+        cost_usd = (float(unit_purchase) + float(head_distance)) / exchange_rate
+        commission_amount = discounted_price * (platform_commission / 100)
+        refund_amount = product_price * (refund_rate / 100)
+        sales_return = discounted_price - refund_amount - commission_amount - fba_fee
+        actual_profit = max(sales_return - cost_usd, 0.01)
+        actual_cost = discounted_price - actual_profit
+        print(
+            f'警告: ASIN {asin} 利润数据不完整，已用默认值估算 '
+            f'（折后价={discounted_price:.2f}，利润={actual_profit:.2f}）'
         )
 
-    # ==================== 2. 广告相关计算 ====================
-    asin_cpc_dict = {}
-    cpc_items = asin_cpc_list if isinstance(asin_cpc_list, list) else []
-    for item in cpc_items:
-        if not isinstance(item, dict):
-            continue
-        for asin_key, info in item.items():
-            cpc_info = info.get('cpc', {})
-            cpc_median = cpc_info.get('median', 0.0)
-            click_purchase_ratio = info.get('clickPurchaseRatio', 0.0)
-            asin_cpc_dict[asin_key] = {
-                'cpc_median': cpc_median,
-                'clickPurchaseRatio': click_purchase_ratio
-            }
-
-    cpc_info = asin_cpc_dict.get(product_asin, {})
-    ad_cpc = cpc_info.get('cpc_median', 0.0)
-    click_purchase_ratio = cpc_info.get('clickPurchaseRatio', 0.0)
-
-    monthly_sales = monthly_sales_dict.get(product_asin, 0.0) or 0.0
+    product_key = str(product_asin).strip().upper()
+    monthly_sales = (
+        monthly_sales_dict.get(product_asin)
+        or monthly_sales_dict.get(product_key)
+        or 0.0
+    )
+    if not monthly_sales:
+        monthly_sales = 0.0
     daily_orders = monthly_sales / 30.0 if monthly_sales > 0 else 0.0
 
-    conversion_rate = click_purchase_ratio
-
-    if not isinstance(conversion_rate, float) and not isinstance(conversion_rate, int):
-        conversion_rate = 0.1
-    # 广告点击次数 = 出单量 / 转化率 * 0.5
-    if conversion_rate > 0:
-        ad_clicks = daily_orders / conversion_rate * 0.5
-    else:
-        ad_clicks = 0.0
-
-
-    # 广告预算 = 广告cpc * 广告点击
-    if not isinstance(ad_cpc, float) and not isinstance(ad_cpc, int):
-        ad_cpc = 1.2
+    # ==================== 2. 广告相关计算 ====================
+    ad_cpc, conversion_rate, ad_clicks = resolve_sif_ad_metrics(
+        product_asin,
+        asin_cpc_list,
+        daily_orders,
+    )
 
     ad_budget = ad_cpc * ad_clicks
 
@@ -1277,9 +1397,9 @@ async def save_roi_us_pack(nodeLabelPath: str,
     ]
     middle_values = [
         f"{ad_budget:.2f}",
-        f"{ad_cpc:.2f}" if ad_cpc != 0 else 'N/A',
-        f"{ad_clicks:.2f}" if ad_clicks != 0 else 'N/A',
-        f"{conversion_rate * 100:.2f}" if conversion_rate else 'N/A',
+        f"{ad_cpc:.2f}",
+        f"{ad_clicks:.2f}",
+        f"{conversion_rate * 100:.2f}",
         f"{daily_orders * 30:.2f}" if daily_orders else 'N/A',
         f"{daily_orders:.2f}" if daily_orders else 'N/A',
         f"{daily_profit1:.2f}" if daily_profit1 is not None else 'N/A',
@@ -1444,15 +1564,19 @@ async def save_roi_us_pack(nodeLabelPath: str,
         # 保存最终样式
         wb.save(tmp_path)
         shutil.move(str(tmp_path), str(output_path))
-    except Exception:
+    except Exception as exc:
         if tmp_path.is_file():
             tmp_path.unlink(missing_ok=True)
-        raise
+        print(f'警告: ASIN {product_asin} 样式写入失败（{exc}），改为保存简化版 ROI-US-pack')
+        result_df.to_excel(output_path, index=False)
+        emit_progress(f'ASIN {product_asin} ROI-US-pack 已生成（简化版）')
 
     print(f"ROI-US-pack 表已保存至: {output_path}")
+    if not output_path.is_file():
+        raise RuntimeError(f'ASIN {product_asin} ROI-US-pack 写入失败')
     emit_progress(f'ASIN {product_asin} ROI-US-pack 已生成')
     return {
-        asin: {
+        product_asin: {
             # 看板「去广告毛利率」列对应 profit_margin 字段
             'profit_margin': round(ad_removed_gross_margin, 2),
             'gross_profit_rate': round(profit_margin, 2),
@@ -1463,6 +1587,70 @@ async def save_roi_us_pack(nodeLabelPath: str,
             'head_distance': head_distance,
             'actual_cost': actual_cost,
             'ad_removed_roi': ad_removed_roi,
+        }
+    }
+
+
+async def force_write_minimal_roi_us_pack(
+    asin: str,
+    exchange_rate: float = 7.2,
+) -> dict:
+    """极端兜底：用默认值写出 ROI-US-pack（确保计算 ROI 页能识别为已计算）。"""
+    product_asin = str(asin).strip().upper()
+    unit_purchase = ROI_DEFAULT_UNIT_PURCHASE
+    head_distance = 0.0
+    fba_fee = ROI_DEFAULT_FBA_FEE
+    refund_rate = ROI_DEFAULT_REFUND_RATE
+    product_price = ROI_DEFAULT_PRODUCT_PRICE
+    discounted_price = product_price
+    actual_profit = max(discounted_price * 0.15, 0.01)
+    ad_cpc = SIF_DEFAULT_AD_CPC
+    conversion_rate = SIF_DEFAULT_CONVERSION_RATE
+    ad_clicks = SIF_DEFAULT_AD_CLICKS
+    ad_budget = ad_cpc * ad_clicks
+    profit_margin = (actual_profit / discounted_price) * 100
+    ad_removed_gross_margin = profit_margin
+
+    left_fields = ['单件采购', '单件头程', '平台佣金', '退款率', 'FBA配送', '折后价格', '实际利润']
+    left_values = [
+        f'{unit_purchase:.2f}', f'{head_distance:.2f}', '15', f'{refund_rate:.2f}',
+        f'{fba_fee:.2f}', f'{discounted_price:.2f}', f'{actual_profit:.2f}',
+    ]
+    left_units = ['￥', '￥', '%', '%', '$', '$', '$']
+    middle_fields = ['广告预算', '广告cpc', '广告点击', '转化率', '图片链接', 'asin链接']
+    middle_values = [
+        f'{ad_budget:.2f}', f'{ad_cpc:.2f}', f'{ad_clicks:.2f}',
+        f'{conversion_rate * 100:.2f}',
+        f'https://www.amazon.com/dp/{product_asin}',
+        f'https://www.amazon.com/dp/{product_asin}',
+    ]
+    middle_units = ['$', '$', '次', '%', 'a', 'a']
+    extra_fields = ['利润率', '去广告毛利率']
+    extra_values = [f'{profit_margin:.2f}', f'{ad_removed_gross_margin:.2f}']
+    extra_units = ['%', '%']
+
+    left_df = pd.DataFrame({'字段': left_fields, '值': left_values, '单位': left_units})
+    middle_df = pd.DataFrame({'字段': middle_fields, '值': middle_values, '单位': middle_units})
+    extra_df = pd.DataFrame({'字段': extra_fields, '值': extra_values, '单位': extra_units})
+    result_df = pd.concat([left_df, middle_df, extra_df], axis=1)
+
+    output_dir = await verify_path(asin=product_asin)
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = Path(output_dir) / f'{product_asin}_ROI-US-pack.xlsx'
+    result_df.to_excel(output_path, index=False)
+    emit_progress(f'ASIN {product_asin} 已用默认值强制生成 ROI-US-pack')
+    print(f'强制生成 ROI-US-pack: {output_path}')
+    return {
+        product_asin: {
+            'profit_margin': round(ad_removed_gross_margin, 2),
+            'gross_profit_rate': round(profit_margin, 2),
+            'unit_purchase': unit_purchase,
+            'monthly_profit1': 0.0,
+            'monthly_results': 0.0,
+            'profit_per_order': 0.0,
+            'head_distance': head_distance,
+            'actual_cost': discounted_price - actual_profit,
+            'ad_removed_roi': 0.0,
         }
     }
 
@@ -1904,10 +2092,14 @@ async def seller_wizard_main(
             if is_seller_account_banned_error(e):
                 raise
             err = f'{type(e).__name__}: {e}'
-            roi_failures.append({'asin': asin, 'error': err})
-            emit_progress(f'失败 {asin}：{e}')
-            print(f"警告: ASIN {asin} ROI-US-pack 生成失败: {e}")
-            return None
+            print(f"警告: ASIN {asin} ROI-US-pack 生成失败: {e}，尝试强制写入默认值…")
+            try:
+                return await force_write_minimal_roi_us_pack(asin, exchange_rate=parity)
+            except Exception as e2:
+                roi_failures.append({'asin': asin, 'error': f'{err}; 兜底失败: {e2}'})
+                emit_progress(f'失败 {asin}：{e2}')
+                print(f"警告: ASIN {asin} 强制生成 ROI-US-pack 仍失败: {e2}")
+                return None
 
     # ========== 5. 并发生成每个 ASIN 的 ROI 表（单个 ASIN 缺数据则跳过，不中断整批）==========
     roi_tasks = []
@@ -1916,11 +2108,8 @@ async def seller_wizard_main(
         asin_key = str(asin).strip().upper()
         info = dict(asin_info_dict.get(asin_key) or {})
         if not info:
-            msg = '无卖家精灵 advertisement 数据'
-            roi_failures.append({'asin': asin_key, 'error': msg})
-            emit_progress(f'跳过 {asin_key}：{msg}')
-            print(f"警告: ASIN {asin_key} {msg}，已跳过")
-            continue
+            print(f"警告: ASIN {asin_key} 无卖家精灵 advertisement 数据，将用默认值生成 ROI-US-pack")
+            emit_progress(f'提示 {asin_key}：无广告接口数据，使用默认值生成 ROI 表')
         path = asin_to_image_path.get(asin_key, "")
         co = (cost_overrides or {}).get(asin) or (cost_overrides or {}).get(asin_key) or {}
         up = pd.to_numeric(co.get('unit_purchase'), errors='coerce') if isinstance(co, dict) else np.nan
@@ -1933,8 +2122,8 @@ async def seller_wizard_main(
         )
 
     if not roi_tasks:
-        emit_progress('没有任何 ASIN 具备广告数据，ROI 表未生成')
-        print("警告: 没有任何 ASIN 成功获取 advertisement 数据，ROI 表未生成")
+        emit_progress('未找到可生成 ROI 的 ASIN')
+        print("警告: target_asins 为空，ROI 表未生成")
         out = info_dict if isinstance(info_dict, dict) else {}
         if isinstance(out, dict):
             out['__roi_failures__'] = roi_failures

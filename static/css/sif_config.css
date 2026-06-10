@@ -1,0 +1,174 @@
+.main--sif-config {
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 1.75rem 1.5rem 2.5rem;
+}
+
+.sif-hero {
+  margin-bottom: 1.25rem;
+}
+
+.sif-hero__eyebrow {
+  margin: 0 0 0.35rem;
+  font-size: 0.78rem;
+  color: #64748b;
+  letter-spacing: 0.04em;
+}
+
+.sif-hero__title {
+  margin: 0 0 0.35rem;
+  font-size: 1.55rem;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.sif-hero__lead {
+  margin: 0;
+  font-size: 0.92rem;
+  color: #64748b;
+  line-height: 1.55;
+}
+
+.sif-panel {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 1rem 1.1rem 1.15rem;
+  margin-bottom: 1rem;
+}
+
+.sif-panel__title {
+  margin: 0 0 0.75rem;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.sif-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-bottom: 0.85rem;
+}
+
+.sif-field label {
+  font-size: 0.82rem;
+  color: #334155;
+  font-weight: 500;
+}
+
+.sif-field textarea {
+  width: 100%;
+  min-height: 120px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 0.65rem 0.75rem;
+  font-size: 0.82rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  line-height: 1.45;
+  resize: vertical;
+}
+
+.sif-field textarea:focus {
+  outline: none;
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.12);
+}
+
+.sif-help {
+  margin: 0;
+  font-size: 0.8rem;
+  color: #64748b;
+  line-height: 1.55;
+}
+
+.sif-help ol {
+  margin: 0.35rem 0 0;
+  padding-left: 1.2rem;
+}
+
+.sif-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  align-items: center;
+  font-size: 0.85rem;
+  color: #334155;
+}
+
+.sif-status__badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.sif-status__badge--ok {
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.sif-status__badge--missing {
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.sif-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  margin-top: 0.5rem;
+}
+
+.sif-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 34px;
+  padding: 0 0.95rem;
+  border-radius: 6px;
+  font-size: 0.82rem;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+
+.sif-btn--primary {
+  background: #2563eb;
+  color: #fff;
+}
+
+.sif-btn--ghost {
+  background: #fff;
+  border-color: #cbd5e1;
+  color: #334155;
+}
+
+.sif-toast {
+  list-style: none;
+  margin: 0 0 1rem;
+  padding: 0;
+}
+
+.sif-toast li {
+  padding: 0.55rem 0.75rem;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  margin-bottom: 0.45rem;
+}
+
+.sif-toast .success {
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.sif-toast .error {
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.sif-toast .warning {
+  background: #fffbeb;
+  color: #b45309;
+}

@@ -419,23 +419,27 @@ async def sif_main(asins: list[str]):
         multi_asin_results = await api.fetch_multiple_asins(asins)
         result: List[Dict[str, Any]] = []
         keyword_groups_dict: Dict[str, List[str]] = {}
-        for asin, rows in multi_asin_results.items():
+        for asin in asins:
+            asin_key = str(asin).strip().upper()
+            rows = multi_asin_results.get(asin) or multi_asin_results.get(asin_key)
             try:
                 if not rows:
-                    print(f"{asin}: 0 个关键词")
-                    keyword_groups_dict[asin] = []
-                    result.append({asin: aggregate_sif_keyword_rows([], top_n=10)})
+                    print(f"{asin_key}: 0 个关键词（SIF 无数据，ROI 将使用广告默认值）")
+                    keyword_groups_dict[asin_key] = []
+                    result.append({asin_key: aggregate_sif_keyword_rows([], top_n=10)})
                     continue
-                print(f"{asin}: {len(rows)} 个关键词")
+                print(f"{asin_key}: {len(rows)} 个关键词")
                 for row in rows[:3]:
                     kw = row.get("keyword")
                     if kw:
-                        keyword_groups_dict.setdefault(asin, []).append(kw)
+                        keyword_groups_dict.setdefault(asin_key, []).append(kw)
                 agg = aggregate_sif_keyword_rows(rows, top_n=10)
-                result.append({asin: agg})
-                print({asin: agg})
+                result.append({asin_key: agg})
+                print({asin_key: agg})
             except Exception as e:
-                print(f"{asin}: {e}")
+                print(f"{asin_key}: {e}")
+                keyword_groups_dict.setdefault(asin_key, [])
+                result.append({asin_key: aggregate_sif_keyword_rows([], top_n=10)})
         print("<准备关键词>", keyword_groups_dict)
         if result == [] and keyword_groups_dict == {}:
             get_sif_cookie()
@@ -445,5 +449,5 @@ async def sif_main(asins: list[str]):
 
 
 if __name__ == "__main__":
-    asins = ["B0GFCTPTL3","B0FWJ8HNCB"]
+    asins = ["B0G4NG2TPR"]
     print(asyncio.run(sif_main(asins)))

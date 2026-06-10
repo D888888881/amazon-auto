@@ -291,7 +291,11 @@
         <a class="dash-btn" href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort={{ sort }}&amp;dir={{ dir }}&amp;page={{ page_obj.next_page_number }}">下一页</a>
         {% endif %}
     </div>
-    <div class="dash-pagination-meta">第 {{ page_obj.number }} / {{ page_obj.paginator.num_pages }} 页（共 {{ page_obj.paginator.count }} 条）</div>
+    <div class="dash-pagination-meta">
+        第
+        <input type="number" id="dash-page-jump" class="dash-page-jump-input" min="1" max="{{ page_obj.paginator.num_pages }}" value="{{ page_obj.number }}" aria-label="跳转到页码">
+        / {{ page_obj.paginator.num_pages }} 页（共 {{ page_obj.paginator.count }} 条）
+    </div>
     {% endif %}
     {% else %}
     <div class="dash-table-wrap dash-empty">
@@ -656,6 +660,33 @@
     });
   }
   refreshBatch();
+
+  var pageJump = document.getElementById('dash-page-jump');
+  if (pageJump) {
+    var maxPage = parseInt(pageJump.getAttribute('max'), 10) || 1;
+    var filterQs = '{{ filter_qs|escapejs }}';
+    var sortKey = '{{ sort|escapejs }}';
+    var sortDir = '{{ dir|escapejs }}';
+    function goDashPage(n) {
+      n = parseInt(n, 10);
+      if (isNaN(n) || n < 1) n = 1;
+      if (n > maxPage) n = maxPage;
+      pageJump.value = String(n);
+      var parts = [];
+      if (filterQs) parts.push(filterQs);
+      parts.push('sort=' + encodeURIComponent(sortKey));
+      parts.push('dir=' + encodeURIComponent(sortDir));
+      parts.push('page=' + n);
+      window.location.href = '{% url "index" %}?' + parts.join('&');
+    }
+    pageJump.addEventListener('change', function () { goDashPage(pageJump.value); });
+    pageJump.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        goDashPage(pageJump.value);
+      }
+    });
+  }
 })();
 </script>
 {% block page_scripts %}

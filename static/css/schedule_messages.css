@@ -82,6 +82,29 @@
   background: #fff7ed;
 }
 
+.msg-row--eliminate td {
+  background: #ef4444;
+  color: #fff;
+  border-bottom-color: #dc2626;
+}
+
+.msg-row--eliminate .msg-delta {
+  color: #fff;
+}
+
+.msg-row--eliminate code {
+  background: rgba(255, 255, 255, 0.2);
+  color: #fff;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+}
+
+.msg-row--eliminate .msg-badge--eliminate {
+  background: #fff;
+  color: #b91c1c;
+  font-weight: 600;
+}
+
 .msg-delta {
   font-weight: 600;
   color: #0f766e;
@@ -95,6 +118,11 @@
 }
 
 .msg-badge--alert {
+  background: #ffedd5;
+  color: #c2410c;
+}
+
+.msg-badge--eliminate {
   background: #fee2e2;
   color: #b91c1c;
 }
@@ -108,6 +136,81 @@
   text-align: center;
   color: #94a3b8;
   padding: 2rem !important;
+}
+
+.msg-filter input[type="date"] {
+  min-width: 150px;
+}
+
+.msg-pagination {
+  margin-top: 1rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.65rem;
+  align-items: center;
+  font-size: 0.85rem;
+}
+
+.msg-page-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 30px;
+  padding: 0 0.75rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #fff;
+  color: #334155;
+  text-decoration: none;
+}
+
+.msg-page-btn:hover {
+  background: #f8fafc;
+}
+
+.msg-page-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  height: 30px;
+  padding: 0 0.35rem;
+  border-radius: 6px;
+  color: #2563eb;
+  text-decoration: none;
+}
+
+.msg-page-num:hover {
+  background: #eff6ff;
+}
+
+.msg-page-num--active {
+  background: #2563eb;
+  color: #fff;
+  font-weight: 600;
+}
+
+.msg-pagination-meta {
+  margin-left: auto;
+  color: #64748b;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.msg-page-jump-input {
+  width: 3.5rem;
+  height: 30px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  text-align: center;
+  font-size: 0.85rem;
+}
+
+.msg-page-jump-input:focus {
+  outline: none;
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
 }
 
 .msg-pager {

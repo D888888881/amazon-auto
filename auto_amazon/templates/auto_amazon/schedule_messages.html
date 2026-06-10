@@ -12,7 +12,7 @@
 {% block content %}
 <section class="msg-hero">
     <h1 class="msg-hero__title">定时任务消息</h1>
-    <p class="msg-hero__sub">展示重点关注 ASIN 定时重算后的指标对比与预警。消息发送给 ASIN 上传者（或数据归属用户）。</p>
+    <p class="msg-hero__sub">展示重点关注 ASIN 定时重算后的指标对比与预警。运营难度＜15% 预警、＜10% 淘汰；广告难度＞30% 预警、＞50% 淘汰；去广告投产比＜100% 预警、＜80% 淘汰。</p>
 </section>
 
 <form method="get" class="msg-filter">
@@ -21,11 +21,20 @@
         <input type="text" name="asin" value="{{ filters.asin }}" placeholder="B0XXXXXXXX">
     </label>
     <label>
+        开始日期
+        <input type="date" name="date_from" value="{{ filters.date_from }}">
+    </label>
+    <label>
+        结束日期
+        <input type="date" name="date_to" value="{{ filters.date_to }}">
+    </label>
+    <label>
         预警
         <select name="alert">
             <option value="">全部</option>
-            <option value="yes" {% if filters.alert == 'yes' %}selected{% endif %}>开始预警</option>
-            <option value="no" {% if filters.alert == 'no' %}selected{% endif %}>未预警</option>
+            <option value="alert" {% if filters.alert == 'alert' %}selected{% endif %}>开始预警</option>
+            <option value="eliminate" {% if filters.alert == 'eliminate' %}selected{% endif %}>立即淘汰</option>
+            <option value="normal" {% if filters.alert == 'normal' %}selected{% endif %}>未预警</option>
         </select>
     </label>
     <button type="submit" class="btn btn-primary">筛选</button>
@@ -52,7 +61,7 @@
         </thead>
         <tbody>
             {% for m in page_obj %}
-            <tr class="{% if m.alert_status == 'alert' %}msg-row--alert{% endif %}">
+            <tr class="{% if m.alert_status == 'eliminate' %}msg-row--eliminate{% elif m.alert_status == 'alert' %}msg-row--alert{% endif %}">
                 <td>{{ m.sent_at|date:"Y-m-d H:i" }}</td>
                 <td><code>{{ m.asin }}</code></td>
                 <td>{% if m.curr_ad_roi is not None %}{{ m.curr_ad_roi|floatformat:2 }}%{% else %}—{% endif %}</td>
@@ -65,7 +74,9 @@
                 <td>{% if m.latest_ops_difficulty is not None %}{{ m.latest_ops_difficulty|floatformat:2 }}%{% else %}—{% endif %}</td>
                 <td class="msg-delta">{% if m.delta_ops_difficulty_text %}{{ m.delta_ops_difficulty_text }}{% else %}—{% endif %}</td>
                 <td>
-                    {% if m.alert_status == 'alert' %}
+                    {% if m.alert_status == 'eliminate' %}
+                    <span class="msg-badge msg-badge--eliminate">立即淘汰</span>
+                    {% elif m.alert_status == 'alert' %}
                     <span class="msg-badge msg-badge--alert">开始预警</span>
                     {% else %}
                     <span class="msg-badge msg-badge--normal">未预警</span>
@@ -81,15 +92,61 @@
     </table>
 </div>
 
-{% if page_obj.paginator.num_pages > 1 %}
-<nav class="msg-pager" aria-label="分页">
-    {% if page_obj.has_previous %}
-    <a href="?page={{ page_obj.previous_page_number }}&asin={{ filters.asin }}&alert={{ filters.alert }}">上一页</a>
+{% if page_obj.paginator.count > 0 %}
+<nav class="msg-pagination" aria-label="分页">
+    {% if page_obj.paginator.num_pages > 1 %}
+        {% if page_obj.has_previous %}
+        <a class="msg-page-btn" href="{% url 'schedule_messages' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}page={{ page_obj.previous_page_number }}">上一页</a>
+        {% endif %}
+        {% for p in page_numbers %}
+            {% if p == page_obj.number %}
+            <span class="msg-page-num msg-page-num--active">{{ p }}</span>
+            {% else %}
+            <a class="msg-page-num" href="{% url 'schedule_messages' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}page={{ p }}">{{ p }}</a>
+            {% endif %}
+        {% endfor %}
+        {% if page_obj.has_next %}
+        <a class="msg-page-btn" href="{% url 'schedule_messages' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}page={{ page_obj.next_page_number }}">下一页</a>
+        {% endif %}
     {% endif %}
-    <span>第 {{ page_obj.number }} / {{ page_obj.paginator.num_pages }} 页</span>
-    {% if page_obj.has_next %}
-    <a href="?page={{ page_obj.next_page_number }}&asin={{ filters.asin }}&alert={{ filters.alert }}">下一页</a>
-    {% endif %}
+    <div class="msg-pagination-meta">
+        {% if page_obj.paginator.num_pages > 1 %}
+        第
+        <input type="number" id="msg-page-jump" class="msg-page-jump-input" min="1" max="{{ page_obj.paginator.num_pages }}" value="{{ page_obj.number }}" aria-label="跳转到页码">
+        / {{ page_obj.paginator.num_pages }} 页
+        {% else %}
+        第 1 / 1 页
+        {% endif %}
+        （共 {{ page_obj.paginator.count }} 条）
+    </div>
 </nav>
 {% endif %}
+{% endblock %}
+
+{% block page_scripts %}
+<script>
+(function () {
+  var pageJump = document.getElementById('msg-page-jump');
+  if (!pageJump) return;
+  var maxPage = parseInt(pageJump.getAttribute('max'), 10) || 1;
+  var filterQs = '{{ filter_qs|escapejs }}';
+  function goMsgPage(n) {
+    n = parseInt(n, 10);
+    if (isNaN(n) || n < 1) n = 1;
+    if (n > maxPage) n = maxPage;
+    pageJump.value = String(n);
+    var url = '{% url "schedule_messages" %}?';
+    if (filterQs) url += filterQs + '&';
+    url += 'page=' + n;
+    window.location.href = url;
+  }
+  pageJump.addEventListener('change', function () { goMsgPage(pageJump.value); });
+  pageJump.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      goMsgPage(pageJump.value);
+    }
+  });
+})();
+</script>
 {% endblock %}

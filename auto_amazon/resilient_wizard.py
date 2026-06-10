@@ -241,6 +241,95 @@ def run_roi_asins_sequential(
     return result
 
 
+def run_roi_asins_batch(
+    asins: list[str],
+    parity: float,
+    *,
+    cost_overrides: dict | None = None,
+    on_stderr_line: Callable[[str], None] | None = None,
+    on_progress: Callable[[str], None] | None = None,
+    on_asin_done: Callable[[str, dict], None] | None = None,
+    on_asin_failed: Callable[[AsinFailure], None] | None = None,
+    max_retries: int | None = None,
+) -> BatchRunResult:
+    """一次调用批量计算 ROI（内部多 ASIN 并发）；失败 ASIN 单独记录。"""
+    asin_list = ordered_unique_asins(asins)
+    if not asin_list:
+        return BatchRunResult()
+    if use_sequential_roi():
+        return run_roi_asins_sequential(
+            asin_list,
+            parity,
+            cost_overrides=cost_overrides,
+            on_stderr_line=on_stderr_line,
+            on_progress=on_progress,
+            on_asin_done=on_asin_done,
+            on_asin_failed=on_asin_failed,
+            max_retries=max_retries,
+        )
+    if on_progress:
+        on_progress(
+            f'批量计算 ROI：共 {len(asin_list)} 个 ASIN'
+            f'（一次拉取卖家精灵数据）…'
+        )
+    retries = max_retries if max_retries is not None else roi_asin_max_retries()
+    try:
+        merged = _run_one_asin_with_retry(
+            'batch',
+            max_retries=retries,
+            run_fn=lambda: run_seller_wizard(
+                asin_list,
+                parity,
+                cost_overrides=cost_overrides,
+                on_stderr_line=on_stderr_line,
+            ),
+            on_progress=on_progress,
+        )
+    except AsinRunFailed as exc:
+        result = BatchRunResult()
+        for asin in asin_list:
+            failure = AsinFailure(
+                asin=asin,
+                error=f'{type(exc.cause).__name__}: {exc.cause}',
+                attempts=exc.attempts,
+            )
+            result.failures.append(failure)
+            if on_asin_failed:
+                on_asin_failed(failure)
+        if on_progress:
+            on_progress(result.summary_text())
+        return result
+    except Exception as exc:
+        result = BatchRunResult()
+        for asin in asin_list:
+            failure = AsinFailure(
+                asin=asin,
+                error=f'{type(exc).__name__}: {exc}',
+                attempts=1,
+            )
+            result.failures.append(failure)
+            if on_asin_failed:
+                on_asin_failed(failure)
+        if on_progress:
+            on_progress(result.summary_text())
+        return result
+
+    failure_details = None
+    if isinstance(merged, dict):
+        failure_details = merged.pop('__roi_failures__', None)
+    result = batch_result_from_wizard_output(asin_list, merged, failure_details)
+    for asin in result.succeeded:
+        part = {asin: result.merged[asin]}
+        if on_asin_done:
+            on_asin_done(asin, part)
+    for failure in result.failures:
+        if on_asin_failed:
+            on_asin_failed(failure)
+    if on_progress:
+        on_progress(result.summary_text())
+    return result
+
+
 def run_ad_difficulty_asins_sequential(
     asins: list[str],
     *,
@@ -296,4 +385,81 @@ def run_ad_difficulty_asins_sequential(
     if on_progress and result.total:
         on_progress(result.summary_text())
 
+    return result
+
+
+def run_ad_difficulty_asins_batch(
+    asins: list[str],
+    *,
+    on_stderr_line: Callable[[str], None] | None = None,
+    on_progress: Callable[[str], None] | None = None,
+    on_asin_done: Callable[[str, dict], None] | None = None,
+    on_asin_failed: Callable[[AsinFailure], None] | None = None,
+    max_retries: int | None = None,
+) -> BatchRunResult:
+    """一次调用批量计算广告难度（内部多 ASIN 并发）；失败 ASIN 单独记录。"""
+    asin_list = ordered_unique_asins(asins)
+    result = BatchRunResult()
+    if not asin_list:
+        return result
+    if on_progress:
+        on_progress(f'批量计算广告难度：共 {len(asin_list)} 个 ASIN（并发）…')
+    retries = max_retries if max_retries is not None else roi_asin_max_retries()
+    try:
+        merged = _run_one_asin_with_retry(
+            'batch',
+            max_retries=retries,
+            run_fn=lambda: run_ad_difficulty_for_asins(
+                asin_list, on_stderr_line=on_stderr_line
+            ),
+            on_progress=on_progress,
+        )
+    except AsinRunFailed as exc:
+        for asin in asin_list:
+            failure = AsinFailure(
+                asin=asin,
+                error=f'{type(exc.cause).__name__}: {exc.cause}',
+                attempts=exc.attempts,
+            )
+            result.failures.append(failure)
+            if on_asin_failed:
+                on_asin_failed(failure)
+        if on_progress:
+            on_progress(result.summary_text())
+        return result
+    except Exception as exc:
+        for asin in asin_list:
+            failure = AsinFailure(
+                asin=asin,
+                error=f'{type(exc).__name__}: {exc}',
+                attempts=1,
+            )
+            result.failures.append(failure)
+            if on_asin_failed:
+                on_asin_failed(failure)
+        if on_progress:
+            on_progress(result.summary_text())
+        return result
+
+    for asin in asin_list:
+        payload = merged.get(asin)
+        if isinstance(payload, dict) and payload and not payload.get('error'):
+            part = {asin: payload}
+            result.merged.update(part)
+            result.succeeded.append(asin)
+            if on_asin_done:
+                on_asin_done(asin, part)
+        else:
+            err = ''
+            if isinstance(payload, dict):
+                err = str(payload.get('error') or '无广告难度结果')
+            else:
+                err = '无广告难度结果'
+            failure = AsinFailure(asin=asin, error=err, attempts=1)
+            result.failures.append(failure)
+            if on_asin_failed:
+                on_asin_failed(failure)
+
+    if on_progress:
+        on_progress(result.summary_text())
     return result

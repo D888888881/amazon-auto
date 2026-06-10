@@ -163,6 +163,12 @@ def _maybe_expire_stale_active_job(user_id: int, job_id: str, ent: dict) -> dict
     cache.set(wizard_job_key(job_id), ent, 3600)
     clear_user_active_job(user_id, job_id)
     try:
+        from .asin_job_lock import release_job_locks
+
+        release_job_locks(user_id, job_id, ent.get('asins'))
+    except Exception:
+        pass
+    try:
         from .rq_enqueue import cancel_rq_jobs_for_wizard_job
 
         cancel_rq_jobs_for_wizard_job(job_id)
@@ -208,5 +214,14 @@ def dismiss_active_job(user_id: int, job_id: str | None = None) -> tuple[bool, s
         cancel_rq_jobs_for_wizard_job(cur)
     except Exception:
         pass
+    released = 0
+    try:
+        from .asin_job_lock import release_job_locks
+
+        released = release_job_locks(user_id, cur, (ent or {}).get('asins'))
+    except Exception:
+        pass
     clear_user_active_job(user_id, cur)
+    if released:
+        return True, f'已解除任务占用并释放 {released} 个 ASIN 计算锁，可以发起新计算'
     return True, '已解除任务占用，可以发起新计算'

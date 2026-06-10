@@ -32,6 +32,7 @@ def _max_slots(name: str) -> int:
         'sellersprite': 'ROI_SELLERSPRITE_MAX_CONCURRENT',
         'sif': 'ROI_SIF_MAX_CONCURRENT',
         'taobao': 'ROI_TAOBAO_MAX_CONCURRENT',
+        'scheduler_asin': 'ROI_SCHEDULER_ASIN_MAX_CONCURRENT',
     }
     key = env_map.get(name, f'ROI_{name.upper()}_MAX_CONCURRENT')
     raw = os.environ.get(key, '')
@@ -112,6 +113,7 @@ def env_max_concurrent(name: str, default: int) -> int:
         'sellersprite': 'ROI_SELLERSPRITE_MAX_CONCURRENT',
         'sif': 'ROI_SIF_MAX_CONCURRENT',
         'taobao': 'ROI_TAOBAO_MAX_CONCURRENT',
+        'scheduler_asin': 'ROI_SCHEDULER_ASIN_MAX_CONCURRENT',
     }
     key = env_map.get(name, f'ROI_{name.upper()}_MAX_CONCURRENT')
     try:

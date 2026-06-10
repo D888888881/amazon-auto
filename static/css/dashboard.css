@@ -376,6 +376,28 @@
   text-align: center;
   font-size: 0.8rem;
   color: #64748b;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+}
+
+.dash-page-jump-input {
+  width: 3.2rem;
+  height: 28px;
+  padding: 0 0.35rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font-size: 0.82rem;
+  text-align: center;
+  color: #334155;
+  background: #fff;
+}
+
+.dash-page-jump-input:focus {
+  outline: none;
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
 }
 
 .col-assignees {

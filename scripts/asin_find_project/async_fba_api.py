@@ -140,7 +140,7 @@ async def async_fba_batch(asin_list, max_concurrent=5):
 
 if __name__ == "__main__":
     # 示例：多个 ASIN 并发处理
-    asins = ["B0F6MTPQVG"]
+    asins = ["B0G4NG2TPR"]
     result = asyncio.run(async_fba_batch(asins, max_concurrent=3))
     print(result)
 

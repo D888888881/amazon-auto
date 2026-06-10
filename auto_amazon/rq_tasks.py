@@ -47,6 +47,25 @@ def run_ad_difficulty_job_task(
         close_old_connections()
 
 
+def run_scheduled_batch_task(work_items: list[dict]) -> None:
+    from .asin_job_lock import release
+    from .scheduled_jobs import execute_scheduled_batch_worker
+
+    close_old_connections()
+    try:
+        execute_scheduled_batch_worker(work_items)
+    except Exception:
+        logger.exception('scheduled batch RQ task failed count=%s', len(work_items))
+        raise
+    finally:
+        for w in work_items or []:
+            asin = w.get('asin')
+            owner = w.get('lock_owner')
+            if asin and owner:
+                release(asin, owner)
+        close_old_connections()
+
+
 def run_scheduled_asin_task(
     row_pk: int,
     asin: str,
@@ -56,21 +75,16 @@ def run_scheduled_asin_task(
     roi_due: bool,
     recipient_id: int | None,
 ) -> None:
-    from .asin_job_lock import release
-    from .scheduled_jobs import execute_scheduled_asin_worker
+    """兼容旧队列中的单 ASIN 任务。"""
+    run_scheduled_batch_task([
+        {
+            'row_pk': row_pk,
+            'asin': asin,
+            'ad_due': ad_due,
+            'roi_due': roi_due,
+            'recipient_id': recipient_id,
+            'lock_owner': lock_owner,
+            'job_log_id': job_log_id,
+        }
+    ])
 
-    close_old_connections()
-    try:
-        execute_scheduled_asin_worker(
-            row_pk=row_pk,
-            job_log_id=job_log_id,
-            ad_due=ad_due,
-            roi_due=roi_due,
-            recipient_id=recipient_id,
-        )
-    except Exception:
-        logger.exception('scheduled RQ task failed row_pk=%s asin=%s', row_pk, asin)
-        raise
-    finally:
-        release(asin, lock_owner)
-        close_old_connections()

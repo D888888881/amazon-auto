@@ -792,3 +792,29 @@ def dispatch_scheduled_asin(
 
     return rq_job_id
 
+
+def dispatch_scheduled_batch(work_items: list[dict]) -> str | None:
+    """将一批到期 ASIN 合并为单个 RQ 任务（批量并发计算）。"""
+    if not work_items:
+        return None
+
+    if not should_use_rq_queue(settings.RQ_QUEUE_ROI_SCHEDULED):
+        from .asin_job_lock import release
+        from .scheduled_jobs import execute_scheduled_batch_worker
+
+        try:
+            execute_scheduled_batch_worker(work_items)
+        finally:
+            for w in work_items:
+                release(w['asin'], w['lock_owner'])
+        return None
+
+    rq_job_id = _enqueue(
+        settings.RQ_QUEUE_ROI_SCHEDULED,
+        'auto_amazon.rq_tasks.run_scheduled_batch_task',
+        work_items,
+    )
+    asins = [w.get('asin') for w in work_items]
+    logger.info('enqueued scheduled batch %s -> rq:%s', asins, rq_job_id)
+    return rq_job_id
+

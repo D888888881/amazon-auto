@@ -82,6 +82,8 @@ services:
 
       ROI_ASIN_RETRY_DELAY_SEC: "5"
 
+      CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-}
+
     volumes:
 
       - static_data:/app/staticfiles
@@ -141,6 +143,8 @@ services:
       ROI_SIF_MAX_CONCURRENT: "4"
 
       ROI_TAOBAO_MAX_CONCURRENT: "1"
+
+      ROI_SCHEDULER_ASIN_MAX_CONCURRENT: "4"
 
       RQ_JOB_TIMEOUT: "86400"
 

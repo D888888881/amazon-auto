@@ -270,6 +270,7 @@ class ScheduledTaskMessage(models.Model):
     class AlertStatus(models.TextChoices):
         NORMAL = 'normal', '未预警'
         ALERT = 'alert', '开始预警'
+        ELIMINATE = 'eliminate', '立即淘汰'
 
     recipient = models.ForeignKey(
         User,

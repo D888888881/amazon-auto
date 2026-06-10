@@ -1,0 +1,71 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block title %}SIF 配置 — Amazon 自动化{% endblock %}
+
+{% block extra_head %}
+<link rel="stylesheet" href="{% static 'css/sif_config.css' %}">
+{% endblock %}
+
+{% block main_class %}main--sif-config{% endblock %}
+
+{% block content %}
+<section class="sif-hero">
+    <p class="sif-hero__eyebrow">超级管理员</p>
+    <h1 class="sif-hero__title">SIF 配置</h1>
+    <p class="sif-hero__lead">在此填写 SIF 网站的 authorization（JWT），系统会用它换取 <code>sif_token</code> 供 ROI 计算中的 CPC 数据使用。</p>
+</section>
+
+{% if messages %}
+<ul class="sif-toast">
+    {% for message in messages %}
+    <li class="{{ message.tags }}">{{ message }}</li>
+    {% endfor %}
+</ul>
+{% endif %}
+
+<section class="sif-panel">
+    <h2 class="sif-panel__title">authorization</h2>
+    <form method="post">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="save">
+        <div class="sif-field">
+            <label for="sif-authorization">authorization 值</label>
+            <textarea id="sif-authorization" name="authorization" placeholder="粘贴从浏览器开发者工具复制的 JWT…" required>{{ authorization }}</textarea>
+        </div>
+        <div class="sif-actions">
+            <button type="submit" class="sif-btn sif-btn--primary">保存</button>
+        </div>
+    </form>
+</section>
+
+<section class="sif-panel">
+    <h2 class="sif-panel__title">sif_token 状态</h2>
+    <div class="sif-status">
+        {% if token_status.exists %}
+        <span class="sif-status__badge sif-status__badge--ok">已生成</span>
+        <span>长度 {{ token_status.length }} 字符，预览：{{ token_status.preview }}</span>
+        {% else %}
+        <span class="sif-status__badge sif-status__badge--missing">未生成或已失效</span>
+        <span>保存 authorization 后，点击下方按钮刷新 token。</span>
+        {% endif %}
+    </div>
+    <form method="post" class="sif-actions">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="refresh">
+        <button type="submit" class="sif-btn sif-btn--ghost">刷新 SIF Token</button>
+    </form>
+</section>
+
+<section class="sif-panel">
+    <h2 class="sif-panel__title">如何获取 authorization</h2>
+    <p class="sif-help">在已登录 <a href="https://www.sif.com/" target="_blank" rel="noopener">sif.com</a> 的浏览器中：</p>
+    <ol class="sif-help">
+        <li>打开开发者工具（F12）→ Network（网络）面板</li>
+        <li>刷新页面或打开任意需要登录的功能</li>
+        <li>找到发往 <code>www.sif.com/api/</code> 的请求</li>
+        <li>在 Request Headers 中复制 <code>authorization</code> 的完整值（通常以 <code>eyJ</code> 开头的 JWT）</li>
+        <li>粘贴到上方输入框并保存，再点击「刷新 SIF Token」</li>
+    </ol>
+</section>
+{% endblock %}

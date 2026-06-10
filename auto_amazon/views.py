@@ -32,6 +32,7 @@ from .resilient_wizard import (
     BatchRunResult,
     batch_result_from_wizard_output,
     ordered_unique_asins,
+    run_ad_difficulty_asins_batch,
     run_ad_difficulty_asins_sequential,
     run_roi_asins_sequential,
     use_sequential_roi,
@@ -1641,7 +1642,7 @@ def _run_ad_difficulty_job(
             ent['failures'] = failures[-200:]
             cache.set(key, ent, WIZARD_JOB_TTL)
 
-        batch = run_ad_difficulty_asins_sequential(
+        batch = run_ad_difficulty_asins_batch(
             asin_list,
             on_stderr_line=on_line,
             on_progress=on_progress,
@@ -1877,27 +1878,107 @@ def schedule_messages_page(request):
         qs = qs.filter(recipient=request.user)
 
     alert_filter = (request.GET.get('alert') or '').strip().lower()
-    if alert_filter == 'yes':
+    if alert_filter == 'alert':
         qs = qs.filter(alert_status=ScheduledTaskMessage.AlertStatus.ALERT)
-    elif alert_filter == 'no':
+    elif alert_filter == 'eliminate':
+        qs = qs.filter(alert_status=ScheduledTaskMessage.AlertStatus.ELIMINATE)
+    elif alert_filter in ('normal', 'no'):
         qs = qs.filter(alert_status=ScheduledTaskMessage.AlertStatus.NORMAL)
+    elif alert_filter == 'yes':
+        qs = qs.filter(
+            alert_status__in=(
+                ScheduledTaskMessage.AlertStatus.ALERT,
+                ScheduledTaskMessage.AlertStatus.ELIMINATE,
+            )
+        )
 
     asin_q = (request.GET.get('asin') or '').strip().upper()
     if asin_q:
         qs = qs.filter(asin__icontains=asin_q)
 
-    paginator = Paginator(qs, 30)
+    date_from_raw = (request.GET.get('date_from') or '').strip()
+    date_to_raw = (request.GET.get('date_to') or '').strip()
+    date_from = None
+    date_to = None
+    if date_from_raw:
+        try:
+            date_from = datetime.strptime(date_from_raw, '%Y-%m-%d').date()
+            qs = qs.filter(sent_at__date__gte=date_from)
+        except ValueError:
+            date_from_raw = ''
+    if date_to_raw:
+        try:
+            date_to = datetime.strptime(date_to_raw, '%Y-%m-%d').date()
+            qs = qs.filter(sent_at__date__lte=date_to)
+        except ValueError:
+            date_to_raw = ''
+
+    qs = qs.order_by('-sent_at', '-id')
+
+    per_page = 30
+    paginator = Paginator(qs, per_page)
     page_obj = paginator.get_page(request.GET.get('page') or 1)
+
+    page_start = max(1, page_obj.number - 4)
+    page_end = min(paginator.num_pages, page_obj.number + 5)
+    page_numbers = list(range(page_start, page_end + 1)) if paginator.num_pages else []
+
+    kept = request.GET.copy()
+    kept.pop('page', None)
+    filter_qs = kept.urlencode()
 
     return render(
         request,
         'auto_amazon/schedule_messages.html',
         {
             'page_obj': page_obj,
+            'page_numbers': page_numbers,
+            'filter_qs': filter_qs,
             'filters': {
                 'alert': alert_filter,
                 'asin': asin_q,
+                'date_from': date_from_raw,
+                'date_to': date_to_raw,
             },
+        },
+    )
+
+
+@login_required
+@user_passes_test(lambda u: u.is_superuser)
+def sif_config_page(request):
+    """SIF authorization 配置（超级管理员）。"""
+    from .sif_config import (
+        read_sif_authorization,
+        read_sif_token_status,
+        refresh_sif_token,
+        write_sif_authorization,
+    )
+
+    if request.method == 'POST':
+        action = (request.POST.get('action') or 'save').strip()
+        if action == 'refresh':
+            ok, msg = refresh_sif_token()
+            if ok:
+                preview = msg[:48] + '…' if len(msg) > 48 else msg
+                messages.success(request, f'SIF Token 刷新成功：{preview}')
+            else:
+                messages.error(request, f'刷新失败：{msg}')
+        else:
+            auth = (request.POST.get('authorization') or '').strip()
+            if not auth:
+                messages.error(request, 'authorization 不能为空。')
+            else:
+                write_sif_authorization(auth)
+                messages.success(request, 'authorization 已保存。')
+        return redirect('sif_config')
+
+    return render(
+        request,
+        'auto_amazon/sif_config.html',
+        {
+            'authorization': read_sif_authorization(),
+            'token_status': read_sif_token_status(),
         },
     )
 
