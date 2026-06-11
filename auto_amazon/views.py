@@ -1946,12 +1946,16 @@ def schedule_messages_page(request):
 
 @login_required
 @user_passes_test(lambda u: u.is_superuser)
-def sif_config_page(request):
-    """SIF authorization 配置（超级管理员）。"""
-    from .sif_config import (
-        read_sif_authorization,
-        read_sif_token_status,
+def credentials_config_page(request):
+    """SIF / 卖家精灵凭证配置（超级管理员）。"""
+    from .credentials_config import (
+        read_credentials_page_context,
+        read_seller_password,
         refresh_sif_token,
+        write_ao_lo_to_n,
+        write_seller_child_ids,
+        write_seller_password,
+        write_seller_username,
         write_sif_authorization,
     )
 
@@ -1965,22 +1969,44 @@ def sif_config_page(request):
             else:
                 messages.error(request, f'刷新失败：{msg}')
         else:
-            auth = (request.POST.get('authorization') or '').strip()
-            if not auth:
-                messages.error(request, 'authorization 不能为空。')
-            else:
-                write_sif_authorization(auth)
-                messages.success(request, 'authorization 已保存。')
-        return redirect('sif_config')
+            child_raw = (request.POST.get('child_ids') or '').strip()
+            child_ids = [x.strip() for x in child_raw.replace('\n', ',').split(',') if x.strip()]
+            if not child_ids:
+                messages.error(request, '子账号 ID 不能为空。')
+                return redirect('credentials_config')
 
-    return render(
-        request,
-        'auto_amazon/sif_config.html',
-        {
-            'authorization': read_sif_authorization(),
-            'token_status': read_sif_token_status(),
-        },
-    )
+            username = (request.POST.get('seller_username') or '').strip()
+            if not username:
+                messages.error(request, '子账号用户名不能为空。')
+                return redirect('credentials_config')
+
+            password_in = (request.POST.get('seller_password') or '').strip()
+            ao_lo_to_n = (request.POST.get('ao_lo_to_n') or '').strip()
+            auth = (request.POST.get('authorization') or '').strip()
+
+            write_seller_child_ids(child_ids)
+            write_seller_username(username)
+            if password_in:
+                write_seller_password(password_in)
+            elif not read_seller_password():
+                messages.error(request, '首次配置须填写子账号密码。')
+                return redirect('credentials_config')
+            write_ao_lo_to_n(ao_lo_to_n)
+            write_sif_authorization(auth)
+
+            messages.success(request, '凭证已保存。')
+            if not auth:
+                messages.warning(request, 'SIF authorization 为空，CPC 将使用默认值直至填写。')
+            if not ao_lo_to_n:
+                messages.warning(request, 'ao_lo_to_n 为空，卖家精灵登录可能失败，请尽快填写。')
+        return redirect('credentials_config')
+
+    return render(request, 'auto_amazon/credentials_config.html', read_credentials_page_context())
+
+
+def sif_config_page(request):
+    """旧 URL 兼容。"""
+    return credentials_config_page(request)
 
 
 @login_required
@@ -2328,6 +2354,56 @@ def excel_browse(request):
     })
 
 
+def _build_media_zip_for_paths(request, paths: list[str]) -> tuple[BytesIO | None, int]:
+    """将文件或文件夹（递归）打包为 ZIP；返回 (buffer, 文件数)。"""
+    root = media_root()
+    is_super = _require_superuser_for_excel_audit(request)
+    pending_writes: list[tuple[Path, str]] = []
+    seen_arcs: set[str] = set()
+
+    for rel in paths:
+        rel = str(rel).strip().replace('\\', '/')
+        if not rel:
+            continue
+        if not is_super and not user_can_access_excel_media_path(request.user, rel):
+            continue
+        path = safe_media_path_global(rel)
+        if path is None:
+            continue
+        try:
+            path.relative_to(root)
+        except ValueError:
+            continue
+        if path.is_file():
+            arc = str(path.relative_to(root)).replace('\\', '/')
+            if arc not in seen_arcs:
+                seen_arcs.add(arc)
+                pending_writes.append((path, arc))
+        elif path.is_dir():
+            for fp in path.rglob('*'):
+                if not fp.is_file():
+                    continue
+                try:
+                    sub_rel = str(fp.relative_to(root)).replace('\\', '/')
+                except ValueError:
+                    continue
+                if not is_super and not user_can_access_excel_media_path(request.user, sub_rel):
+                    continue
+                if sub_rel not in seen_arcs:
+                    seen_arcs.add(sub_rel)
+                    pending_writes.append((fp, sub_rel))
+
+    if not pending_writes:
+        return None, 0
+
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for file_path, arc in pending_writes:
+            zf.write(file_path, arcname=arc)
+    buf.seek(0)
+    return buf, len(pending_writes)
+
+
 @login_required
 @require_GET
 def excel_download(request):
@@ -2339,7 +2415,19 @@ def excel_download(request):
     ):
         raise Http404
     path = safe_media_path_global(rel)
-    if path is None or not path.is_file():
+    if path is None:
+        raise Http404
+    if path.is_dir():
+        buf, added = _build_media_zip_for_paths(request, [rel])
+        if not buf or added == 0:
+            raise Http404
+        return FileResponse(
+            buf,
+            as_attachment=True,
+            filename=f'{path.name}.zip',
+            content_type='application/zip',
+        )
+    if not path.is_file():
         raise Http404
     try:
         fh = open(path, 'rb')
@@ -2535,30 +2623,9 @@ def excel_batch_download(request):
     paths = payload.get('paths')
     if not isinstance(paths, list) or not paths:
         return JsonResponse({'ok': False, 'error': '缺少 paths'}, status=400)
-    root = media_root()
-    buf = BytesIO()
-    added = 0
-    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for rel in paths:
-            rel = str(rel).strip().replace('\\', '/')
-            if not rel:
-                continue
-            if not _require_superuser_for_excel_audit(request) and not user_can_access_excel_media_path(
-                request.user, rel
-            ):
-                continue
-            path = safe_media_path_global(rel)
-            if path is None or not path.is_file():
-                continue
-            try:
-                arc = str(path.relative_to(root)).replace('\\', '/')
-            except ValueError:
-                continue
-            zf.write(path, arcname=arc)
-            added += 1
-    if added == 0:
+    buf, added = _build_media_zip_for_paths(request, paths)
+    if not buf or added == 0:
         return JsonResponse({'ok': False, 'error': '没有可打包的文件'}, status=400)
-    buf.seek(0)
     return FileResponse(
         buf,
         as_attachment=True,

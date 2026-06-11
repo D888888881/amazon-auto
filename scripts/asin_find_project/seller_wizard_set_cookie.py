@@ -2,6 +2,15 @@ import asyncio
 
 import httpx
 
+from credentials_loader import read_ao_lo_to_n
+
+
+def _apply_ao_lo_to_n_cookie(cookies: dict) -> None:
+    val = read_ao_lo_to_n()
+    print(val)
+    if val:
+        cookies['ao_lo_to_n'] = val
+
 
 async def get_seller_wizard_set_cookie(username: str, password: str =''):
     """
@@ -45,13 +54,14 @@ async def get_seller_wizard_set_cookie(username: str, password: str =''):
         "ebdde9bd6f45433c1c41": "728a1ac9571cee1f632e823d77c9433c",
         "_gaf_fp": "296aca6530811998e69f96719174e46c",
         "Sprite-X-Token": "eyJhbGciOiJSUzI1NiIsImtpZCI6IjE2Nzk5NjI2YmZlMDQzZTBiYzI5NTEwMTE4ODA3YWExIn0.eyJqdGkiOiJIcGh3eGFCSnlDOUpkdzU0cHJobktnIiwiaWF0IjoxNzgwMzgzNDcwLCJleHAiOjE3ODA0Njk4NzAsIm5iZiI6MTc4MDM4MzQxMCwic3ViIjoieXVueWEiLCJpc3MiOiJyYW5rIiwiYXVkIjoic2VsbGVyU3BhY2UiLCJpZCI6MTgwNTEyMCwicGkiOjEyOTQyNSwibm4iOiJJVEJNMDAwMDY3Iiwic3lzIjoiU1NfQ04iLCJlZCI6Ik4iLCJlbSI6IklUQk0wMDAwNjdAc2VsbGVyc3ByaXRlLmNvbSIsIm1sIjoiViIsImVuZCI6MTc4MjU0MzQ3MDU0Nn0.VqZsxM61yLgBaubJyYUjPoW0mTj-szjg8aPFmOQbtnQBfga017YVuW2OcOcUw4Z1AI5JeVgGFdrzghkWkhydJrdJ6_L7znuAr-DizDuVE7vQecjWWmFmLpFFgjgIsfGVE7B2lLx__cpx7oqw37SmVuJmwu6MwOsqtXVdqZrsO0r_RH4yBFU3SpyZu8L5x8wiGq7UiWLg_6Q9j3S530rlZWMhVWBrzt_dMuflyecdj3JFLGVLqPLwfFYCs3waLYH5INKCV0K3ARoWQ8Aso9A69AKcYDUECV6aNroPBBCQkNO4T-0tlWUe_lCVF221QB5NlDM_bO8bfrp6vNyLKe-duQ",
-        "ao_lo_to_n": "\"0701440871A++WqsjzTTKriM3w4ZyMh/1tcut7IaTQO8F8mvI1XB/4dlql0mJxERc2gKUPSxMZu5+vE5ZtUb7J3I/tJAkxAjWpGgvNqjlw0ewC2kv99jA=\"",
+        "ao_lo_to_n": "\"53481218714XzhVuZpq1a6RiWaWTzoH57g9zzxdBDQMe4vUPXgwzH3mtmZAw7SIpl036CgfVE7bkQ8A5zx7dgGw69FNf+OBXKosmBfH/F0W1tLXTDHp48=\"",
         "Hm_lpvt_e0dfc78949a2d7c553713cb5c573a486": "1780383505",
         "_clsk": "1ndt70%5E1780383506130%5E13%5E1%5En.clarity.ms%2Fcollect",
         "JSESSIONID": "EDA07B00E78038AE02C3F1943C40B4B4",
         "_ga_CN0F80S6GL": "GS2.1.s1780383025$o102$g1$t1780383513$j11$l0$h0",
         "_ga_38NCVF2XST": "GS2.1.s1780383025$o60$g1$t1780383513$j11$l0$h1266767465"
     }
+    # _apply_ao_lo_to_n_cookie(cookies)
     url = "https://www.sellersprite.com/w/user/signin"
     data = {
         "callback": "",
@@ -60,7 +70,7 @@ async def get_seller_wizard_set_cookie(username: str, password: str =''):
         "password": password,
         "autoLogin": "Y"
     }
-
+    print(cookies)
     async with httpx.AsyncClient() as client:
         # 设置初始 cookies
         client.cookies.update(cookies)
@@ -108,4 +118,4 @@ async def set_cookie_main(username:str,password:str=''):
 
 
 if __name__ == '__main__':
-    asyncio.run(set_cookie_main("ITBM000067","ITBM000067"))
+    asyncio.run(set_cookie_main("ITBM000066","ITBM000066"))

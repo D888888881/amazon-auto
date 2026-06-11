@@ -11,11 +11,11 @@ def get_sif_authorization() -> str:
     if not _AUTHORIZATION_FILE.is_file():
         raise FileNotFoundError(
             f'未找到 SIF authorization 配置文件：{_AUTHORIZATION_FILE}，'
-            '请在网站「SIF 配置」页面填写并保存。'
+            '请在网站「凭证配置」页面填写并保存。'
         )
     value = _AUTHORIZATION_FILE.read_text(encoding='utf-8').strip()
     if not value:
-        raise ValueError('SIF authorization 为空，请在网站「SIF 配置」页面填写并保存。')
+        raise ValueError('SIF authorization 为空，请在网站「凭证配置」页面填写并保存。')
     return value
 
 

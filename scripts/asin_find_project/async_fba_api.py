@@ -2,7 +2,13 @@ import asyncio
 import aiohttp
 # from async_read_config import read_main
 
-from seller_account_guard import apply_login_config, apply_login_headers, ensure_seller_login
+from seller_account_guard import (
+    SellerAccountBannedError,
+    apply_login_config,
+    apply_login_headers,
+    ensure_seller_login,
+    parse_sellersprite_api_payload,
+)
 
 
 """异步发起单个 ASIN 的 FBA 计算请求"""
@@ -90,7 +96,7 @@ async def process_asin(asin):
     """
     try:
         response_json = await fetch_fba_search(asin)
-        data = response_json.get('data') or {}
+        data = parse_sellersprite_api_payload(response_json, asin=asin, api='FBA')
         fba_val = _parse_fba_fee(data.get('fba'))
         if fba_val is None:
             raise ValueError(f"FBA 费用无效: {data.get('fba')!r}")
@@ -113,6 +119,8 @@ async def process_asin(asin):
             "head_distance": head_distance
         }
         return asin, result
+    except SellerAccountBannedError:
+        raise
     except Exception as e:
         print(f"处理 ASIN {asin} 失败: {e}")
         return asin, None
@@ -140,7 +148,7 @@ async def async_fba_batch(asin_list, max_concurrent=5):
 
 if __name__ == "__main__":
     # 示例：多个 ASIN 并发处理
-    asins = ["B0G4NG2TPR"]
+    asins = ["B0GQVXM199"]
     result = asyncio.run(async_fba_batch(asins, max_concurrent=3))
     print(result)
 

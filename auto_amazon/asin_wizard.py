@@ -11,7 +11,7 @@ from typing import Callable
 
 from django.conf import settings
 
-from .seller_unlock import execute_with_seller_unlock_retry
+from .seller_unlock import execute_with_seller_unlock_retry, is_seller_account_banned_error
 
 
 def _wizard_exec_mode() -> str:
@@ -111,10 +111,23 @@ def _run_seller_wizard_subprocess(
         err = '\n'.join(stderr_lines[-120:]).strip()
         if not err:
             err = stdout.decode('utf-8', errors='replace').strip() or 'seller_wizard 执行失败'
-        raise RuntimeError(err)
+        _raise_wizard_subprocess_error(err, script='seller_wizard')
 
     out = stdout.decode('utf-8', errors='replace')
     return _parse_stdout_json(out, stderr_lines)
+
+
+def _raise_wizard_subprocess_error(err: str, *, script: str) -> None:
+    """子进程失败时，将会话/子账号异常转为可触发解禁重试的异常。"""
+    wrapped = RuntimeError(err)
+    if is_seller_account_banned_error(wrapped):
+        base = Path(settings.BASE_DIR).resolve() / 'scripts' / 'asin_find_project'
+        if str(base) not in sys.path:
+            sys.path.insert(0, str(base))
+        from seller_account_guard import SellerAccountBannedError
+
+        raise SellerAccountBannedError(f'{script} 子进程失败（会话/子账号）:\n{err}') from wrapped
+    raise wrapped
 
 
 def _run_ad_difficulty_subprocess(
@@ -167,7 +180,7 @@ def _run_ad_difficulty_subprocess(
         err = '\n'.join(stderr_lines[-120:]).strip()
         if not err:
             err = stdout.decode('utf-8', errors='replace').strip() or '广告难度计算执行失败'
-        raise RuntimeError(err)
+        _raise_wizard_subprocess_error(err, script='ad_difficulty')
 
     out = stdout.decode('utf-8', errors='replace')
     return _parse_stdout_json(out, stderr_lines)

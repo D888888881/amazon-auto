@@ -622,19 +622,16 @@
 
   function onToolbarDownload() {
     var sel = getCheckedSelection();
-    if (sel.files.length === 0) {
-      if (sel.dirs.length > 0) {
-        alert('下载仅支持文件，请先勾选文件（文件夹可删除或进入子目录后操作）。');
-      } else {
-        alert('请先勾选要下载的文件。');
-      }
+    var paths = sel.dirs.concat(sel.files);
+    if (paths.length === 0) {
+      alert('请先勾选要下载的文件或文件夹。');
       return;
     }
-    if (sel.files.length === 1) {
-      window.location.href = downloadUrl + '?path=' + encodeURIComponent(sel.files[0]);
+    if (paths.length === 1) {
+      window.location.href = downloadUrl + '?path=' + encodeURIComponent(paths[0]);
       return;
     }
-    postZipForPaths(sel.files).catch(function (e) {
+    postZipForPaths(paths).catch(function (e) {
       alert(e.message || String(e));
     });
   }
@@ -764,11 +761,12 @@
 
   function onToolbarBatchZip() {
     var sel = getCheckedSelection();
-    if (sel.files.length === 0) {
-      alert(sel.dirs.length ? '请勾选要打包的文件（不支持文件夹）。' : '请先勾选要打包的文件。');
+    var paths = sel.dirs.concat(sel.files);
+    if (paths.length === 0) {
+      alert('请先勾选要打包的文件或文件夹。');
       return;
     }
-    postZipForPaths(sel.files).catch(function (e) {
+    postZipForPaths(paths).catch(function (e) {
       alert(e.message || String(e));
     });
   }

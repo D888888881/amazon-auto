@@ -1931,22 +1931,34 @@ async def seller_wizard_main(
         print(f"未在 {FILE_DATA_ROOT} 下发现符合 B0XXXXXXXXX 结构的 ASIN 数据，结束。")
         return {}
 
-    from seller_account_guard import ensure_seller_login
+    from seller_account_guard import (
+        SellerAccountBannedError,
+        clear_seller_login_cache,
+        ensure_seller_login,
+    )
 
     emit_progress('正在登录卖家精灵并批量拉取 FBA / 广告数据…')
     await ensure_seller_login()
     max_ss = env_max_concurrent('sellersprite', 6)
 
-    try:
-        async with async_api_slot('sellersprite'):
-            fba_info_dict, asin_info_dict = await asyncio.gather(
-                async_fba_batch(target_asins, max_concurrent=max_ss),
-                advertisement_main(target_asins, max_concurrent=max_ss),
-            )
-    except Exception as e:
-        if is_seller_account_banned_error(e):
-            raise
-        raise RuntimeError(f'卖家精灵 FBA/广告批量获取失败: {e}') from e
+    async def _fetch_fba_and_ad(*, retried: bool = False):
+        try:
+            async with async_api_slot('sellersprite'):
+                return await asyncio.gather(
+                    async_fba_batch(target_asins, max_concurrent=max_ss),
+                    advertisement_main(target_asins, max_concurrent=max_ss),
+                )
+        except Exception as e:
+            if is_seller_account_banned_error(e) and not retried:
+                emit_progress('卖家精灵会话失效或子账号被禁，正在清缓存、解禁并重新登录…')
+                clear_seller_login_cache()
+                await ensure_seller_login(force_refresh=True)
+                return await _fetch_fba_and_ad(retried=True)
+            if is_seller_account_banned_error(e):
+                raise SellerAccountBannedError(str(e)) from e
+            raise RuntimeError(f'卖家精灵 FBA/广告批量获取失败: {e}') from e
+
+    fba_info_dict, asin_info_dict = await _fetch_fba_and_ad()
     print(fba_info_dict, '666666')
     if not isinstance(asin_info_dict, dict):
         asin_info_dict = {}

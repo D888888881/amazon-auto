@@ -26,7 +26,7 @@ import requests
 
 PARENT_ID = "129425"
 
-CHILD_IDS = ["1805120"]  # 待激活的子账号 id，可填多个
+CHILD_IDS = ["1805119"]  # 待激活的子账号 id，可填多个
 
 PARENT_LOGIN = "13724333803"
 
@@ -442,7 +442,15 @@ def activate_children(
 
     """
 
-    child_ids = [str(i) for i in (child_ids or CHILD_IDS)]
+    if child_ids is None:
+        try:
+            from credentials_loader import read_child_ids
+
+            loaded = read_child_ids(default=CHILD_IDS)
+            child_ids = loaded if loaded else CHILD_IDS
+        except ImportError:
+            child_ids = CHILD_IDS
+    child_ids = [str(i) for i in child_ids]
 
     focus = set(child_ids)
 

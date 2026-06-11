@@ -405,6 +405,7 @@ async def sif_main(asins: list[str]):
     with open("config_file/sif_token.txt", "r") as f:
         sif_token = f.read().strip()
     auth_token = sif_token
+    print(auth_token)
     cookies = {
         "Hm_lvt_8d71bef53342fdb284ff83594f3b97ff": "1773713262",
         "HMACCOUNT": "1B0FE40093B498DF",
@@ -449,5 +450,5 @@ async def sif_main(asins: list[str]):
 
 
 if __name__ == "__main__":
-    asins = ["B0G4NG2TPR"]
+    asins = ["B0GQVXM199"]
     print(asyncio.run(sif_main(asins)))

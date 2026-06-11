@@ -33,7 +33,7 @@
         {% if user.is_superuser %}
         <a href="{% url 'pending_registrations' %}" class="{% if request.resolver_match.url_name == 'pending_registrations' %}active{% endif %}">注册审核</a>
         <a href="{% url 'user_management' %}" class="{% if request.resolver_match.url_name == 'user_management' %}active{% endif %}">用户管理</a>
-        <a href="{% url 'sif_config' %}" class="{% if request.resolver_match.url_name == 'sif_config' %}active{% endif %}">SIF配置</a>
+        <a href="{% url 'credentials_config' %}" class="{% if request.resolver_match.url_name == 'credentials_config' or request.resolver_match.url_name == 'sif_config' %}active{% endif %}">凭证配置</a>
         {% endif %}
         <span class="nav-user" title="当前登录账号">用户：{{ user.username }}{% if user.is_superuser %} <span class="nav-user__role">（超级管理员）</span>{% endif %}</span>
         <form action="{% url 'logout' %}" method="post" class="nav-logout">

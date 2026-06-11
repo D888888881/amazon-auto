@@ -5,7 +5,14 @@ import aiohttp
 from typing import List, Dict, Any
 
 # from async_read_config import read_main
-from seller_account_guard import apply_login_config, apply_login_headers, ensure_seller_login
+from seller_account_guard import (
+    SellerAccountBannedError,
+    apply_login_config,
+    apply_login_headers,
+    ensure_seller_login,
+    looks_like_seller_auth_message,
+    parse_sellersprite_api_payload,
+)
 
 
 # ---------- 全局配置 ----------
@@ -137,6 +144,7 @@ async def fetch_multiple_asins(asin_list: List[str], max_concurrent: int = 1) ->
     async def bounded_fetch(asin: str):
         async with semaphore:
             result = await fetch_source(session, asin)
+            print(result)
             print(f'{asin},请求广告值成功')
             await random_sleep()  # 每次请求后等待 1 秒
             return asin, result
@@ -148,10 +156,13 @@ async def fetch_multiple_asins(asin_list: List[str], max_concurrent: int = 1) ->
     results_dict = {}
     for asin, data in results:
         if "error" in data:
-            print(f"ASIN {asin} 请求失败: {data['error']}")
+            err = str(data['error'])
+            if looks_like_seller_auth_message(err) or 'HTTP 401' in err or 'HTTP 403' in err:
+                raise SellerAccountBannedError(f'广告 API ASIN {asin}: {err}')
+            print(f"ASIN {asin} 请求失败: {err}")
             continue
 
-        data_content = data.get('data')
+        data_content = parse_sellersprite_api_payload(data, asin=asin, api='广告')
         if not data_content:
             print(f"ASIN {asin} 的 data 为空")
             continue
@@ -270,8 +281,14 @@ async def fetch_multiple_asins_totalUnits(asin_list: List[str], max_concurrent: 
     results_dict = {}
     for item in results:
         asin = item[0]
+        payload = item[1]
+        if isinstance(payload, dict) and payload.get('error'):
+            err = str(payload['error'])
+            if looks_like_seller_auth_message(err) or 'HTTP 401' in err or 'HTTP 403' in err:
+                raise SellerAccountBannedError(f'销量 API ASIN {asin}: {err}')
         try:
-            items = item[1]['data']['items']
+            data_content = parse_sellersprite_api_payload(payload, asin=asin, api='销量')
+            items = data_content.get('items') or []
             bast_totalUnits = -1
             for value in items:
                 totalUnits = value.get('totalUnits', 0)
@@ -284,6 +301,8 @@ async def fetch_multiple_asins_totalUnits(asin_list: List[str], max_concurrent: 
                         results_dict[asin].update({'salesTrend': value.get('salesTrend', 0)})
                 except Exception as e:
                     print(f"ASIN {asin} 数据比较出现问题 {e}")
+        except SellerAccountBannedError:
+            raise
         except Exception as e:
             print(f"ASIN {asin} <不好，出问题了> {e}")
     # print(results_dict)
@@ -312,7 +331,7 @@ async def advertisement_main(asins: List[str], max_concurrent: int = 1) -> Dict[
 if __name__ == "__main__":
     # asins = ["B0F6MTPQVG","B0F9WW826V",'B0FWJ8HNCB','B0FY5S16DK','B0C62HMMCJ']
     # asins = ['B0FWJ8HNCB', 'B0D3M1WHQ6','B0D6XKFPF1','B0DXF3TQRD','B0DFH5Z3JB','B08HJR2RL2', 'B0D3M1WHQ6','B0DXF3TQRD','B0DFH5Z3JB','B0GCCXBK14','B0DGKTRZN2','B0D299X6KN','B0CSJZVHKX','B0DR2LC897','B0D6XKFPF1','B0C3QQJ8YF','B093QZ6V3S','B0DT4JGZY5']
-    asins = ['B0G4NG2TPR']
+    asins = ['B0F6MTPQVG']
     # result = asyncio.run(fetch_multiple_asins(asins))
     # result = asyncio.run(fetch_multiple_asins(asins,1))
     result = asyncio.run(advertisement_main(asins))

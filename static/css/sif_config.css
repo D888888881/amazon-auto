@@ -57,22 +57,37 @@
   font-weight: 500;
 }
 
-.sif-field textarea {
+.sif-field textarea,
+.sif-field .sif-input {
   width: 100%;
-  min-height: 120px;
   border: 1px solid #cbd5e1;
   border-radius: 8px;
   padding: 0.65rem 0.75rem;
   font-size: 0.82rem;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   line-height: 1.45;
+}
+
+.sif-field textarea {
+  min-height: 120px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   resize: vertical;
 }
 
-.sif-field textarea:focus {
+.sif-field .sif-input {
+  font-family: inherit;
+}
+
+.sif-field textarea:focus,
+.sif-field .sif-input:focus {
   outline: none;
   border-color: #2563eb;
   box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.12);
+}
+
+.sif-divider {
+  border: none;
+  border-top: 1px solid #e2e8f0;
+  margin: 1rem 0;
 }
 
 .sif-help {
