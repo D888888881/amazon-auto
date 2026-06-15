@@ -587,8 +587,11 @@ def dispatch_wizard_job(
 ) -> str | None:
 
     """入队 ROI 任务；无 Worker 或 ROI_USE_RQ=false 时在 Web 进程后台线程执行。"""
+    from .roi_routing import wizard_queue_name, wizard_route_label
 
-    if not should_use_rq_queue(settings.RQ_QUEUE_ROI_HIGH):
+    queue_name = wizard_queue_name(asins)
+
+    if not should_use_rq_queue(queue_name):
 
         _append_job_note(
 
@@ -624,7 +627,7 @@ def dispatch_wizard_job(
 
     rq_job_id = _enqueue(
 
-        settings.RQ_QUEUE_ROI_HIGH,
+        queue_name,
 
         'auto_amazon.rq_tasks.run_wizard_job_task',
 
@@ -644,9 +647,9 @@ def dispatch_wizard_job(
 
     _set_job_rq_job_id(job_id, rq_job_id)
 
-    _append_job_note(job_id, '已加入 Worker 队列，等待执行…')
+    _append_job_note(job_id, f'已加入 Worker 队列（{wizard_route_label(asins)}），等待执行…')
 
-    logger.info('enqueued wizard job %s -> rq:%s', job_id, rq_job_id)
+    logger.info('enqueued wizard job %s -> %s rq:%s', job_id, queue_name, rq_job_id)
 
     return rq_job_id
 

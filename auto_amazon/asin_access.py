@@ -158,3 +158,65 @@ def user_imported_asin_codes(user: User) -> set[str]:
         if _ASIN_DIR.match(seg):
             out.add(seg)
     return out
+
+
+def bulk_assign_asin_folders(
+    asins: list[str],
+    users,
+    *,
+    assigned_by=None,
+) -> tuple[int, list[str]]:
+    """批量设置 ASIN 文件夹分配（覆盖各 ASIN 的被分配人列表）。"""
+    from django.db import transaction
+
+    from .models import AsinFolderAssignment
+
+    valid: list[str] = []
+    seen: set[str] = set()
+    for raw in asins:
+        a = normalize_asin(str(raw))
+        if not a or not _ASIN_DIR.match(a) or a in seen:
+            continue
+        seen.add(a)
+        valid.append(a)
+    if not valid:
+        return 0, []
+
+    user_list = list(users)
+    user_ids = sorted({int(u.id) for u in user_list})
+    assignee_labels = sorted({u.username for u in user_list})
+    through = AsinFolderAssignment.assignees.through
+
+    with transaction.atomic():
+        existing = set(
+            AsinFolderAssignment.objects.filter(asin__in=valid).values_list('asin', flat=True)
+        )
+        missing = [a for a in valid if a not in existing]
+        if missing:
+            AsinFolderAssignment.objects.bulk_create(
+                [
+                    AsinFolderAssignment(asin=a, assigned_by=assigned_by)
+                    for a in missing
+                ],
+                batch_size=500,
+            )
+
+        id_by_asin = dict(
+            AsinFolderAssignment.objects.filter(asin__in=valid).values_list('asin', 'id')
+        )
+        assignment_ids = list(id_by_asin.values())
+        through.objects.filter(asinfolderassignment_id__in=assignment_ids).delete()
+
+        if user_ids:
+            rows = [
+                through(asinfolderassignment_id=id_by_asin[a], user_id=uid)
+                for a in valid
+                if a in id_by_asin
+                for uid in user_ids
+            ]
+            through.objects.bulk_create(rows, batch_size=1000)
+
+        if assigned_by is not None:
+            AsinFolderAssignment.objects.filter(asin__in=valid).update(assigned_by=assigned_by)
+
+    return len(valid), assignee_labels

@@ -1,10 +1,13 @@
-"""凭证配置读写（SIF + 卖家精灵子账号等，与 scripts/asin_find_project/config_file 共用）。"""
+"""凭证配置读写（SIF + 卖家精灵单次/大批量子账号，与 config_file 共用）。"""
 from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Literal
 
 from django.conf import settings
+
+CredentialProfile = Literal['single', 'bulk']
 
 
 def config_dir() -> Path:
@@ -24,20 +27,20 @@ def sif_token_path() -> Path:
     return config_dir() / 'sif_token.txt'
 
 
-def seller_child_ids_path() -> Path:
-    return config_dir() / 'seller_child_ids.txt'
-
-
-def seller_username_path() -> Path:
-    return config_dir() / 'seller_username.txt'
-
-
-def seller_password_path() -> Path:
-    return config_dir() / 'seller_password.txt'
-
-
-def ao_lo_to_n_path() -> Path:
-    return config_dir() / 'ao_lo_to_n.txt'
+def _profile_paths(profile: CredentialProfile) -> dict[str, Path]:
+    if profile == 'bulk':
+        return {
+            'child_ids': config_dir() / 'seller_bulk_child_ids.txt',
+            'username': config_dir() / 'seller_bulk_username.txt',
+            'password': config_dir() / 'seller_bulk_password.txt',
+            'ao_lo_to_n': config_dir() / 'seller_bulk_ao_lo_to_n.txt',
+        }
+    return {
+        'child_ids': config_dir() / 'seller_child_ids.txt',
+        'username': config_dir() / 'seller_username.txt',
+        'password': config_dir() / 'seller_password.txt',
+        'ao_lo_to_n': config_dir() / 'ao_lo_to_n.txt',
+    }
 
 
 def _write_text(path: Path, value: str) -> None:
@@ -77,63 +80,63 @@ def _parse_child_ids(raw: str) -> list[str]:
     return ids
 
 
-def read_seller_child_ids() -> list[str]:
-    path = seller_child_ids_path()
+def read_seller_child_ids(profile: CredentialProfile = 'single') -> list[str]:
+    path = _profile_paths(profile)['child_ids']
     if not path.is_file():
         return []
     return _parse_child_ids(path.read_text(encoding='utf-8'))
 
 
-def write_seller_child_ids(ids: list[str]) -> None:
+def write_seller_child_ids(ids: list[str], profile: CredentialProfile = 'single') -> None:
     cleaned = [str(i).strip() for i in ids if str(i).strip()]
-    _write_text(seller_child_ids_path(), ','.join(cleaned))
+    _write_text(_profile_paths(profile)['child_ids'], ','.join(cleaned))
 
 
-def read_seller_username() -> str:
-    path = seller_username_path()
+def read_seller_username(profile: CredentialProfile = 'single') -> str:
+    path = _profile_paths(profile)['username']
     if not path.is_file():
         return ''
     return path.read_text(encoding='utf-8').strip()
 
 
-def write_seller_username(value: str) -> None:
-    _write_text(seller_username_path(), value)
+def write_seller_username(value: str, profile: CredentialProfile = 'single') -> None:
+    _write_text(_profile_paths(profile)['username'], value)
 
 
-def read_seller_password() -> str:
-    path = seller_password_path()
+def read_seller_password(profile: CredentialProfile = 'single') -> str:
+    path = _profile_paths(profile)['password']
     if not path.is_file():
         return ''
     return path.read_text(encoding='utf-8').strip()
 
 
-def write_seller_password(value: str) -> None:
-    _write_text(seller_password_path(), value)
+def write_seller_password(value: str, profile: CredentialProfile = 'single') -> None:
+    _write_text(_profile_paths(profile)['password'], value)
 
 
-def read_ao_lo_to_n() -> str:
-    """网页表单展示：原样读取，不改动用户保存的 Python 字面量。"""
+def read_ao_lo_to_n(profile: CredentialProfile = 'single') -> str:
+    """网页表单展示：原样读取。"""
     _ensure_script_path()
     from credentials_loader import read_ao_lo_to_n_raw
 
-    return read_ao_lo_to_n_raw()
+    return read_ao_lo_to_n_raw(profile=profile)
 
 
-def write_ao_lo_to_n(value: str) -> None:
-    """原样保存用户输入（如 "\\"5348...=\\""），写入 Cookie 时再求值。"""
-    _write_text(ao_lo_to_n_path(), (value or '').strip())
+def write_ao_lo_to_n(value: str, profile: CredentialProfile = 'single') -> None:
+    _write_text(_profile_paths(profile)['ao_lo_to_n'], (value or '').strip())
 
 
-def read_seller_credentials_form() -> dict:
+def read_seller_credentials_form(profile: CredentialProfile = 'single') -> dict:
     """供配置页表单展示（不向模板暴露明文密码）。"""
     _ensure_script_path()
     from credentials_loader import read_ao_lo_to_n_raw, resolve_ao_lo_to_n_for_cookie
 
-    child_ids = read_seller_child_ids()
-    ao_lo_raw = read_ao_lo_to_n_raw()
+    label = '单次计算（<20 ASIN）' if profile == 'single' else '大批量计算（≥20 ASIN）'
+    child_ids = read_seller_child_ids(profile)
+    ao_lo_raw = read_ao_lo_to_n_raw(profile=profile)
     ao_lo_resolved = resolve_ao_lo_to_n_for_cookie(ao_lo_raw) if ao_lo_raw else ''
-    username = read_seller_username()
-    has_password = bool(read_seller_password())
+    username = read_seller_username(profile)
+    has_password = bool(read_seller_password(profile))
     checklist = [
         {'label': '子账号 ID', 'done': bool(child_ids)},
         {'label': '登录用户名', 'done': bool(username)},
@@ -142,6 +145,8 @@ def read_seller_credentials_form() -> dict:
     ]
     done_count = sum(1 for x in checklist if x['done'])
     return {
+        'profile': profile,
+        'profile_label': label,
         'child_ids': ','.join(child_ids),
         'seller_username': username,
         'has_password': has_password,
@@ -167,7 +172,9 @@ def read_credentials_page_context() -> dict:
     """凭证配置页完整上下文。"""
     auth = read_sif_authorization()
     token_status = read_sif_token_status()
-    seller = read_seller_credentials_form()
+    seller = read_seller_credentials_form('single')
+    seller_bulk = read_seller_credentials_form('bulk')
+    bulk_threshold = int(getattr(settings, 'ROI_BULK_ASIN_THRESHOLD', 20))
     return {
         'authorization': auth,
         'has_authorization': bool(auth),
@@ -175,7 +182,10 @@ def read_credentials_page_context() -> dict:
         'token_status': token_status,
         'sif_ready': bool(auth) and bool(token_status.get('exists')),
         'seller': seller,
+        'seller_bulk': seller_bulk,
+        'bulk_asin_threshold': bulk_threshold,
         'ao_lo_preview': _mask_secret(seller.get('ao_lo_to_n') or '', head=12, tail=8),
+        'bulk_ao_lo_preview': _mask_secret(seller_bulk.get('ao_lo_to_n') or '', head=12, tail=8),
     }
 
 

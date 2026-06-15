@@ -24,6 +24,7 @@ urlpatterns = [
     path('upload-asin/', views.asin_upload_page, name='asin_upload'),
     path('upload-asin/export/<int:batch_id>/', views.asin_upload_export, name='asin_upload_export'),
     path('messages/', views.schedule_messages_page, name='schedule_messages'),
+    path('asin-image/<str:asin>/', views.asin_product_image, name='asin_product_image'),
     path('settings/credentials/', views.credentials_config_page, name='credentials_config'),
     path('settings/sif/', views.sif_config_page, name='sif_config'),
 

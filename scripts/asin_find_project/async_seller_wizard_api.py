@@ -231,7 +231,7 @@ async def save_cleaned_data_orign_to_excel(df: pd.DataFrame, keyword: str, asin:
     # df_deduplicated["reviews"] = pd.to_numeric(df_deduplicated["reviews"], errors="coerce")
 
     # 去重
-    df_deduplicated = df_deduplicated.drop_duplicates(subset=["brand", "parent"]).copy()
+    df_deduplicated = df_deduplicated.drop_duplicates(subset=["brand", "parent","asin"]).copy()
 
     # 去除广告位
     before_count = len(df_deduplicated)
@@ -338,13 +338,13 @@ async def save_top5_market_capacity_to_excel(price_cleaning_data: pd.DataFrame, 
     top5['是否1.3-1.5递增减'] = ''
     top5['模拟增长数'] = top5['totalUnits'].astype(float).copy()
 
-    # 4. 计算实际增长倍数和判断
+    # 4. 计算实际增长倍数和判断（基于真实销量，不变）
     for i in range(len(top5) - 1):
         current = top5.loc[i, 'totalUnits']
         next_val = top5.loc[i + 1, 'totalUnits']
         if next_val > 0:
             ratio = current / next_val
-            top5.loc[i, '实际增长倍数'] = round(ratio, 2)  # 保留两位小数
+            top5.loc[i, '实际增长倍数'] = round(ratio, 2)
             if 1.3 <= ratio <= 1.5:
                 top5.loc[i, '是否1.3-1.5递增减'] = '是'
             else:
@@ -356,24 +356,17 @@ async def save_top5_market_capacity_to_excel(price_cleaning_data: pd.DataFrame, 
         top5.loc[len(top5) - 1, '实际增长倍数'] = np.nan
         top5.loc[len(top5) - 1, '是否1.3-1.5递增减'] = '-'
 
-    # 5. 按新规则计算模拟增长数（以第二名为基准）
-    if len(top5) >= 2:
-        second_sales = top5.loc[1, 'totalUnits']
-        top5.loc[0, '模拟增长数'] = second_sales * 1.5
-        top5.loc[1, '模拟增长数'] = second_sales
-        for i in range(2, len(top5)):
-            top5.loc[i, '模拟增长数'] = second_sales / (1.5 ** (i - 1))
-    else:
-        # 如果只有一条数据，模拟增长数保持原销量
-        pass
+    # 5. 按新规则计算模拟增长数（以第五名 / 最后一名为基准，向上乘以1.3）
+    n = len(top5)
+    base_sales = top5.loc[n - 1, 'totalUnits']   # 最后一名的真实销量
+    for i in range(n):
+        # 第 i 名（0 为第一名）的等级 = n - 1 - i
+        top5.loc[i, '模拟增长数'] = round(base_sales * (1.3 ** (n - 1 - i)), 2)
 
-    # 5.1 模拟增长数保留两位小数
-    top5['模拟增长数'] = top5['模拟增长数'].round(2)
-
-    # 6. 全局统计值（站内月销上限 = 第一名实际销量，目标月销 = 上限/3）
+    # 6. 全局统计值（站内月销上限 = 第一名模拟增长数，目标月销 = 上限/3）
     top_actual = top5.loc[0, '模拟增长数']
-    total_upper_limit = round(top_actual, 2)  # 保留两位小数
-    target_monthly_sales = round(total_upper_limit / 3, 2)  # 保留两位小数
+    total_upper_limit = round(top_actual, 2)
+    target_monthly_sales = round(total_upper_limit / 3, 2)
 
     # 7. 构建明细表并重命名
     detail_df = top5[['totalUnits', '模拟增长数', '实际增长倍数', '是否1.3-1.5递增减']].copy()
@@ -761,11 +754,9 @@ async def calculate_ad_difficulty_for_asins(target_asins: list[str] | None = Non
     - ASIN 级 ranking_percent 取有效关键词最小值；若都不命中则为 0
     - 多 ASIN 并发（受 ROI_SCHEDULER_ASIN_MAX_CONCURRENT 限制）
     """
-    nested_result, _keyword_dict, source_map = await asyncio.to_thread(load_products_from_local_files)
-    if target_asins:
-        allow = {str(x).strip().upper() for x in target_asins if str(x).strip()}
-        nested_result = {a: m for a, m in nested_result.items() if str(a).strip().upper() in allow}
-        source_map = {a: m for a, m in source_map.items() if str(a).strip().upper() in allow}
+    nested_result, _keyword_dict, source_map = await asyncio.to_thread(
+        load_products_from_local_files, None, target_asins
+    )
     asin_price_dict = await advertisement_main(target_asins)
     if not nested_result:
         return {}
@@ -1825,12 +1816,16 @@ def normalize_excel_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def load_products_from_local_files(base_dir: Optional[Path] = None) -> tuple:
+def load_products_from_local_files(
+    base_dir: Optional[Path] = None,
+    asins: list[str] | None = None,
+) -> tuple:
     """
     自动扫描本地目录：file/{ASIN}/{关键词文件夹}/Search(*)-*-US-*.xlsx
     不依赖外部传入的关键词列表；ASIN 与关键词均来自文件夹名。
 
     :param base_dir: 数据根目录，默认 FILE_DATA_ROOT（即 ./file）
+    :param asins: 若指定则只扫描这些 ASIN 目录（避免 media 下数百个 ASIN 全量读 Excel）
     :return: (nested_result, keyword_dict, source_map)
         nested_result: {asin: {keyword_folder_name: [product_dict, ...]}}
         keyword_dict: {asin: [keyword_folder_name, ...]}，供后续加权月销等逻辑使用
@@ -1845,12 +1840,31 @@ def load_products_from_local_files(base_dir: Optional[Path] = None) -> tuple:
         print(f"警告：数据根目录不存在: {root.resolve()}")
         return nested, keyword_dict, source_map
 
-    for asin_dir in sorted(root.iterdir()):
-        if not asin_dir.is_dir():
-            continue
+    if asins is not None:
+        allow = {str(x).strip().upper() for x in asins if str(x).strip()}
+        if not allow:
+            print('定向扫描：ASIN 列表为空，跳过读盘')
+            return nested, keyword_dict, source_map
+        asin_dirs: list[Path] = []
+        for asin in sorted(allow):
+            if not ASIN_FOLDER_PATTERN.match(asin):
+                print(f'警告：跳过非法 ASIN 目录名: {asin}')
+                continue
+            asin_dir = root / asin
+            if asin_dir.is_dir():
+                asin_dirs.append(asin_dir)
+            else:
+                print(f'警告：ASIN 目录不存在: {asin_dir}')
+        print(f'定向扫描：仅读取 {len(asin_dirs)} 个 ASIN 目录（共指定 {len(allow)} 个）')
+    else:
+        asin_dirs = [
+            d for d in sorted(root.iterdir())
+            if d.is_dir() and ASIN_FOLDER_PATTERN.match(d.name.upper())
+        ]
+        print(f'全量扫描：未指定 ASIN，遍历 {len(asin_dirs)} 个目录')
+
+    for asin_dir in asin_dirs:
         asin = asin_dir.name.upper()
-        if not ASIN_FOLDER_PATTERN.match(asin):
-            continue
 
         nested[asin] = {}
         keyword_dict[asin] = []
@@ -1907,6 +1921,7 @@ async def seller_wizard_main(
         asins: list[str] | None = None,
         cost_overrides: dict | None = None,
 ):
+    emit_progress('seller_wizard_main 已开始…')
     FILE_DATA_ROOT.mkdir(parents=True, exist_ok=True)
     print(f"本地 Excel 根目录: {FILE_DATA_ROOT.resolve()}")
     try:
@@ -1916,15 +1931,17 @@ async def seller_wizard_main(
         print(f"警告: 获取淘宝 token 失败，图搜将尝试回落已有采购价: {e}")
         tokens = []
 
-    # 1. 从 file/{ASIN}/{关键词}/ 自动扫描 Excel（关键词列表由目录结构决定）
-    nested_result, keyword_dict, source_map = await asyncio.to_thread(load_products_from_local_files)
+    # 1. 从 file/{ASIN}/{关键词}/ 读取 Excel（指定 asins 时只扫对应目录，不全库遍历）
     if asins:
-        allow = {str(x).strip().upper() for x in asins if str(x).strip()}
-        nested_result = {a: m for a, m in nested_result.items() if a.upper() in allow}
-        keyword_dict = {a: kws for a, kws in keyword_dict.items() if a.upper() in allow}
-        source_map = {a: m for a, m in source_map.items() if a.upper() in allow}
+        n = len({str(x).strip().upper() for x in asins if str(x).strip()})
+        emit_progress(f'正在扫描本地 Excel（仅 {n} 个目标 ASIN，不全库扫盘）…')
+    else:
+        emit_progress('正在扫描本地 Excel（未指定 ASIN，全库扫盘）…')
+    nested_result, keyword_dict, source_map = await asyncio.to_thread(
+        load_products_from_local_files, None, asins
+    )
     target_asins = [str(a).strip().upper() for a in nested_result.keys()]
-    emit_progress(f'已扫描本地数据：共 {len(target_asins)} 个 ASIN')
+    emit_progress(f'已扫描本地数据：共 {len(target_asins)} 个 ASIN（读盘完成）')
     print("从本地扫描得到的 keyword_dict:", keyword_dict)
     if not target_asins:
         emit_progress(f'未在 {FILE_DATA_ROOT} 下发现 ASIN 数据')

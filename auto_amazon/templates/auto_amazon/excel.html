@@ -1053,6 +1053,9 @@
         alert('请至少选择一名用户。');
         return;
       }
+      var prevLabel = btnAssign.textContent;
+      btnAssign.disabled = true;
+      btnAssign.textContent = '分配中…（' + dirs.length + ' 个 ASIN）';
       fetch(assignUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrftoken },
@@ -1064,11 +1067,26 @@
         })
         .then(function (data) {
           if (!data.ok) throw new Error(data.error || '分配失败');
+          var labels = data.assignee_labels || [];
+          var asinSet = {};
+          dirs.forEach(function (d) {
+            asinSet[d] = true;
+          });
+          currentFolderItems.forEach(function (it) {
+            if (it.is_asin_dir && asinSet[(it.name || '').toUpperCase()]) {
+              it.assignees = labels.slice();
+              it.assigned = labels.length > 0;
+            }
+          });
+          renderFolderPage(currentPage);
           alert('已更新 ' + (data.updated != null ? data.updated : dirs.length) + ' 个 ASIN 的分配。');
-          selectFolder(currentFolderRel, folderTitle.textContent);
         })
         .catch(function (e) {
           alert(e.message || String(e));
+        })
+        .finally(function () {
+          btnAssign.disabled = false;
+          btnAssign.textContent = prevLabel;
         });
     });
   }

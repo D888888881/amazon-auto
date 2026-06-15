@@ -1,16 +1,38 @@
 # -*- coding: utf-8 -*-
-"""从 config_file 读取网页「凭证配置」保存的卖家精灵相关凭证。"""
+"""从 config_file 读取网页「凭证配置」保存的卖家精灵相关凭证（单次 / 大批量两套）。"""
 from __future__ import annotations
 
 import ast
+import os
 from pathlib import Path
 
 _CONFIG_DIR = Path(__file__).resolve().parent / 'config_file'
 
-_CHILD_IDS_FILE = _CONFIG_DIR / 'seller_child_ids.txt'
-_USERNAME_FILE = _CONFIG_DIR / 'seller_username.txt'
-_PASSWORD_FILE = _CONFIG_DIR / 'seller_password.txt'
-_AO_LO_TO_N_FILE = _CONFIG_DIR / 'ao_lo_to_n.txt'
+_PROFILE_FILES = {
+    'single': {
+        'child_ids': _CONFIG_DIR / 'seller_child_ids.txt',
+        'username': _CONFIG_DIR / 'seller_username.txt',
+        'password': _CONFIG_DIR / 'seller_password.txt',
+        'ao_lo_to_n': _CONFIG_DIR / 'ao_lo_to_n.txt',
+    },
+    'bulk': {
+        'child_ids': _CONFIG_DIR / 'seller_bulk_child_ids.txt',
+        'username': _CONFIG_DIR / 'seller_bulk_username.txt',
+        'password': _CONFIG_DIR / 'seller_bulk_password.txt',
+        'ao_lo_to_n': _CONFIG_DIR / 'seller_bulk_ao_lo_to_n.txt',
+    },
+}
+
+
+def credential_profile() -> str:
+    """Worker 环境变量 SELLER_CREDENTIAL_PROFILE：single | bulk。"""
+    p = os.environ.get('SELLER_CREDENTIAL_PROFILE', 'single').strip().lower()
+    return 'bulk' if p == 'bulk' else 'single'
+
+
+def _paths(profile: str | None = None) -> dict[str, Path]:
+    key = 'bulk' if (profile or credential_profile()) == 'bulk' else 'single'
+    return _PROFILE_FILES[key]
 
 
 def _read_text(path: Path) -> str:
@@ -19,8 +41,8 @@ def _read_text(path: Path) -> str:
     return path.read_text(encoding='utf-8').strip()
 
 
-def read_child_ids(*, default: list[str] | None = None) -> list[str]:
-    raw = _read_text(_CHILD_IDS_FILE)
+def read_child_ids(*, profile: str | None = None, default: list[str] | None = None) -> list[str]:
+    raw = _read_text(_paths(profile)['child_ids'])
     if not raw:
         return list(default or [])
     ids: list[str] = []
@@ -31,17 +53,17 @@ def read_child_ids(*, default: list[str] | None = None) -> list[str]:
     return ids
 
 
-def read_seller_username(*, default: str = '') -> str:
-    return _read_text(_USERNAME_FILE) or default
+def read_seller_username(*, profile: str | None = None, default: str = '') -> str:
+    return _read_text(_paths(profile)['username']) or default
 
 
-def read_seller_password(*, default: str = '') -> str:
-    return _read_text(_PASSWORD_FILE) or default
+def read_seller_password(*, profile: str | None = None, default: str = '') -> str:
+    return _read_text(_paths(profile)['password']) or default
 
 
-def read_ao_lo_to_n_raw() -> str:
-    """原样读取文件内容（保留 Python 字面量写法，如 "\\"TOKEN\\""）。"""
-    return _read_text(_AO_LO_TO_N_FILE)
+def read_ao_lo_to_n_raw(*, profile: str | None = None) -> str:
+    """原样读取文件内容（保留 Python 字面量写法）。"""
+    return _read_text(_paths(profile)['ao_lo_to_n'])
 
 
 def resolve_ao_lo_to_n_for_cookie(value: str) -> str:
@@ -57,7 +79,6 @@ def resolve_ao_lo_to_n_for_cookie(value: str) -> str:
     if not s:
         return ''
 
-    # 已是运行时格式："TOKEN="（仅首尾各一个双引号，无反斜杠）
     if (
         s.startswith('"')
         and s.endswith('"')
@@ -66,7 +87,6 @@ def resolve_ao_lo_to_n_for_cookie(value: str) -> str:
     ):
         return s
 
-    # Python 字符串字面量："\"TOKEN=\"" —— 与 ast.literal_eval 求值一致
     if '\\' in s or s.count('"') > 2:
         try:
             lit = s
@@ -78,7 +98,6 @@ def resolve_ao_lo_to_n_for_cookie(value: str) -> str:
         except (SyntaxError, ValueError):
             pass
 
-    # 兜底：去掉转义与多余引号后重建
     inner = s.replace('\\"', '"').replace("\\'", "'").strip()
     while len(inner) >= 2 and inner[0] == '"' and inner[-1] == '"':
         inner = inner[1:-1]
@@ -88,9 +107,9 @@ def resolve_ao_lo_to_n_for_cookie(value: str) -> str:
     return f'"{inner}"'
 
 
-def read_ao_lo_to_n(*, default: str = '') -> str:
+def read_ao_lo_to_n(*, profile: str | None = None, default: str = '') -> str:
     """供 Cookie 使用：读取文件并按 Python 字面量规则求值。"""
-    raw = read_ao_lo_to_n_raw()
+    raw = read_ao_lo_to_n_raw(profile=profile)
     if not raw:
         return default
     return resolve_ao_lo_to_n_for_cookie(raw)

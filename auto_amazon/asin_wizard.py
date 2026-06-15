@@ -19,6 +19,28 @@ def _wizard_exec_mode() -> str:
     return os.environ.get('ROI_WIZARD_EXEC_MODE', 'subprocess').strip().lower()
 
 
+def describe_wizard_runtime(*, job_exec_mode: str | None = None) -> str:
+    """
+    看板用：任务在哪跑、脚本怎么跑。
+    job_exec_mode: wizard job 上的 exec_mode（'rq' | 'thread' | None）
+    """
+    if job_exec_mode == 'rq':
+        host = 'RQ Worker 队列'
+    elif job_exec_mode == 'thread':
+        host = 'Web 后台线程'
+    else:
+        host = '当前进程'
+
+    mode = _wizard_exec_mode()
+    if mode == 'inprocess':
+        run = 'inprocess（进程内直接 import）'
+    elif mode == 'subprocess':
+        run = 'subprocess（独立子进程 django_runner）'
+    else:
+        run = mode
+    return f'{host} · {run}'
+
+
 def _parse_stdout_json(text: str, stderr_lines: list[str]) -> dict:
     """解析子进程 stdout；允许 BOM、前后空白，或混有杂项时提取第一个 JSON 对象/数组。"""
     s = text.lstrip('\ufeff').strip()
@@ -66,7 +88,7 @@ def _run_seller_wizard_subprocess(
     if not runner.is_file():
         raise FileNotFoundError(f'未找到脚本：{runner}')
     payload_obj = {'parity': parity}
-    if asins:
+    if asins is not None:
         payload_obj['asins'] = asins
     if cost_overrides:
         payload_obj['cost_overrides'] = cost_overrides

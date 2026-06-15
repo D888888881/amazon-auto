@@ -183,6 +183,7 @@
                     <th>分配人</th>
                     <th>是否校验</th>
                     <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=follow_status&amp;dir={% if sort == 'follow_status' and dir == 'asc' %}desc{% else %}asc{% endif %}">关注</a></th>
+                    <th class="col-product-img">产品图</th>
                     <th>运营难度1</th>
                     <th>运营难度2</th>
                     <th>运营难度3</th>
@@ -248,6 +249,15 @@
                                 <option value="priority" {% if row.follow_status == 'priority' %}selected{% endif %}>重点关注</option>
                             </select>
                         </form>
+                        {% endif %}
+                    </td>
+                    <td class="col-product-img">
+                        {% if row.product_image_url %}
+                        <button type="button" class="dash-product-thumb-btn js-product-image-open" data-image-url="{{ row.product_image_url }}" title="点击查看 {{ row.asin }} 产品图" aria-label="查看 {{ row.asin }} 产品图">
+                            <img src="{{ row.product_image_url }}" alt="" class="dash-product-thumb" loading="lazy" decoding="async" width="40" height="40">
+                        </button>
+                        {% else %}
+                        <span class="dash-product-thumb--empty">—</span>
                         {% endif %}
                     </td>
                     <td class="col-ops-chart">{% include "auto_amazon/_ops_cell.html" with payload=row.ops_difficulty_1 row_pk=row.pk slot=1 ops_readonly=row.ops_readonly %}</td>
@@ -319,6 +329,14 @@
     </div>
   </form>
 </dialog>
+
+<div id="dash-image-lightbox" class="dash-image-lightbox" hidden>
+    <button type="button" class="dash-image-lightbox__backdrop js-product-image-close" aria-label="关闭"></button>
+    <div class="dash-image-lightbox__panel" role="dialog" aria-modal="true" aria-label="产品图预览">
+        <button type="button" class="dash-image-lightbox__close js-product-image-close" aria-label="关闭">&times;</button>
+        <img src="" alt="" class="dash-image-lightbox__img" id="dash-image-lightbox-img">
+    </div>
+</div>
 
 <script>
 (function () {
@@ -687,6 +705,43 @@
       }
     });
   }
+
+  (function initProductImageLightbox() {
+    var lightbox = document.getElementById('dash-image-lightbox');
+    var lightboxImg = document.getElementById('dash-image-lightbox-img');
+    if (!lightbox || !lightboxImg) return;
+
+    function closeLightbox() {
+      lightbox.hidden = true;
+      lightboxImg.removeAttribute('src');
+      document.body.classList.remove('dash-image-lightbox-open');
+    }
+
+    function openLightbox(url) {
+      if (!url) return;
+      lightboxImg.src = url;
+      lightbox.hidden = false;
+      document.body.classList.add('dash-image-lightbox-open');
+    }
+
+    document.addEventListener('click', function (e) {
+      var btn = e.target.closest('.js-product-image-open');
+      if (btn) {
+        e.preventDefault();
+        openLightbox(btn.getAttribute('data-image-url'));
+        return;
+      }
+      if (e.target.closest('.js-product-image-close')) {
+        closeLightbox();
+      }
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && !lightbox.hidden) {
+        closeLightbox();
+      }
+    });
+  })();
 })();
 </script>
 {% block page_scripts %}

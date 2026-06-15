@@ -48,7 +48,11 @@ async def _main():
         file=sys.stderr,
         flush=True,
     )
-    result = await seller_wizard_main(parity, asins=asins or None, cost_overrides=cost_overrides or None)
+    result = await seller_wizard_main(
+        parity,
+        asins=asins,
+        cost_overrides=cost_overrides or None,
+    )
     print('PROGRESS:分析完成，正在序列化结果…', file=sys.stderr, flush=True)
     return _to_jsonable(result)
 

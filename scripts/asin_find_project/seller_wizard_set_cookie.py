@@ -1,15 +1,18 @@
 import asyncio
+import os
 
 import httpx
 
-from credentials_loader import read_ao_lo_to_n
-
 
 def _apply_ao_lo_to_n_cookie(cookies: dict) -> None:
-    val = read_ao_lo_to_n()
-    print(val)
+    from credentials_loader import credential_profile, read_ao_lo_to_n
+
+    val = read_ao_lo_to_n(profile=credential_profile())
     if val:
         cookies['ao_lo_to_n'] = val
+
+
+_LOGIN_TIMEOUT_SEC = float(os.environ.get('SELLER_LOGIN_TIMEOUT_SEC', '90'))
 
 
 async def get_seller_wizard_set_cookie(username: str, password: str =''):
@@ -61,7 +64,7 @@ async def get_seller_wizard_set_cookie(username: str, password: str =''):
         "_ga_CN0F80S6GL": "GS2.1.s1780383025$o102$g1$t1780383513$j11$l0$h0",
         "_ga_38NCVF2XST": "GS2.1.s1780383025$o60$g1$t1780383513$j11$l0$h1266767465"
     }
-    # _apply_ao_lo_to_n_cookie(cookies)
+    _apply_ao_lo_to_n_cookie(cookies)
     url = "https://www.sellersprite.com/w/user/signin"
     data = {
         "callback": "",
@@ -70,8 +73,7 @@ async def get_seller_wizard_set_cookie(username: str, password: str =''):
         "password": password,
         "autoLogin": "Y"
     }
-    print(cookies)
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(_LOGIN_TIMEOUT_SEC)) as client:
         # 设置初始 cookies
         client.cookies.update(cookies)
 

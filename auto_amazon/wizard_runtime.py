@@ -96,7 +96,11 @@ def run_seller_wizard_inprocess(
     cost_overrides: dict | None = None,
     on_stderr_line: Callable[[str], None] | None = None,
 ) -> dict:
+    if on_stderr_line:
+        on_stderr_line('PROGRESS:inprocess 模式：正在准备脚本环境…')
     with asin_script_cwd():
+        if on_stderr_line:
+            on_stderr_line('PROGRESS:正在加载 seller_wizard 模块（首次可能较慢）…')
         from async_seller_wizard_api import seller_wizard_main
 
         old_stderr = sys.stderr
@@ -110,7 +114,7 @@ def run_seller_wizard_inprocess(
             raw = asyncio.run(
                 seller_wizard_main(
                     parity,
-                    asins=asins or None,
+                    asins=asins,
                     cost_overrides=cost_overrides or None,
                 )
             )

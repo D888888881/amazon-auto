@@ -145,7 +145,7 @@ MEDIA_ROOT = BASE_DIR / 'media'
 DATA_UPLOAD_MAX_MEMORY_SIZE = 64 * 1024 * 1024
 FILE_UPLOAD_MAX_MEMORY_SIZE = 64 * 1024 * 1024
 # 合并后的 ZIP 总大小上限（与 media_import_staging 一致）
-EXCEL_IMPORT_MAX_BYTES = 600 * 1024 * 1024
+EXCEL_IMPORT_MAX_BYTES = 2048 * 1024 * 1024
 
 LOGIN_URL = 'login'
 LOGIN_REDIRECT_URL = 'index'
@@ -196,7 +196,10 @@ if _roi_use_rq_raw is None:
 else:
     ROI_USE_RQ = _roi_use_rq_raw.lower() in ('1', 'true', 'yes', 'on')
 ROI_WIZARD_EXEC_MODE = os.environ.get('ROI_WIZARD_EXEC_MODE', 'subprocess')  # worker 容器设为 inprocess
-RQ_QUEUE_ROI_HIGH = os.environ.get('RQ_QUEUE_ROI_HIGH', 'roi_high')
+ROI_BULK_ASIN_THRESHOLD = int(os.environ.get('ROI_BULK_ASIN_THRESHOLD', '20'))
+RQ_QUEUE_ROI_SINGLE = os.environ.get('RQ_QUEUE_ROI_SINGLE', 'roi_single')
+RQ_QUEUE_ROI_BULK = os.environ.get('RQ_QUEUE_ROI_BULK', 'roi_bulk')
+RQ_QUEUE_ROI_HIGH = os.environ.get('RQ_QUEUE_ROI_HIGH', RQ_QUEUE_ROI_SINGLE)
 RQ_QUEUE_ROI_DEFAULT = os.environ.get('RQ_QUEUE_ROI_DEFAULT', 'roi_default')
 RQ_QUEUE_ROI_SCHEDULED = os.environ.get('RQ_QUEUE_ROI_SCHEDULED', 'roi_scheduled')
 RQ_JOB_TIMEOUT = int(os.environ.get('RQ_JOB_TIMEOUT', '86400'))  # 秒，默认 24h
@@ -209,6 +212,14 @@ if REDIS_PASSWORD:
     _redis_url = f'redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}'
 
 RQ_QUEUES = {
+    RQ_QUEUE_ROI_SINGLE: {
+        'URL': _redis_url,
+        'DEFAULT_TIMEOUT': RQ_JOB_TIMEOUT,
+    },
+    RQ_QUEUE_ROI_BULK: {
+        'URL': _redis_url,
+        'DEFAULT_TIMEOUT': RQ_JOB_TIMEOUT,
+    },
     RQ_QUEUE_ROI_HIGH: {
         'URL': _redis_url,
         'DEFAULT_TIMEOUT': RQ_JOB_TIMEOUT,

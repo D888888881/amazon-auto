@@ -60,6 +60,7 @@ def api_slot(name: str, *, max_slots: int | None = None, wait_sec: float = 300):
     deadline = time.time() + wait_sec
     acquired = False
     r = None
+    wait_start = time.time()
 
     try:
         r = _redis_client()
@@ -70,6 +71,18 @@ def api_slot(name: str, *, max_slots: int | None = None, wait_sec: float = 300):
                 r.zadd(holders_key, {token: now})
                 acquired = True
                 break
+            waited = int(now - wait_start)
+            if waited > 0 and waited % 10 == 0:
+                try:
+                    from wizard_progress import emit_progress_throttled
+
+                    emit_progress_throttled(
+                        f'等待 API 并发槽位 {name}（已 {waited}s，上限 {limit}）…',
+                        key=f'api_slot:{name}',
+                        interval_sec=10.0,
+                    )
+                except Exception:
+                    pass
             time.sleep(0.25 + (time.time() % 0.15))
         if not acquired:
             raise TimeoutError(f'等待 API 槽位 {name} 超时（limit={limit}）')

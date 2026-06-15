@@ -20,9 +20,9 @@ def resolve_seller_username(explicit: str | None = None) -> str:
     if env:
         return env
     try:
-        from credentials_loader import read_seller_username
+        from credentials_loader import credential_profile, read_seller_username
 
-        cfg = read_seller_username()
+        cfg = read_seller_username(profile=credential_profile())
         if cfg:
             return cfg
     except ImportError:
@@ -37,9 +37,9 @@ def resolve_seller_password(explicit: str | None = None) -> str:
     if env:
         return env
     try:
-        from credentials_loader import read_seller_password
+        from credentials_loader import credential_profile, read_seller_password
 
-        cfg = read_seller_password()
+        cfg = read_seller_password(profile=credential_profile())
         if cfg:
             return cfg
     except ImportError:
@@ -187,9 +187,9 @@ def _unlock_sub_account_sync() -> tuple[bool, str]:
     from unlock_seller_info import activate_children
 
     try:
-        from credentials_loader import read_child_ids
+        from credentials_loader import credential_profile, read_child_ids
 
-        child_ids = read_child_ids()
+        child_ids = read_child_ids(profile=credential_profile())
     except ImportError:
         child_ids = []
     if child_ids:
@@ -209,9 +209,11 @@ async def ensure_seller_login(
     若被禁用则自动调用 unlock_seller_info 解禁后重试一次。
     """
     from seller_wizard_set_cookie import set_cookie_main
+    from wizard_progress import emit_progress
 
     username = resolve_seller_username(username)
     password = resolve_seller_password(password)
+    login_timeout = float(os.environ.get('SELLER_LOGIN_TIMEOUT_SEC', '90'))
 
     if not force_refresh and not unlock_attempted:
         cached = _login_cache.get(username)
@@ -228,7 +230,16 @@ async def ensure_seller_login(
                 if cfg.get('rank-login-user') and cfg.get('Sprite-X-Token'):
                     return cfg
 
-        config = await set_cookie_main(username, password)
+        emit_progress(f'正在登录卖家精灵子账号 {username}…')
+        try:
+            config = await asyncio.wait_for(
+                set_cookie_main(username, password),
+                timeout=login_timeout,
+            )
+        except asyncio.TimeoutError as exc:
+            raise SellerAccountBannedError(
+                f'登录卖家精灵超时（{login_timeout:.0f}s），请检查服务器能否访问 www.sellersprite.com'
+            ) from exc
         if config.get('rank-login-user') and config.get('rank-login-user-info'):
             _login_cache[username] = (time.time(), dict(config))
             return config
@@ -240,13 +251,13 @@ async def ensure_seller_login(
             f'卖家精灵子账号 {username} 解禁后仍无法登录（缺少 rank-login-user）'
         )
 
-    print(f'检测到子账号 {username} 被禁用，正在调用 unlock_seller_info 解禁…')
+    emit_progress(f'检测到子账号 {username} 被禁用，正在调用 unlock_seller_info 解禁…')
     clear_seller_login_cache(username)
     ok, msg = await asyncio.to_thread(_unlock_sub_account_sync)
     if not ok:
         raise SellerAccountBannedError(f'自动解禁失败：{msg}')
 
-    print('解禁完成，正在重新登录子账号…')
+    emit_progress('解禁完成，正在重新登录子账号…')
     return await ensure_seller_login(
         username, password, unlock_attempted=True, force_refresh=True
     )

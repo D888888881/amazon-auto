@@ -37,7 +37,7 @@ from .resilient_wizard import (
     run_roi_asins_sequential,
     use_sequential_roi,
 )
-from .asin_wizard import run_seller_wizard
+from .asin_wizard import describe_wizard_runtime, run_seller_wizard
 from .excel_io import (
     read_active_sheet_rich,
     save_sheet_values_preserving_format,
@@ -48,6 +48,7 @@ from .forms import RegisterForm
 from .media_paths import media_root, parent_rel, safe_media_path_global
 from .dashboard_ops_filter import run_dashboard_ops_filter
 from .asin_access import (
+    bulk_assign_asin_folders,
     dedupe_dashboard_rows,
     normalize_asin,
     resolve_dashboard_row_for_persist,
@@ -57,6 +58,12 @@ from .asin_access import (
     user_can_operate_dashboard_row,
     user_dashboard_rows_qs,
     user_imported_asin_codes,
+)
+from .asin_product_image import (
+    attach_product_image_urls,
+    find_asin_image_file,
+    guess_image_content_type,
+    user_can_view_asin_product_image,
 )
 from .excel_import_utils import ensure_dir_nodes_registered, extract_zip_to_media_root
 from .media_import_staging import (
@@ -1096,6 +1103,7 @@ def index(request):
         viewer_is_superuser,
         roi_verified_asins=verified_norm,
     )
+    attach_product_image_urls(rows)
     for r in rows:
         r.data_updated_at = updated_stamp_map.get(normalize_asin(r.asin))
     page_start = page_obj.number
@@ -1415,126 +1423,131 @@ def _run_wizard_job(
         close_old_connections()
         return
     try:
+        from .roi_routing import wizard_credential_profile_context
 
-        def on_line(line: str) -> None:
-            if line.startswith('PROGRESS:'):
-                line = line[9:].strip() or line
+        with wizard_credential_profile_context(asins):
+            def on_line(line: str) -> None:
+                if line.startswith('PROGRESS:'):
+                    line = line[9:].strip() or line
+                ent = cache.get(key) or {}
+                prog = ent.get('progress', [])
+                short = line[:500] if len(line) > 500 else line
+                prog.append(short)
+                if len(prog) > 160:
+                    prog = prog[-160:]
+                ent['progress'] = prog
+                ent['status'] = 'running'
+                ent['user_id'] = user_id
+                cache.set(key, ent, WIZARD_JOB_TTL)
+
             ent = cache.get(key) or {}
-            prog = ent.get('progress', [])
-            short = line[:500] if len(line) > 500 else line
-            prog.append(short)
-            if len(prog) > 160:
-                prog = prog[-160:]
-            ent['progress'] = prog
-            ent['status'] = 'running'
-            ent['user_id'] = user_id
-            cache.set(key, ent, WIZARD_JOB_TTL)
+            if ent.get('status') == 'queued':
+                ent['status'] = 'running'
+                prog = ent.get('progress', [])
+                prog.append('Worker 已开始执行 ROI 计算…')
+                ent['progress'] = prog
+                cache.set(key, ent, WIZARD_JOB_TTL)
 
-        ent = cache.get(key) or {}
-        if ent.get('status') == 'queued':
-            ent['status'] = 'running'
-            prog = ent.get('progress', [])
-            prog.append('Worker 已开始执行 ROI 计算…')
-            ent['progress'] = prog
-            cache.set(key, ent, WIZARD_JOB_TTL)
+            def on_progress(msg: str) -> None:
+                on_line(msg)
 
-        def on_progress(msg: str) -> None:
-            on_line(msg)
+            asin_list = ordered_unique_asins(asins)
+            cost_overrides = _merge_cost_overrides_from_db(asin_list or asins, cost_overrides)
+            written = 0
 
-        asin_list = ordered_unique_asins(asins)
-        cost_overrides = _merge_cost_overrides_from_db(asin_list or asins, cost_overrides)
-        written = 0
+            if asin_list:
+                if use_sequential_roi():
+                    def _persist_one(asin: str, part: dict) -> None:
+                        nonlocal written
+                        row_ids = None
+                        if target_row_ids and asin in target_row_ids:
+                            row_ids = {asin: target_row_ids[asin]}
+                        written += _persist_wizard_results(
+                            user_id, part, parity, target_row_ids=row_ids
+                        )
 
-        if asin_list:
-            if use_sequential_roi():
-                def _persist_one(asin: str, part: dict) -> None:
-                    nonlocal written
-                    row_ids = None
-                    if target_row_ids and asin in target_row_ids:
-                        row_ids = {asin: target_row_ids[asin]}
-                    written += _persist_wizard_results(
-                        user_id, part, parity, target_row_ids=row_ids
+                    def _on_asin_failed(failure: AsinFailure) -> None:
+                        ent = cache.get(key) or {}
+                        ent['success_count'] = len(ent.get('succeeded_asins', []))
+                        failed = list(ent.get('failed_asins', []))
+                        if failure.asin not in failed:
+                            failed.append(failure.asin)
+                        ent['failed_asins'] = failed
+                        ent['fail_count'] = len(failed)
+                        failures = list(ent.get('failures', []))
+                        failures.append(
+                            {
+                                'asin': failure.asin,
+                                'error': failure.error,
+                                'attempts': failure.attempts,
+                            }
+                        )
+                        ent['failures'] = failures[-200:]
+                        cache.set(key, ent, WIZARD_JOB_TTL)
+
+                    batch = run_roi_asins_sequential(
+                        asin_list,
+                        parity,
+                        cost_overrides=cost_overrides,
+                        on_stderr_line=on_line,
+                        on_progress=on_progress,
+                        on_asin_done=_persist_one,
+                        on_asin_failed=_on_asin_failed,
                     )
-
-                def _on_asin_failed(failure: AsinFailure) -> None:
-                    ent = cache.get(key) or {}
-                    ent['success_count'] = len(ent.get('succeeded_asins', []))
-                    failed = list(ent.get('failed_asins', []))
-                    if failure.asin not in failed:
-                        failed.append(failure.asin)
-                    ent['failed_asins'] = failed
-                    ent['fail_count'] = len(failed)
-                    failures = list(ent.get('failures', []))
-                    failures.append(
-                        {
-                            'asin': failure.asin,
-                            'error': failure.error,
-                            'attempts': failure.attempts,
-                        }
+                else:
+                    on_progress(
+                        f'批量计算 ROI：共 {len(asin_list)} 个 ASIN'
+                        f'（一次拉取卖家精灵数据，请勿与逐个模式混淆）…'
                     )
-                    ent['failures'] = failures[-200:]
-                    cache.set(key, ent, WIZARD_JOB_TTL)
-
-                batch = run_roi_asins_sequential(
-                    asin_list,
-                    parity,
-                    cost_overrides=cost_overrides,
-                    on_stderr_line=on_line,
-                    on_progress=on_progress,
-                    on_asin_done=_persist_one,
-                    on_asin_failed=_on_asin_failed,
+                    ent_mode = (cache.get(key) or {}).get('exec_mode')
+                    runtime_hint = describe_wizard_runtime(job_exec_mode=ent_mode)
+                    on_progress(f'即将登录卖家精灵并拉取 FBA/广告（{runtime_hint}）…')
+                    merged = run_seller_wizard(
+                        asin_list,
+                        parity,
+                        cost_overrides=cost_overrides,
+                        on_stderr_line=on_line,
+                    )
+                    failure_details = None
+                    if isinstance(merged, dict):
+                        failure_details = merged.pop('__roi_failures__', None)
+                    written = _persist_wizard_results(
+                        user_id,
+                        merged,
+                        parity,
+                        target_row_ids=target_row_ids,
+                    )
+                    batch = batch_result_from_wizard_output(
+                        asin_list, merged, failure_details
+                    )
+                    on_progress(batch.summary_text())
+                    for failure in batch.failures[:30]:
+                        on_progress(f'  {failure.asin}: {failure.error}')
+                    if len(batch.failures) > 30:
+                        on_progress(f'  … 另有 {len(batch.failures) - 30} 个失败 ASIN')
+                _apply_batch_result_to_job(
+                    key,
+                    user_id=user_id,
+                    batch=batch,
+                    rows_written=written,
                 )
             else:
-                on_progress(
-                    f'批量计算 ROI：共 {len(asin_list)} 个 ASIN'
-                    f'（一次拉取卖家精灵数据，请勿与逐个模式混淆）…'
+                result = run_seller_wizard(
+                    asins, parity, cost_overrides=cost_overrides, on_stderr_line=on_line
                 )
-                merged = run_seller_wizard(
-                    asin_list,
-                    parity,
-                    cost_overrides=cost_overrides,
-                    on_stderr_line=on_line,
-                )
-                failure_details = None
-                if isinstance(merged, dict):
-                    failure_details = merged.pop('__roi_failures__', None)
                 written = _persist_wizard_results(
-                    user_id,
-                    merged,
-                    parity,
-                    target_row_ids=target_row_ids,
+                    user_id, result, parity, target_row_ids=target_row_ids
                 )
-                batch = batch_result_from_wizard_output(
-                    asin_list, merged, failure_details
-                )
-                on_progress(batch.summary_text())
-                for failure in batch.failures[:30]:
-                    on_progress(f'  {failure.asin}: {failure.error}')
-                if len(batch.failures) > 30:
-                    on_progress(f'  … 另有 {len(batch.failures) - 30} 个失败 ASIN')
-            _apply_batch_result_to_job(
-                key,
-                user_id=user_id,
-                batch=batch,
-                rows_written=written,
-            )
-        else:
-            result = run_seller_wizard(
-                asins, parity, cost_overrides=cost_overrides, on_stderr_line=on_line
-            )
-            written = _persist_wizard_results(
-                user_id, result, parity, target_row_ids=target_row_ids
-            )
-            ent = cache.get(key) or {}
-            ent['status'] = 'done'
-            ent['rows_written'] = written
-            ent['success_count'] = written
-            ent['fail_count'] = 0
-            ent['failed_asins'] = []
-            ent['failures'] = []
-            ent['redirect'] = reverse('index')
-            ent['user_id'] = user_id
-            cache.set(key, ent, 900)
+                ent = cache.get(key) or {}
+                ent['status'] = 'done'
+                ent['rows_written'] = written
+                ent['success_count'] = written
+                ent['fail_count'] = 0
+                ent['failed_asins'] = []
+                ent['failures'] = []
+                ent['redirect'] = reverse('index')
+                ent['user_id'] = user_id
+                cache.set(key, ent, 900)
     except Exception as e:
         import traceback
 
@@ -1871,11 +1884,35 @@ def compute_roi_page(request):
 
 
 @login_required
+@require_GET
+def asin_product_image(request, asin: str):
+    """返回 ASIN 产品主图（仅看板可见用户可访问）。"""
+    a = normalize_asin(asin)
+    if not re.match(r'^B0[A-Z0-9]{8}$', a):
+        raise Http404
+    if not user_can_view_asin_product_image(request.user, a):
+        raise Http404
+    path = find_asin_image_file(a)
+    if not path:
+        raise Http404
+    response = FileResponse(path.open('rb'), content_type=guess_image_content_type(path))
+    response['Cache-Control'] = 'private, max-age=86400'
+    return response
+
+
+@login_required
 def schedule_messages_page(request):
-    """定时任务推送消息：普通用户仅看发给自己的消息。"""
+    """定时任务推送消息：上传者、被分配者及数据归属用户均可见。"""
     qs = ScheduledTaskMessage.objects.select_related('recipient', 'dashboard_row')
     if not request.user.is_superuser:
-        qs = qs.filter(recipient=request.user)
+        assigned = user_assigned_asin_codes(request.user)
+        import_roots = user_imported_asin_codes(request.user)
+        qs = qs.filter(
+            Q(recipient=request.user)
+            | Q(asin__in=assigned)
+            | Q(asin__in=import_roots)
+            | Q(dashboard_row__user=request.user)
+        ).distinct()
 
     alert_filter = (request.GET.get('alert') or '').strip().lower()
     if alert_filter == 'alert':
@@ -1972,33 +2009,61 @@ def credentials_config_page(request):
             child_raw = (request.POST.get('child_ids') or '').strip()
             child_ids = [x.strip() for x in child_raw.replace('\n', ',').split(',') if x.strip()]
             if not child_ids:
-                messages.error(request, '子账号 ID 不能为空。')
+                messages.error(request, '单次计算：子账号 ID 不能为空。')
                 return redirect('credentials_config')
 
             username = (request.POST.get('seller_username') or '').strip()
             if not username:
-                messages.error(request, '子账号用户名不能为空。')
+                messages.error(request, '单次计算：子账号用户名不能为空。')
                 return redirect('credentials_config')
 
             password_in = (request.POST.get('seller_password') or '').strip()
             ao_lo_to_n = (request.POST.get('ao_lo_to_n') or '').strip()
             auth = (request.POST.get('authorization') or '').strip()
 
-            write_seller_child_ids(child_ids)
-            write_seller_username(username)
+            write_seller_child_ids(child_ids, profile='single')
+            write_seller_username(username, profile='single')
             if password_in:
-                write_seller_password(password_in)
-            elif not read_seller_password():
-                messages.error(request, '首次配置须填写子账号密码。')
+                write_seller_password(password_in, profile='single')
+            elif not read_seller_password('single'):
+                messages.error(request, '单次计算：首次配置须填写子账号密码。')
                 return redirect('credentials_config')
-            write_ao_lo_to_n(ao_lo_to_n)
+            write_ao_lo_to_n(ao_lo_to_n, profile='single')
+
+            bulk_child_raw = (request.POST.get('bulk_child_ids') or '').strip()
+            bulk_child_ids = [
+                x.strip() for x in bulk_child_raw.replace('\n', ',').split(',') if x.strip()
+            ]
+            if not bulk_child_ids:
+                messages.error(request, '大批量计算：子账号 ID 不能为空。')
+                return redirect('credentials_config')
+
+            bulk_username = (request.POST.get('bulk_seller_username') or '').strip()
+            if not bulk_username:
+                messages.error(request, '大批量计算：子账号用户名不能为空。')
+                return redirect('credentials_config')
+
+            bulk_password_in = (request.POST.get('bulk_seller_password') or '').strip()
+            bulk_ao_lo_to_n = (request.POST.get('bulk_ao_lo_to_n') or '').strip()
+
+            write_seller_child_ids(bulk_child_ids, profile='bulk')
+            write_seller_username(bulk_username, profile='bulk')
+            if bulk_password_in:
+                write_seller_password(bulk_password_in, profile='bulk')
+            elif not read_seller_password('bulk'):
+                messages.error(request, '大批量计算：首次配置须填写子账号密码。')
+                return redirect('credentials_config')
+            write_ao_lo_to_n(bulk_ao_lo_to_n, profile='bulk')
+
             write_sif_authorization(auth)
 
-            messages.success(request, '凭证已保存。')
+            messages.success(request, '凭证已保存（单次 + 大批量卖家精灵账号）。')
             if not auth:
                 messages.warning(request, 'SIF authorization 为空，CPC 将使用默认值直至填写。')
             if not ao_lo_to_n:
-                messages.warning(request, 'ao_lo_to_n 为空，卖家精灵登录可能失败，请尽快填写。')
+                messages.warning(request, '单次计算 ao_lo_to_n 为空，登录可能失败，请尽快填写。')
+            if not bulk_ao_lo_to_n:
+                messages.warning(request, '大批量计算 ao_lo_to_n 为空，登录可能失败，请尽快填写。')
         return redirect('credentials_config')
 
     return render(request, 'auto_amazon/credentials_config.html', read_credentials_page_context())
@@ -2200,6 +2265,16 @@ def excel_browse(request):
     if not target.is_dir():
         return JsonResponse({'ok': False, 'error': '不是文件夹'}, status=400)
     try:
+        entries = sorted(target.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
+    except OSError as e:
+        return JsonResponse({'ok': False, 'error': str(e)}, status=400)
+    asin_names_in_view: list[str] = []
+    for p in entries:
+        if p.is_dir() and not p.name.startswith('.'):
+            nm = p.name.strip().upper()
+            if re.match(r'^B0[A-Z0-9]{8}$', nm):
+                asin_names_in_view.append(nm)
+    try:
         dashboard_asins = {
             normalize_asin(a) for a in AsinDashboardRow.objects.values_list('asin', flat=True)
         }
@@ -2211,10 +2286,14 @@ def excel_browse(request):
             for a, t in AsinDataUpdateStamp.objects.values_list('asin', 'updated_at')
         }
         assign_map: dict[str, list[str]] = {}
-        for obj in AsinFolderAssignment.objects.prefetch_related('assignees').all():
-            assign_map[normalize_asin(obj.asin)] = sorted(
-                {u.username for u in obj.assignees.all()}
-            )
+        if asin_names_in_view:
+            for obj in (
+                AsinFolderAssignment.objects.filter(asin__in=asin_names_in_view)
+                .prefetch_related('assignees')
+            ):
+                assign_map[normalize_asin(obj.asin)] = sorted(
+                    {u.username for u in obj.assignees.all()}
+                )
         assigned_set = set(user_assigned_asin_codes(request.user)) if not is_super else set()
         import_roots = user_imported_asin_codes(request.user) if not is_super else set()
         owned_paths = set()
@@ -2229,13 +2308,27 @@ def excel_browse(request):
             else:
                 owned_paths = set(oq.values_list('rel_path', flat=True))
         uploaders_by_asin: dict[str, set[str]] = defaultdict(set)
-        for rpath, uname in ImportedMediaPath.objects.values_list('rel_path', 'user__username'):
-            rp = str(rpath).replace('\\', '/').strip('/')
-            if not rp:
-                continue
-            seg = rp.split('/')[0].strip().upper()
-            if re.match(r'^B0[A-Z0-9]{8}$', seg):
-                uploaders_by_asin[seg].add(uname)
+        if rel == '' and asin_names_in_view:
+            asins_in_view = set(asin_names_in_view)
+            for rpath, uname in ImportedMediaPath.objects.values_list(
+                'rel_path', 'user__username'
+            ):
+                rp = str(rpath).replace('\\', '/').strip('/')
+                if not rp:
+                    continue
+                seg = rp.split('/')[0].strip().upper()
+                if seg in asins_in_view:
+                    uploaders_by_asin[seg].add(uname)
+        elif rel != '':
+            for rpath, uname in ImportedMediaPath.objects.filter(
+                Q(rel_path=rel) | Q(rel_path__startswith=f'{rel}/')
+            ).values_list('rel_path', 'user__username'):
+                rp = str(rpath).replace('\\', '/').strip('/')
+                if not rp:
+                    continue
+                seg = rp.split('/')[0].strip().upper()
+                if re.match(r'^B0[A-Z0-9]{8}$', seg):
+                    uploaders_by_asin[seg].add(uname)
     except DatabaseError as e:
         return JsonResponse(
             {
@@ -2249,10 +2342,6 @@ def excel_browse(request):
         )
     uploaded_by_filter = (request.GET.get('uploaded_by') or '').strip()
     items = []
-    try:
-        entries = sorted(target.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
-    except OSError as e:
-        return JsonResponse({'ok': False, 'error': str(e)}, status=400)
     path_batch: list[str] = []
     for p in entries:
         if p.name.startswith('.'):
@@ -2984,17 +3073,18 @@ def excel_assign_folders(request):
         user_ids = []
     uid_set = {int(x) for x in user_ids if str(x).isdigit()}
     users = list(User.objects.filter(pk__in=uid_set, is_active=True))
-    updated = 0
-    for raw in asins_raw:
-        a = normalize_asin(str(raw))
-        if not re.match(r'^B0[A-Z0-9]{8}$', a):
-            continue
-        obj, _created = AsinFolderAssignment.objects.get_or_create(asin=a)
-        obj.assignees.set(users)
-        obj.assigned_by = request.user
-        obj.save()
-        updated += 1
-    return JsonResponse({'ok': True, 'updated': updated})
+    updated, assignee_labels = bulk_assign_asin_folders(
+        asins_raw,
+        users,
+        assigned_by=request.user,
+    )
+    return JsonResponse(
+        {
+            'ok': True,
+            'updated': updated,
+            'assignee_labels': assignee_labels,
+        }
+    )
 
 
 @login_required

@@ -106,7 +106,7 @@ services:
 
 
 
-  worker:
+  worker-single:
 
     build: .
 
@@ -131,6 +131,72 @@ services:
       REDIS_DB: "1"
 
       REDIS_PASSWORD: ""
+
+      SELLER_CREDENTIAL_PROFILE: "single"
+
+      ROI_WIZARD_EXEC_MODE: "inprocess"
+
+      ROI_ASIN_MAX_RETRIES: "3"
+
+      ROI_ASIN_RETRY_DELAY_SEC: "5"
+
+      ROI_SELLERSPRITE_MAX_CONCURRENT: "6"
+
+      ROI_SIF_MAX_CONCURRENT: "4"
+
+      ROI_TAOBAO_MAX_CONCURRENT: "1"
+
+      RQ_JOB_TIMEOUT: "86400"
+
+    volumes:
+
+      - media_data:/app/media
+
+      - ./scripts/asin_find_project/images:/app/scripts/asin_find_project/images
+
+      - ./scripts/asin_find_project/config_file:/app/scripts/asin_find_project/config_file
+
+    depends_on:
+
+      db:
+
+        condition: service_healthy
+
+      redis:
+
+        condition: service_started
+
+    command: python manage.py run_roi_worker --name roi-worker-single --queues roi_single
+
+
+
+  worker-bulk:
+
+    build: .
+
+    restart: unless-stopped
+
+    env_file:
+
+      - .env
+
+    environment:
+
+      DJANGO_SETTINGS_MODULE: auto_amazon_project.settings
+
+      DB_HOST: db
+
+      DB_PORT: "3306"
+
+      REDIS_HOST: redis
+
+      REDIS_PORT: "6379"
+
+      REDIS_DB: "1"
+
+      REDIS_PASSWORD: ""
+
+      SELLER_CREDENTIAL_PROFILE: "bulk"
 
       ROI_WIZARD_EXEC_MODE: "inprocess"
 
@@ -166,7 +232,7 @@ services:
 
         condition: service_started
 
-    command: python manage.py run_roi_worker
+    command: python manage.py run_roi_worker --name roi-worker-bulk --queues roi_bulk,roi_scheduled
 
 
 
@@ -226,7 +292,11 @@ services:
 
         condition: service_started
 
-      worker:
+      worker-single:
+
+        condition: service_started
+
+      worker-bulk:
 
         condition: service_started
 
