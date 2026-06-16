@@ -126,8 +126,130 @@ def write_ao_lo_to_n(value: str, profile: CredentialProfile = 'single') -> None:
     _write_text(_profile_paths(profile)['ao_lo_to_n'], (value or '').strip())
 
 
+def bulk_accounts_pool_path() -> Path:
+    return config_dir() / 'seller_bulk_accounts.json'
+
+
+def _format_pool_dt(raw: str | None) -> str:
+    if not raw:
+        return '—'
+    s = str(raw).strip()
+    if not s:
+        return '—'
+    try:
+        if s.endswith('Z'):
+            s = s[:-1] + '+00:00'
+        from datetime import datetime
+
+        dt = datetime.fromisoformat(s)
+        return dt.strftime('%Y-%m-%d %H:%M')
+    except ValueError:
+        return s[:16]
+
+
+def read_bulk_accounts_form() -> dict:
+    """大批量账号池（供配置页展示）。"""
+    _ensure_script_path()
+    try:
+        from bulk_account_pool import get_ban_pending_asins, load_pool, _is_in_cooldown
+
+        pool = load_pool()
+    except ImportError:
+        return {
+            'accounts': [],
+            'cooldown_days': 3,
+            'active_key': '',
+            'ban_pending_count': 0,
+            'ad_ban_pending_count': 0,
+            'ready_count': 0,
+            'total_count': 0,
+        }
+
+    active_key = str(pool.get('runtime', {}).get('active_key') or '').strip()
+    accounts: list[dict] = []
+    ready_count = 0
+    for acc in pool.get('accounts') or []:
+        ao_raw = acc.get('ao_lo_to_n') or ''
+        from credentials_loader import resolve_ao_lo_to_n_for_cookie
+
+        ao_ok = bool(resolve_ao_lo_to_n_for_cookie(ao_raw)) if ao_raw else False
+        has_password = bool(acc.get('password'))
+        child_id = str(acc.get('child_id') or '').strip()
+        username = str(acc.get('username') or '').strip()
+        ready = bool(child_id and username and has_password and ao_ok)
+        if ready:
+            ready_count += 1
+        cooldown_until = acc.get('cooldown_until')
+        accounts.append(
+            {
+                'key': acc.get('key') or '',
+                'child_id': child_id,
+                'username': username,
+                'has_password': has_password,
+                'ao_lo_to_n': ao_raw,
+                'has_ao_lo_to_n': ao_ok,
+                'ready': ready,
+                'is_active': acc.get('key') == active_key,
+                'last_used_at': acc.get('last_used_at'),
+                'last_used_label': _format_pool_dt(acc.get('last_used_at')),
+                'cooldown_until': cooldown_until,
+                'cooldown_label': _format_pool_dt(cooldown_until),
+                'last_banned_at': acc.get('last_banned_at'),
+                'in_cooldown': _is_in_cooldown(acc),
+            }
+        )
+
+    return {
+        'accounts': accounts,
+        'cooldown_days': int(pool.get('cooldown_days') or 3),
+        'active_key': active_key,
+        'ban_pending_count': len(get_ban_pending_asins(task='roi')),
+        'ad_ban_pending_count': len(get_ban_pending_asins(task='ad')),
+        'ready_count': ready_count,
+        'total_count': len(accounts),
+    }
+
+
+def write_bulk_accounts_from_form(
+    accounts: list[dict],
+    *,
+    cooldown_days_value: int | None = None,
+) -> None:
+    _ensure_script_path()
+    from bulk_account_pool import write_accounts_from_form
+
+    write_accounts_from_form(accounts, cooldown_days_value=cooldown_days_value)
+
+
 def read_seller_credentials_form(profile: CredentialProfile = 'single') -> dict:
     """供配置页表单展示（不向模板暴露明文密码）。"""
+    if profile == 'bulk':
+        pool = read_bulk_accounts_form()
+        accounts = pool.get('accounts') or []
+        if accounts:
+            label = '大批量计算（≥20 ASIN）'
+            ready_count = int(pool.get('ready_count') or 0)
+            total_count = int(pool.get('total_count') or 0)
+            checklist = [
+                {'label': f'可用账号 {ready_count}/{total_count}', 'done': ready_count > 0},
+                {'label': '账号池 ≥2（可轮换）', 'done': total_count >= 2},
+            ]
+            first = accounts[0]
+            return {
+                'profile': profile,
+                'profile_label': label,
+                'child_ids': first.get('child_id') or '',
+                'seller_username': first.get('username') or '',
+                'has_password': bool(first.get('has_password')),
+                'ao_lo_to_n': first.get('ao_lo_to_n') or '',
+                'has_child_ids': bool(first.get('child_id')),
+                'has_ao_lo_to_n': bool(first.get('has_ao_lo_to_n')),
+                'seller_ready': ready_count > 0,
+                'checklist': checklist,
+                'checklist_done': sum(1 for x in checklist if x['done']),
+                'checklist_total': len(checklist),
+            }
+
     _ensure_script_path()
     from credentials_loader import read_ao_lo_to_n_raw, resolve_ao_lo_to_n_for_cookie
 
@@ -174,6 +296,7 @@ def read_credentials_page_context() -> dict:
     token_status = read_sif_token_status()
     seller = read_seller_credentials_form('single')
     seller_bulk = read_seller_credentials_form('bulk')
+    bulk_pool = read_bulk_accounts_form()
     bulk_threshold = int(getattr(settings, 'ROI_BULK_ASIN_THRESHOLD', 20))
     return {
         'authorization': auth,
@@ -183,7 +306,9 @@ def read_credentials_page_context() -> dict:
         'sif_ready': bool(auth) and bool(token_status.get('exists')),
         'seller': seller,
         'seller_bulk': seller_bulk,
+        'bulk_pool': bulk_pool,
         'bulk_asin_threshold': bulk_threshold,
+        'bulk_cooldown_days': int(getattr(settings, 'ROI_BULK_ACCOUNT_COOLDOWN_DAYS', 3)),
         'ao_lo_preview': _mask_secret(seller.get('ao_lo_to_n') or '', head=12, tail=8),
         'bulk_ao_lo_preview': _mask_secret(seller_bulk.get('ao_lo_to_n') or '', head=12, tail=8),
     }

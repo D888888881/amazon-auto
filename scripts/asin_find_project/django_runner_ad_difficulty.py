@@ -7,7 +7,10 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
 import sys
+
+os.environ['SELLER_CREDENTIAL_PROFILE'] = 'bulk'
 
 from async_seller_wizard_api import calculate_ad_difficulty_for_asins
 

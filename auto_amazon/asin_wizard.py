@@ -156,6 +156,8 @@ def _run_ad_difficulty_subprocess(
     asins: list[str],
     on_stderr_line: Callable[[str], None] | None = None,
 ) -> dict:
+    import os
+
     base = Path(settings.BASE_DIR).resolve()
     runner = base / 'scripts' / 'asin_find_project' / 'django_runner_ad_difficulty.py'
     if not runner.is_file():
@@ -163,12 +165,16 @@ def _run_ad_difficulty_subprocess(
     payload_obj = {'asins': [str(x).strip().upper() for x in asins if str(x).strip()]}
     payload = json.dumps(payload_obj, ensure_ascii=False).encode('utf-8')
 
+    env = os.environ.copy()
+    env['SELLER_CREDENTIAL_PROFILE'] = 'bulk'
+
     proc = subprocess.Popen(
         [sys.executable, str(runner)],
         cwd=str(runner.parent),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        env=env,
     )
     assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
     proc.stdin.write(payload)
@@ -259,10 +265,9 @@ def run_ad_difficulty_for_asins(
     on_stderr_line: Callable[[str], None] | None = None,
 ) -> dict:
     """
-    运行广告难度计算。
-    遇 rank-login-user（子账号被禁）时自动执行解禁并重试一次。
+    运行广告难度计算（统一使用批量账号池；禁号轮换在 calculate_ad_difficulty_for_asins 内处理）。
     """
-    return execute_with_seller_unlock_retry(
-        lambda: _run_ad_difficulty_impl(asins, on_stderr_line),
-        on_log=on_stderr_line,
-    )
+    from .roi_routing import ad_difficulty_credential_profile_context
+
+    with ad_difficulty_credential_profile_context():
+        return _run_ad_difficulty_impl(asins, on_stderr_line)

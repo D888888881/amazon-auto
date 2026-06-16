@@ -390,8 +390,7 @@ async def prefetch_refund_rates_batch(
 
 if __name__ == "__main__":
     keyword = (
-        "Home & Kitchen:Kids' Home Store:Kids' Bath:"
-        "Kids' Bathroom Accessories:Kids' Bath Towel Hooks"
+        "Health & Household:Health Care:Sleep & Snoring:Sleeping Masks"
     )
     val = asyncio.run(async_return_rale_main(keyword))
     print('退货率:', val or '为空')

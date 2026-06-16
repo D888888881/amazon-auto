@@ -41,7 +41,21 @@ def _read_text(path: Path) -> str:
     return path.read_text(encoding='utf-8').strip()
 
 
+def _bulk_active_credentials() -> dict[str, str] | None:
+    try:
+        from bulk_account_pool import get_active_account_credentials
+
+        return get_active_account_credentials()
+    except ImportError:
+        return None
+
+
 def read_child_ids(*, profile: str | None = None, default: list[str] | None = None) -> list[str]:
+    prof = profile or credential_profile()
+    if prof == 'bulk':
+        cred = _bulk_active_credentials()
+        if cred and cred.get('child_id'):
+            return [cred['child_id']]
     raw = _read_text(_paths(profile)['child_ids'])
     if not raw:
         return list(default or [])
@@ -54,15 +68,30 @@ def read_child_ids(*, profile: str | None = None, default: list[str] | None = No
 
 
 def read_seller_username(*, profile: str | None = None, default: str = '') -> str:
+    prof = profile or credential_profile()
+    if prof == 'bulk':
+        cred = _bulk_active_credentials()
+        if cred and cred.get('username'):
+            return cred['username']
     return _read_text(_paths(profile)['username']) or default
 
 
 def read_seller_password(*, profile: str | None = None, default: str = '') -> str:
+    prof = profile or credential_profile()
+    if prof == 'bulk':
+        cred = _bulk_active_credentials()
+        if cred and cred.get('password'):
+            return cred['password']
     return _read_text(_paths(profile)['password']) or default
 
 
 def read_ao_lo_to_n_raw(*, profile: str | None = None) -> str:
     """原样读取文件内容（保留 Python 字面量写法）。"""
+    prof = profile or credential_profile()
+    if prof == 'bulk':
+        cred = _bulk_active_credentials()
+        if cred and cred.get('ao_lo_to_n'):
+            return cred['ao_lo_to_n']
     return _read_text(_paths(profile)['ao_lo_to_n'])
 
 

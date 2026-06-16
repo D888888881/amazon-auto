@@ -229,7 +229,13 @@
                         </span>
                     </td>
                     <td class="col-num col-ranking-percent">{% if row.ranking_percent is not None %}{{ row.ranking_percent|floatformat:3 }}%{% else %}—{% endif %}</td>
-                <td class="col-grade"><span class="dash-grade dash-grade--{{ row.product_grade|lower }}">{{ row.product_grade }}</span></td>
+                <td class="col-grade">
+                    {% if row.asin %}
+                    <a href="https://www.amazon.com/DP/{{ row.asin }}" class="dash-grade-link dash-grade dash-grade--{{ row.product_grade|lower }}" target="_blank" rel="noopener noreferrer" title="在 Amazon 打开 {{ row.asin }}">{{ row.product_grade }}</a>
+                    {% else %}
+                    <span class="dash-grade dash-grade--{{ row.product_grade|lower }}">{{ row.product_grade }}</span>
+                    {% endif %}
+                </td>
                     <td class="col-updated-at">{% if row.data_updated_at %}{{ row.data_updated_at|date:'Y-m-d H:i:s' }}{% else %}—{% endif %}</td>
                     <td class="col-assignees" title="该 ASIN 文件夹当前分配的用户">{{ row.assignee_display }}</td>
                     <td class="col-roi-verify" title="在 ROI-US-pack 编辑器中点击「确认校验」后为「是」">{% if row.roi_pack_verified %}是{% else %}否{% endif %}</td>

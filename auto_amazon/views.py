@@ -221,7 +221,7 @@ def _attach_row_assignee_labels(
         can_operate = viewer_is_superuser or r.user_id == viewer_id or key in viewer_assigned_asins
         r.ops_readonly = not can_operate
         r.can_delete_row = viewer_is_superuser or r.user_id == viewer_id
-        r.can_open_dir = viewer_is_superuser or (key in viewer_assigned_asins)
+        r.can_open_dir = can_operate
         r.roi_pack_verified = key in verified
 
 
@@ -282,6 +282,9 @@ def _deleted_asin_set_from_data_origin(search_path: Path) -> set[str]:
         s_set = _asin_set(search_path)
         o_set = _asin_set(origin_path)
         if not s_set:
+            return set()
+        # data_origin 为空（如账号被禁导致清洗失败）时不应把 Search 全部标为已删除
+        if not o_set:
             return set()
         return {x for x in s_set if x not in o_set}
     except Exception:
@@ -2034,26 +2037,85 @@ def credentials_config_page(request):
             bulk_child_ids = [
                 x.strip() for x in bulk_child_raw.replace('\n', ',').split(',') if x.strip()
             ]
-            if not bulk_child_ids:
-                messages.error(request, '大批量计算：子账号 ID 不能为空。')
+            bulk_usernames = [x.strip() for x in request.POST.getlist('bulk_username')]
+            bulk_passwords = request.POST.getlist('bulk_password')
+            bulk_ao_list = request.POST.getlist('bulk_ao_lo_to_n')
+            bulk_keys = request.POST.getlist('bulk_account_key')
+            bulk_child_list = request.POST.getlist('bulk_child_id')
+
+            bulk_accounts: list[dict] = []
+            row_count = max(len(bulk_usernames), len(bulk_child_list), 1)
+            for i in range(row_count):
+                child_id = (bulk_child_list[i] if i < len(bulk_child_list) else '').strip()
+                username = (bulk_usernames[i] if i < len(bulk_usernames) else '').strip()
+                password = (bulk_passwords[i] if i < len(bulk_passwords) else '').strip()
+                ao_lo = (bulk_ao_list[i] if i < len(bulk_ao_list) else '').strip()
+                key = (bulk_keys[i] if i < len(bulk_keys) else '').strip()
+                if not child_id and not username and not ao_lo:
+                    continue
+                if not child_id or not username:
+                    messages.error(request, f'大批量账号 #{i + 1}：子账号 ID 与用户名不能为空。')
+                    return redirect('credentials_config')
+                bulk_accounts.append(
+                    {
+                        'key': key,
+                        'child_id': child_id,
+                        'username': username,
+                        'password': password,
+                        'ao_lo_to_n': ao_lo,
+                    }
+                )
+
+            if not bulk_accounts and bulk_child_ids:
+                bulk_username = (request.POST.get('bulk_seller_username') or '').strip()
+                bulk_password_in = (request.POST.get('bulk_seller_password') or '').strip()
+                bulk_ao_lo_to_n = (request.POST.get('bulk_ao_lo_to_n') or '').strip()
+                if not bulk_username:
+                    messages.error(request, '大批量计算：子账号用户名不能为空。')
+                    return redirect('credentials_config')
+                bulk_accounts.append(
+                    {
+                        'child_id': bulk_child_ids[0],
+                        'username': bulk_username,
+                        'password': bulk_password_in,
+                        'ao_lo_to_n': bulk_ao_lo_to_n,
+                    }
+                )
+
+            if not bulk_accounts:
+                messages.error(request, '大批量计算：请至少配置 1 个批量账号。')
                 return redirect('credentials_config')
 
-            bulk_username = (request.POST.get('bulk_seller_username') or '').strip()
-            if not bulk_username:
-                messages.error(request, '大批量计算：子账号用户名不能为空。')
+            from .credentials_config import write_bulk_accounts_from_form
+
+            try:
+                import sys
+                from pathlib import Path
+
+                script_dir = Path(settings.BASE_DIR).resolve() / 'scripts' / 'asin_find_project'
+                if str(script_dir) not in sys.path:
+                    sys.path.insert(0, str(script_dir))
+                from bulk_account_pool import load_pool
+
+                old_pw_by_key = {
+                    a.get('key'): a.get('password')
+                    for a in load_pool().get('accounts') or []
+                }
+            except ImportError:
+                old_pw_by_key = {}
+
+            for i, acc in enumerate(bulk_accounts):
+                if acc.get('password'):
+                    continue
+                key = acc.get('key') or ''
+                if key and old_pw_by_key.get(key):
+                    continue
+                if not key and read_seller_password('bulk'):
+                    continue
+                messages.error(request, f'大批量账号 #{i + 1}：首次配置须填写密码。')
                 return redirect('credentials_config')
 
-            bulk_password_in = (request.POST.get('bulk_seller_password') or '').strip()
-            bulk_ao_lo_to_n = (request.POST.get('bulk_ao_lo_to_n') or '').strip()
-
-            write_seller_child_ids(bulk_child_ids, profile='bulk')
-            write_seller_username(bulk_username, profile='bulk')
-            if bulk_password_in:
-                write_seller_password(bulk_password_in, profile='bulk')
-            elif not read_seller_password('bulk'):
-                messages.error(request, '大批量计算：首次配置须填写子账号密码。')
-                return redirect('credentials_config')
-            write_ao_lo_to_n(bulk_ao_lo_to_n, profile='bulk')
+            write_bulk_accounts_from_form(bulk_accounts)
 
             write_sif_authorization(auth)
 
@@ -2062,8 +2124,8 @@ def credentials_config_page(request):
                 messages.warning(request, 'SIF authorization 为空，CPC 将使用默认值直至填写。')
             if not ao_lo_to_n:
                 messages.warning(request, '单次计算 ao_lo_to_n 为空，登录可能失败，请尽快填写。')
-            if not bulk_ao_lo_to_n:
-                messages.warning(request, '大批量计算 ao_lo_to_n 为空，登录可能失败，请尽快填写。')
+            if bulk_accounts and not all(acc.get('ao_lo_to_n') for acc in bulk_accounts):
+                messages.warning(request, '部分批量账号 ao_lo_to_n 为空，登录可能失败，请尽快填写。')
         return redirect('credentials_config')
 
     return render(request, 'auto_amazon/credentials_config.html', read_credentials_page_context())

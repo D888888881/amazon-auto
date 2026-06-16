@@ -669,7 +669,11 @@ def dispatch_ad_difficulty_job(
 
 ) -> str | None:
 
-    if not should_use_rq_queue(settings.RQ_QUEUE_ROI_HIGH):
+    from .roi_routing import ad_difficulty_queue_name, ad_difficulty_route_label, count_wizard_asins
+
+    queue_name = ad_difficulty_queue_name()
+
+    if not should_use_rq_queue(queue_name):
 
         _append_job_note(
 
@@ -691,7 +695,7 @@ def dispatch_ad_difficulty_job(
 
     rq_job_id = _enqueue(
 
-        settings.RQ_QUEUE_ROI_HIGH,
+        queue_name,
 
         'auto_amazon.rq_tasks.run_ad_difficulty_job_task',
 
@@ -707,7 +711,7 @@ def dispatch_ad_difficulty_job(
 
     _set_job_rq_job_id(job_id, rq_job_id)
 
-    _append_job_note(job_id, '已加入 Worker 队列，等待执行…')
+    _append_job_note(job_id, f'已加入 Worker 队列（{ad_difficulty_route_label(count_wizard_asins(asins))}），等待执行…')
 
     logger.info('enqueued ad difficulty job %s -> rq:%s', job_id, rq_job_id)
 

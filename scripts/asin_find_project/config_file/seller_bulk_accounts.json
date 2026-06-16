@@ -1,0 +1,80 @@
+{
+  "cooldown_days": 3,
+  "accounts": [
+    {
+      "key": "xiangminhao686",
+      "child_id": "1478663",
+      "username": "xiangminhao686",
+      "password": "xiangminhao686",
+      "ao_lo_to_n": "\"8188821871/O5dKnIkJhLHS0tWw1me2vGNJoiy8MgmtiV4yfVrv0Ub65ZTa9asMw/q4yHygMp04BHauusjMb6QOq7oxcO5w8xyqD9vBPIngW7vUwrY5hxc2IWfWC6cpPZK8dBKy4g3\"",
+      "last_used_at": "2026-06-15T10:52:58.224128Z",
+      "cooldown_until": "2026-06-18T11:02:49.124223Z",
+      "last_banned_at": "2026-06-15T11:02:49.124223Z"
+    },
+    {
+      "key": "Huanghuixia123",
+      "child_id": "1807325",
+      "username": "Huanghuixia123",
+      "password": "Huanghuixia123",
+      "ao_lo_to_n": "\"06777518712Nxhjfbq4j3eLVq3XKdyv4CspAhGAe9rot39X+UPDoBv2A2r6TzO+aiS7SHvm8tmkZeLfqBaXcMyvgLYJoBoJzsQX2Qq8XBrUsKn+oXjCY8/eTAbdzyMgApa9NMrT0zn\"",
+      "last_used_at": "2026-06-15T11:45:51.839524Z",
+      "cooldown_until": null,
+      "last_banned_at": null
+    },
+    {
+      "key": "ITBM000001",
+      "child_id": "1698782",
+      "username": "ITBM000001",
+      "password": "ITBM000001",
+      "ao_lo_to_n": "\"\\\"3887751871ellIObt2r3Ll3avuvLFiR/tbeuLKUHdYdpTjjt18AJvVBeW47kTTW8u9AFhG9uvgEKT9sYyISTm1iVNKTkQvDhclNV8PHM7Ke8hF8bKCt+E=\\\"\"",
+      "last_used_at": null,
+      "cooldown_until": null,
+      "last_banned_at": null
+    },
+    {
+      "key": "ITBM000002",
+      "child_id": "1698783",
+      "username": "ITBM000002",
+      "password": "ITBM000002",
+      "ao_lo_to_n": "\"\\\"9208751871Unw/LET4JxyMND7j9x5KKbsEYUycATYPjvQbrVnzcct9SKGVA9UxyW4P13uJVKlat8sw6ZSI+124h24VQkLkadGySWWPDAQ4ph3BBsquubk=\\\"\"",
+      "last_used_at": null,
+      "cooldown_until": null,
+      "last_banned_at": null
+    },
+    {
+      "key": "ITBM000004",
+      "child_id": "1698785",
+      "username": "ITBM000004",
+      "password": "ITBM000004",
+      "ao_lo_to_n": "\"\\\"4908751871D0psOkjwktc2FKEv6nUly7YmjR+4dth4SuvFLKNuWfX3ESy0wamlzwAxr8nPfwLK4kb3OENrAZA/tSHmC8YinLYFIOxqA36SSJU1d4ZFFvA=\\\"\"",
+      "last_used_at": null,
+      "cooldown_until": null,
+      "last_banned_at": null
+    },
+    {
+      "key": "ITBM000005",
+      "child_id": "1698784",
+      "username": "ITBM000005",
+      "password": "ITBM000005",
+      "ao_lo_to_n": "\"\\\"6618751871EsiNBYcziSitAEXmExyBVi9/+EgaRhewzC2rDzifANW4cCVuUMYoORFNrIP8PVlQnkRPX9qJCHeI7jzb/ZX+9xhqUiAz+ejsJrScL50o+vY=\\\"\"",
+      "last_used_at": null,
+      "cooldown_until": null,
+      "last_banned_at": null
+    },
+    {
+      "key": "ITBM000068",
+      "child_id": "1805121",
+      "username": "ITBM000068",
+      "password": "ITBM000068",
+      "ao_lo_to_n": "\"\\\"93287518716j2K7B5z94ciT7rqF5Vq4RkQ1PvPL4dV9igmlfp6Zv8aAj7+bG/z4rIsW1CUu6JHpGQsPFoHDialcpqESYAAdR2C5ELvQHZbuqCxQomX2DQ=\\\"\"",
+      "last_used_at": null,
+      "cooldown_until": null,
+      "last_banned_at": null
+    }
+  ],
+  "runtime": {
+    "active_key": "Huanghuixia123",
+    "ban_pending_asins": [],
+    "ad_ban_pending_asins": []
+  }
+}

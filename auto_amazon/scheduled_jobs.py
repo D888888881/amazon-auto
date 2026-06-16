@@ -66,6 +66,45 @@ def ad_interval_days() -> int:
     return int(getattr(settings, 'PRIORITY_AD_INTERVAL_DAYS', 7))
 
 
+def scheduler_batch_mode() -> bool:
+    return getattr(settings, 'SCHEDULER_BATCH_MODE', False)
+
+
+def scheduler_batch_hour() -> int:
+    try:
+        return max(0, min(23, int(getattr(settings, 'SCHEDULER_BATCH_HOUR', 23))))
+    except (TypeError, ValueError):
+        return 23
+
+
+def scheduler_batch_window_hours() -> int:
+    try:
+        return max(1, int(getattr(settings, 'SCHEDULER_BATCH_WINDOW_HOURS', 2)))
+    except (TypeError, ValueError):
+        return 2
+
+
+def should_run_scheduled_batch_now() -> bool:
+    """
+    是否处于定时合并批次执行窗口。
+    开启 SCHEDULER_BATCH_MODE 时，仅在该窗口内跑批（默认每天 23:00 起 2 小时内）；
+    关闭时随 scheduler 扫描立即执行到期项。
+    """
+    if not scheduler_batch_mode():
+        return True
+    now = timezone.localtime()
+    start = scheduler_batch_hour()
+    window = scheduler_batch_window_hours()
+    end = min(24, start + window)
+    return start <= now.hour < end
+
+
+def _batch_window_label() -> str:
+    start = scheduler_batch_hour()
+    end = min(24, start + scheduler_batch_window_hours())
+    return f'{start:02d}:00–{end:02d}:00'
+
+
 def asin_media_exists(asin: str) -> bool:
     a = normalize_asin(asin)
     if not a:
@@ -198,6 +237,28 @@ def _build_cost_overrides(row: AsinDashboardRow) -> dict:
     return {normalize_asin(row.asin): one}
 
 
+def _resolve_priority_row(
+    asin: str,
+    rows_by_pk: dict[int, AsinDashboardRow],
+    items: list[ScheduledWorkItem],
+) -> AsinDashboardRow | None:
+    key = normalize_asin(asin)
+    for w in items:
+        if normalize_asin(w.asin) != key:
+            continue
+        row = rows_by_pk.get(w.row_pk)
+        if row:
+            return row
+    return (
+        AsinDashboardRow.objects.filter(
+            asin=key,
+            follow_status=AsinDashboardRow.FollowStatus.PRIORITY,
+        )
+        .order_by('-created_at')
+        .first()
+    )
+
+
 def _persist_ad_batch_results(
     work_items: list[ScheduledWorkItem],
     rows_by_pk: dict[int, AsinDashboardRow],
@@ -205,14 +266,17 @@ def _persist_ad_batch_results(
 ) -> set[str]:
     from .views import _touch_asin_updates
 
-    row_by_asin = {
-        normalize_asin(w.asin): rows_by_pk[w.row_pk]
-        for w in work_items
-        if w.ad_due and w.row_pk in rows_by_pk
-    }
+    row_by_asin = {}
+    for asin, payload in ad_merged.items():
+        norm = normalize_asin(asin)
+        row = _resolve_priority_row(asin, rows_by_pk, work_items)
+        if not row:
+            continue
+        row_by_asin[norm] = row
     touched: set[str] = set()
     for asin, payload in ad_merged.items():
-        row = row_by_asin.get(normalize_asin(asin))
+        norm = normalize_asin(asin)
+        row = row_by_asin.get(norm)
         if not row:
             continue
         rp = payload.get('ranking_percent')
@@ -228,7 +292,9 @@ def _persist_ad_batch_results(
 
 
 def execute_scheduled_batch_worker(work_items: list[ScheduledWorkItem | dict]) -> dict:
-    """Worker 内批量执行定时任务（广告难度 / ROI 均并发）。"""
+    """Worker 内批量执行定时任务：先并发 ROI，再并发广告难度（均走批量账号池）。"""
+    from .roi_routing import scheduled_credential_profile_context
+
     items: list[ScheduledWorkItem] = []
     for raw in work_items:
         if isinstance(raw, ScheduledWorkItem):
@@ -239,6 +305,11 @@ def execute_scheduled_batch_worker(work_items: list[ScheduledWorkItem | dict]) -
     if not items:
         return {'messages': 0}
 
+    with scheduled_credential_profile_context():
+        return _execute_scheduled_batch_worker_impl(items)
+
+
+def _execute_scheduled_batch_worker_impl(items: list[ScheduledWorkItem]) -> dict:
     row_pks = [w.row_pk for w in items]
     rows_by_pk = {
         r.pk: r
@@ -257,27 +328,17 @@ def execute_scheduled_batch_worker(work_items: list[ScheduledWorkItem | dict]) -
     roi_items = [w for w in items if w.roi_due]
     roi_asins = ordered_unique_asins([w.asin for w in roi_items])
 
-    ad_errors: dict[str, str] = {}
-    ad_ok: set[str] = set()
-    if ad_asins:
-        logger.info('scheduled batch ad difficulty: %d asins', len(ad_asins))
-        ad_batch = run_ad_difficulty_asins_batch(ad_asins)
-        for failure in ad_batch.failures:
-            ad_errors[normalize_asin(failure.asin)] = failure.error
-        ad_ok = {normalize_asin(a) for a in ad_batch.succeeded}
-        _persist_ad_batch_results(items, rows_by_pk, ad_batch.merged)
-        now = timezone.now()
-        for w in items:
-            if w.ad_due and normalize_asin(w.asin) in ad_ok:
-                AsinDashboardRow.objects.filter(pk=w.row_pk).update(last_scheduled_ad_at=now)
-
     roi_errors: dict[str, str] = {}
     roi_ok: set[str] = set()
     if roi_asins:
         from .views import _merge_cost_overrides_from_db, _persist_wizard_results
 
         parity = fetch_usd_cny_rate()
-        logger.info('scheduled batch roi: %d asins parity=%s', len(roi_asins), parity)
+        logger.info(
+            'scheduled batch roi: %d asins parity=%s (bulk account pool)',
+            len(roi_asins),
+            parity,
+        )
         cost_overrides: dict = {}
         for w in roi_items:
             row = rows_by_pk.get(w.row_pk)
@@ -297,24 +358,54 @@ def execute_scheduled_batch_worker(work_items: list[ScheduledWorkItem | dict]) -
             roi_errors[normalize_asin(failure.asin)] = failure.error
 
         now = timezone.now()
-        for w in roi_items:
-            asin = normalize_asin(w.asin)
-            row = rows_by_pk.get(w.row_pk)
-            if not row or asin not in roi_batch.merged:
+        persist_asins = ordered_unique_asins(
+            [w.asin for w in roi_items] + list(roi_batch.succeeded)
+        )
+        for asin in persist_asins:
+            norm = normalize_asin(asin)
+            if norm in roi_ok or norm not in roi_batch.merged:
+                continue
+            row = _resolve_priority_row(asin, rows_by_pk, items)
+            if not row:
                 continue
             try:
                 _persist_wizard_results(
                     row.user_id,
-                    {asin: roi_batch.merged[asin]},
+                    {norm: roi_batch.merged[norm]},
                     parity,
-                    target_row_ids={asin: row.pk},
+                    target_row_ids={norm: row.pk},
                 )
                 refresh_row_ops_from_media(row)
-                AsinDashboardRow.objects.filter(pk=w.row_pk).update(last_scheduled_roi_at=now)
-                roi_ok.add(asin)
+                AsinDashboardRow.objects.filter(pk=row.pk).update(last_scheduled_roi_at=now)
+                roi_ok.add(norm)
             except Exception as exc:
-                logger.exception('scheduled roi persist failed %s', asin)
-                roi_errors[asin] = f'{type(exc).__name__}: {exc}'
+                logger.exception('scheduled roi persist failed %s', norm)
+                roi_errors[norm] = f'{type(exc).__name__}: {exc}'
+
+    ad_errors: dict[str, str] = {}
+    ad_ok: set[str] = set()
+    if ad_asins:
+        logger.info(
+            'scheduled batch ad difficulty: %d asins (bulk account pool, after roi)',
+            len(ad_asins),
+        )
+        ad_batch = run_ad_difficulty_asins_batch(ad_asins)
+        for failure in ad_batch.failures:
+            ad_errors[normalize_asin(failure.asin)] = failure.error
+        ad_ok = {normalize_asin(a) for a in ad_batch.succeeded}
+        _persist_ad_batch_results(items, rows_by_pk, ad_batch.merged)
+        now = timezone.now()
+        persist_ad = ordered_unique_asins(
+            [w.asin for w in items if w.ad_due] + list(ad_batch.succeeded)
+        )
+        for asin in persist_ad:
+            norm = normalize_asin(asin)
+            if norm not in ad_ok:
+                continue
+            row = _resolve_priority_row(asin, rows_by_pk, items)
+            if not row:
+                continue
+            AsinDashboardRow.objects.filter(pk=row.pk).update(last_scheduled_ad_at=now)
 
     messages_created = 0
     for w in items:
@@ -472,6 +563,17 @@ def _collect_work_item(
     if due_only and not ad_due and not roi_due:
         return None, None
 
+    if due_only and (ad_due or roi_due) and not should_run_scheduled_batch_now():
+        stats['deferred'] = stats.get('deferred', 0) + 1
+        logger.debug(
+            'defer %s: interval due (ad=%s roi=%s), waiting for batch window %s',
+            asin,
+            ad_due,
+            roi_due,
+            _batch_window_label(),
+        )
+        return None, None
+
     recipient = resolve_asin_message_recipient(asin) or row.user
     if dry_run:
         stats['processed'] += 1
@@ -571,11 +673,32 @@ def run_scheduled_asin_jobs(*, due_only: bool = True, dry_run: bool = False) -> 
         'enabled': True,
         'processed': 0,
         'skipped': 0,
+        'deferred': 0,
         'errors': 0,
         'messages': 0,
         'enqueued': 0,
         'candidates': len(rows),
+        'batch_mode': scheduler_batch_mode(),
+        'batch_window': _batch_window_label() if scheduler_batch_mode() else None,
+        'batch_run_now': should_run_scheduled_batch_now(),
     }
+
+    if due_only and scheduler_batch_mode() and not should_run_scheduled_batch_now():
+        due_count = 0
+        for row in rows:
+            ad_d = _is_due(row.last_scheduled_ad_at, ad_interval_days())
+            roi_d = _is_due(row.last_scheduled_roi_at, roi_interval_days())
+            if ad_d or roi_d:
+                due_count += 1
+        if due_count:
+            stats['deferred'] = due_count
+            logger.info(
+                'scheduler: %d asins due, deferred to batch window %s (now=%s)',
+                due_count,
+                _batch_window_label(),
+                timezone.localtime().strftime('%H:%M'),
+            )
+        return stats
 
     work_items: list[ScheduledWorkItem] = []
     locks: list[AsinComputeLock] = []
@@ -590,6 +713,12 @@ def run_scheduled_asin_jobs(*, due_only: bool = True, dry_run: bool = False) -> 
             stats['errors'] += 1
 
     if work_items and not dry_run:
+        logger.info(
+            'scheduler batch starting: %d asins (roi=%d ad=%d) bulk pool, order=roi->ad',
+            len(work_items),
+            len({normalize_asin(w.asin) for w in work_items if w.roi_due}),
+            len({normalize_asin(w.asin) for w in work_items if w.ad_due}),
+        )
         try:
             _run_work_batch(work_items, locks, stats=stats)
         except Exception:

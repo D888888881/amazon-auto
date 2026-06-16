@@ -26,7 +26,7 @@ import requests
 
 PARENT_ID = "129425"
 
-CHILD_IDS = ["1805119"]  # 待激活的子账号 id，可填多个
+CHILD_IDS = ["1478663"]  # 待激活的子账号 id，可填多个
 
 PARENT_LOGIN = "13724333803"
 

@@ -58,3 +58,49 @@ def wizard_credential_profile_context(asins: list[str] | None):
             os.environ.pop('SELLER_CREDENTIAL_PROFILE', None)
         else:
             os.environ['SELLER_CREDENTIAL_PROFILE'] = prev
+
+
+def ad_difficulty_credential_profile() -> str:
+    """广告难度统一使用批量账号池。"""
+    return 'bulk'
+
+
+def ad_difficulty_queue_name() -> str:
+    return getattr(settings, 'RQ_QUEUE_ROI_BULK', 'roi_bulk')
+
+
+def ad_difficulty_route_label(asin_count: int) -> str:
+    return f'大批量队列（{asin_count} 个 ASIN，批量账号池 + Worker）'
+
+
+@contextmanager
+def ad_difficulty_credential_profile_context():
+    """广告难度任务绑定 bulk 凭证（Web 线程模式）。"""
+    prev = os.environ.get('SELLER_CREDENTIAL_PROFILE')
+    os.environ['SELLER_CREDENTIAL_PROFILE'] = ad_difficulty_credential_profile()
+    try:
+        yield ad_difficulty_credential_profile()
+    finally:
+        if prev is None:
+            os.environ.pop('SELLER_CREDENTIAL_PROFILE', None)
+        else:
+            os.environ['SELLER_CREDENTIAL_PROFILE'] = prev
+
+
+def scheduled_credential_profile() -> str:
+    """定时任务（ROI + 广告难度）统一使用批量账号池。"""
+    return 'bulk'
+
+
+@contextmanager
+def scheduled_credential_profile_context():
+    """定时任务 Worker / Web 线程模式绑定 bulk 凭证。"""
+    prev = os.environ.get('SELLER_CREDENTIAL_PROFILE')
+    os.environ['SELLER_CREDENTIAL_PROFILE'] = scheduled_credential_profile()
+    try:
+        yield scheduled_credential_profile()
+    finally:
+        if prev is None:
+            os.environ.pop('SELLER_CREDENTIAL_PROFILE', None)
+        else:
+            os.environ['SELLER_CREDENTIAL_PROFILE'] = prev

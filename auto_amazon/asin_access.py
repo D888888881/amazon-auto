@@ -53,6 +53,10 @@ def user_can_access_excel_media_path(user: User, rel_path: str) -> bool:
         return False
     if user_is_assigned_to_asin(user, root):
         return True
+    from .models import AsinDashboardRow
+
+    if AsinDashboardRow.objects.filter(user=user, asin=root).exists():
+        return True
     from .models import ImportedMediaPath
 
     if ImportedMediaPath.objects.filter(user=user, rel_path__startswith=f'{root}/').exists():

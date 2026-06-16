@@ -132,7 +132,12 @@ async def fetch_source(session: aiohttp.ClientSession, asin: str, retries: int =
 
 
 
-async def fetch_multiple_asins(asin_list: List[str], max_concurrent: int = 1) -> Dict[str, Any]:
+async def fetch_multiple_asins(
+    asin_list: List[str],
+    max_concurrent: int = 1,
+    *,
+    on_progress: Any = None,
+) -> Dict[str, Any]:
     """
     并发获取多个 ASIN 的数据，并对每个 ASIN 的所有 items 进行聚合：
     - 计算 ADS、HIGHLY_RATED、SPONSOR_VIDEO、SPONSOR_BRAND 的总和
@@ -141,19 +146,32 @@ async def fetch_multiple_asins(asin_list: List[str], max_concurrent: int = 1) ->
     """
     semaphore = asyncio.Semaphore(max_concurrent)
 
+    results_dict = {}
+    total = len(asin_list)
+    done_count = 0
+    progress_lock = asyncio.Lock()
+
     async def bounded_fetch(asin: str):
+        nonlocal done_count
         async with semaphore:
             result = await fetch_source(session, asin)
             print(result)
             print(f'{asin},请求广告值成功')
             await random_sleep()  # 每次请求后等待 1 秒
+            async with progress_lock:
+                done_count += 1
+                current = done_count
+            if on_progress:
+                try:
+                    on_progress(current, total, asin)
+                except Exception:
+                    pass
             return asin, result
 
     async with aiohttp.ClientSession(headers=HEADERS, cookies=COOKIES) as session:
         tasks = [bounded_fetch(asin) for asin in asin_list]
         results = await asyncio.gather(*tasks)
 
-    results_dict = {}
     for asin, data in results:
         if "error" in data:
             err = str(data['error'])
@@ -210,7 +228,8 @@ async def fetch_multiple_asins(asin_list: List[str], max_concurrent: int = 1) ->
             avg_reviews = total_reviews / item_count if item_count > 0 else 0
         except Exception as e:
             print(f"不好数据出错了2 {asin}  {e}")
-        results_dict[asin] = {
+        key = str(asin).strip().upper()
+        results_dict[key] = {
             'ads': total_ads,
             'highly_rated': total_highly_rated,
             'sponsor_video': total_sponsor_video,
@@ -220,10 +239,49 @@ async def fetch_multiple_asins(asin_list: List[str], max_concurrent: int = 1) ->
             'item_count': item_count,  # 可选，便于调试
             'imageUrl': image_url,
         }
-        # 如果需要保留第一个 imageUrl 作为示例，可添加：
-        # results_dict[asin]['imageUrl'] = items_list[0].get('imageUrl', '') if items_list else ''
 
     return results_dict
+
+
+async def ensure_ads_cached(
+    cache: Dict[str, Any],
+    asins: List[str],
+    max_concurrent: int = 6,
+    *,
+    on_progress: Any = None,
+) -> Dict[str, Any]:
+    """批量拉取广告数据，仅请求 cache 中尚未存在的 ASIN。"""
+    needed: list[str] = []
+    seen: set[str] = set()
+    for raw in asins or []:
+        key = str(raw or '').strip().upper()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        if key not in cache:
+            needed.append(key)
+    if not needed:
+        return cache
+    config = await ensure_seller_login()
+    apply_login_config(COOKIES, config)
+    apply_login_headers(HEADERS, config)
+    fetched = await fetch_multiple_asins(
+        needed,
+        max_concurrent,
+        on_progress=on_progress,
+    )
+    cache.update(fetched)
+    return cache
+
+
+def ads_cache_get(cache: dict | None, asin: str) -> dict | None:
+    if not cache:
+        return None
+    key = str(asin or '').strip().upper()
+    row = cache.get(key)
+    if isinstance(row, dict):
+        return row
+    return cache.get(asin) if isinstance(cache.get(asin), dict) else None
 
 
 async def fetch_source_totalUnits(session: aiohttp.ClientSession, asin: str, retries: int = 2, timeout: int = 10) -> Dict[str, Any]:

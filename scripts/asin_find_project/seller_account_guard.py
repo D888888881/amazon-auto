@@ -183,18 +183,109 @@ def apply_login_headers(headers: dict[str, Any], config: dict[str, Any]) -> None
         headers['Sprite-X-Token'] = token
 
 
-def _unlock_sub_account_sync() -> tuple[bool, str]:
+def _unlock_sub_account_sync(child_ids: list[str] | None = None) -> tuple[bool, str]:
     from unlock_seller_info import activate_children
 
     try:
-        from credentials_loader import credential_profile, read_child_ids
+        if child_ids is None:
+            from credentials_loader import credential_profile, read_child_ids
 
-        child_ids = read_child_ids(profile=credential_profile())
+            child_ids = read_child_ids(profile=credential_profile())
     except ImportError:
-        child_ids = []
+        child_ids = child_ids or []
     if child_ids:
         return activate_children(child_ids=child_ids)
     return activate_children()
+
+
+async def handle_bulk_account_ban(
+    banned_username: str | None,
+    *,
+    pending_asins: list[str] | None = None,
+    pending_task: str = 'roi',
+) -> dict[str, str]:
+    """批量账号被禁：解禁当前账号 → 冷却 → 切换最久未用账号 → 登录新账号。"""
+    from wizard_progress import emit_progress
+
+    from bulk_account_pool import rotate_bulk_account_after_ban
+
+    clear_seller_login_cache()
+    banned = resolve_seller_username(banned_username)
+    banned_acc = None
+    try:
+        from bulk_account_pool import get_active_account
+
+        cur = get_active_account()
+        if cur and cur.get('username') == banned:
+            banned_acc = cur
+    except ImportError:
+        pass
+
+    if banned_acc and banned_acc.get('child_id'):
+        emit_progress(f'正在解禁批量账号 {banned}（子账号 ID {banned_acc["child_id"]}）…')
+        ok, msg = await asyncio.to_thread(
+            _unlock_sub_account_sync,
+            [banned_acc['child_id']],
+        )
+        if not ok:
+            raise SellerAccountBannedError(f'批量账号 {banned} 解禁失败：{msg}')
+
+    ok, msg, new_acc = await asyncio.to_thread(
+        rotate_bulk_account_after_ban,
+        banned,
+        pending_asins=pending_asins,
+        pending_task=pending_task if pending_task in ('roi', 'ad') else 'roi',
+    )
+    if not ok or not new_acc:
+        raise SellerAccountBannedError(msg or '批量账号轮换失败')
+
+    pending_n = len(pending_asins or [])
+    if pending_n:
+        emit_progress(f'{msg}；续算 {pending_n} 个因禁号未完成的 ASIN…')
+    else:
+        emit_progress(msg)
+
+    clear_seller_login_cache()
+    return await ensure_seller_login(
+        new_acc['username'],
+        new_acc.get('password') or '',
+        force_refresh=True,
+    )
+
+
+async def bulk_rotate_if_available(
+    pending_asins: list[str] | None,
+    *,
+    banned_username: str | None = None,
+    rotation_state: dict | None = None,
+    pending_task: str = 'roi',
+) -> bool:
+    """批量任务遇禁号时轮换账号；返回是否已切换。"""
+    try:
+        from credentials_loader import credential_profile
+
+        if credential_profile() != 'bulk':
+            return False
+        from bulk_account_pool import list_bulk_accounts
+
+        if len(list_bulk_accounts()) < 2:
+            return False
+    except ImportError:
+        return False
+
+    state = rotation_state if rotation_state is not None else {}
+    count = int(state.get('count') or 0) + 1
+    state['count'] = count
+    max_rot = int(state.get('max') or os.environ.get('ROI_BULK_MAX_ROTATIONS', '16'))
+    if count > max_rot:
+        raise SellerAccountBannedError(f'批量账号轮换次数已达上限（{max_rot}）')
+
+    await handle_bulk_account_ban(
+        banned_username,
+        pending_asins=pending_asins or [],
+        pending_task=pending_task,
+    )
+    return True
 
 
 async def ensure_seller_login(
@@ -242,14 +333,39 @@ async def ensure_seller_login(
             ) from exc
         if config.get('rank-login-user') and config.get('rank-login-user-info'):
             _login_cache[username] = (time.time(), dict(config))
+            try:
+                from credentials_loader import credential_profile
+
+                if credential_profile() == 'bulk':
+                    from bulk_account_pool import mark_account_used
+
+                    mark_account_used()
+            except ImportError:
+                pass
             return config
 
-    # 解禁与递归重试必须在锁外执行，否则 asyncio.Lock 不可重入会导致死锁
+    # 解禁与轮换必须在锁外执行，否则 asyncio.Lock 不可重入会导致死锁
     if unlock_attempted:
         clear_seller_login_cache(username)
         raise SellerAccountBannedError(
             f'卖家精灵子账号 {username} 解禁后仍无法登录（缺少 rank-login-user）'
         )
+
+    try:
+        from credentials_loader import credential_profile
+
+        is_bulk = credential_profile() == 'bulk'
+    except ImportError:
+        is_bulk = False
+
+    if is_bulk:
+        try:
+            from bulk_account_pool import list_bulk_accounts
+
+            if len(list_bulk_accounts()) >= 2:
+                return await handle_bulk_account_ban(username)
+        except ImportError:
+            pass
 
     emit_progress(f'检测到子账号 {username} 被禁用，正在调用 unlock_seller_info 解禁…')
     clear_seller_login_cache(username)

@@ -10,7 +10,7 @@ import pandas as pd
 import numpy as np
 from async_read_config import read_main, read_taobao_config
 import async_sif_api
-from async_advertisement_api import advertisement_main, fetch_multiple_asins, fetch_multiple_asins_totalUnits
+from async_advertisement_api import advertisement_main, fetch_multiple_asins, fetch_multiple_asins_totalUnits, ads_cache_get, ensure_ads_cached
 from typing import List, Dict, Any, Optional
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
@@ -205,8 +205,55 @@ async def verify_path(
     return str(path)
 
 
+def _extract_asin_reference_price(
+    asin: str,
+    asin_info_dict: dict | None,
+    df: pd.DataFrame | None = None,
+) -> float | None:
+    """解析当前 ASIN 参考价；优先批量广告数据，其次 Search 表内本 ASIN 价格。"""
+    a = str(asin or '').strip().upper()
+    if asin_info_dict and isinstance(asin_info_dict, dict):
+        raw = asin_info_dict.get('avg_price', asin_info_dict.get('price'))
+        if raw is None and a in asin_info_dict and isinstance(asin_info_dict[a], dict):
+            raw = asin_info_dict[a].get('avg_price', asin_info_dict[a].get('price'))
+        try:
+            p = float(raw)
+            if p > 0:
+                return p
+        except (TypeError, ValueError):
+            pass
+    if df is not None and not df.empty and 'asin' in df.columns and 'price' in df.columns:
+        sub = df.copy()
+        sub['_asin_norm'] = sub['asin'].astype(str).str.strip().str.upper()
+        row = sub[sub['_asin_norm'] == a]
+        if not row.empty:
+            p = pd.to_numeric(row.iloc[0]['price'], errors='coerce')
+            if not pd.isna(p) and float(p) > 0:
+                return float(p)
+    return None
+
+
+def _load_existing_data_origin(output_path: str) -> pd.DataFrame | None:
+    if not os.path.isfile(output_path):
+        return None
+    try:
+        existing = pd.read_excel(output_path)
+        if existing is not None and not existing.empty:
+            return existing
+    except Exception as e:
+        print(f'读取已有 data_origin 失败 {output_path}: {e}')
+    return None
+
+
 # 清洗脏数据
-async def save_cleaned_data_orign_to_excel(df: pd.DataFrame, keyword: str, asin: str,asin_info_dict:dict = None):
+async def save_cleaned_data_orign_to_excel(
+    df: pd.DataFrame,
+    keyword: str,
+    asin: str,
+    asin_info_dict: dict = None,
+    *,
+    ads_cache: dict | None = None,
+):
     """
     依赖字段（卖家精灵 Excel 映射后）：
     - brand / parent：去重；缺失则填空，避免 KeyError
@@ -245,26 +292,49 @@ async def save_cleaned_data_orign_to_excel(df: pd.DataFrame, keyword: str, asin:
     df_deduplicated['totalUnits'] = pd.to_numeric(df_deduplicated['totalUnits'], errors='coerce')
 
     price_cleaning = df_deduplicated.dropna(subset=['price', 'totalUnits']).copy()
-    asin_price = -1
-    try:
-        if asin_info_dict:
-            asin_price = asin_info_dict.get('avg_price',0)
-        else:
-            # 获取 ASIN 基础价格（用于过滤上限）
+    asin_price = _extract_asin_reference_price(asin, asin_info_dict, df_deduplicated)
+    if asin_price is None:
+        cached_row = ads_cache_get(ads_cache, asin) if ads_cache else None
+        if cached_row:
+            asin_price = _extract_asin_reference_price(
+                asin, cached_row, df_deduplicated
+            )
+            if asin_price is not None:
+                print(f'ASIN {asin} 价格（广告缓存）：{asin_price}')
+    if asin_price is None and not asin_info_dict and not ads_cache:
+        try:
             info_dict = await advertisement_main([asin])
-            # print(info_dict)
-            asin_price = info_dict[asin]["avg_price"]
-            print(f"ASIN {asin} 价格：{asin_price}")
-    except Exception as e:
-        print('价格获取失败',e)
+            a_key = str(asin).strip().upper()
+            row = (info_dict or {}).get(asin) or (info_dict or {}).get(a_key) or {}
+            asin_price = _extract_asin_reference_price(asin, row if isinstance(row, dict) else None, df_deduplicated)
+            if asin_price is not None:
+                print(f'ASIN {asin} 价格（广告接口）：{asin_price}')
+        except Exception as e:
+            print(f'价格获取失败（将跳过价格过滤，避免清空 data_origin）：{e}')
 
-    # 过滤价格高于 asin_price * 1.3 的行
-    upper_bound = asin_price * 1.3
-    lower_bound = asin_price * 0.6
-    price_cleaning_data = price_cleaning[
-        (price_cleaning['price'] >= lower_bound) & (price_cleaning['price'] <= upper_bound)].copy()
-    print(f"价格过滤后数据行数：{len(price_cleaning_data)}")
-    print(price_cleaning_data['price'].describe())
+    if asin_price is not None and asin_price > 0:
+        upper_bound = asin_price * 1.3
+        lower_bound = asin_price * 0.6
+        filtered = price_cleaning[
+            (price_cleaning['price'] >= lower_bound) & (price_cleaning['price'] <= upper_bound)
+        ].copy()
+        if not filtered.empty:
+            price_cleaning_data = filtered
+        else:
+            print(
+                f'警告: ASIN {asin} 关键词「{keyword}」价格过滤后无数据，'
+                f'保留过滤前 {len(price_cleaning)} 行'
+            )
+            price_cleaning_data = price_cleaning.copy()
+    else:
+        print(
+            f'警告: ASIN {asin} 关键词「{keyword}」未获取有效参考价，'
+            f'跳过价格过滤（保留 {len(price_cleaning)} 行）'
+        )
+        price_cleaning_data = price_cleaning.copy()
+    print(f'价格过滤后数据行数：{len(price_cleaning_data)}')
+    if not price_cleaning_data.empty:
+        print(price_cleaning_data['price'].describe())
 
     # # 删除无用列
     # columns_to_drop = [
@@ -273,6 +343,28 @@ async def save_cleaned_data_orign_to_excel(df: pd.DataFrame, keyword: str, asin:
     # ]
     # price_cleaning_data.drop(columns=columns_to_drop, inplace=True, errors='ignore')
     print(f"清洗后的数据行数：{len(price_cleaning_data)}")
+
+    output_dir = await verify_path(asin=asin, keyword=keyword)
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, f'{keyword}_data_origin.xlsx')
+
+    if price_cleaning_data.empty:
+        existing = _load_existing_data_origin(output_path)
+        if existing is not None:
+            print(f'警告: 清洗结果为空，保留已有 data_origin: {output_path}')
+            return existing
+        fallback = price_cleaning.copy()
+        if fallback.empty:
+            fallback = df_deduplicated.copy()
+        if fallback.empty:
+            raise RuntimeError(
+                f'ASIN {asin} 关键词「{keyword}」清洗后无有效数据，已跳过写入 data_origin'
+            )
+        print(
+            f'警告: ASIN {asin} 关键词「{keyword}」清洗结果为空，'
+            f'使用去广告位后的 {len(fallback)} 行作为 data_origin'
+        )
+        price_cleaning_data = fallback
 
     # 时间字段：API 为毫秒时间戳；Excel 多为日期或字符串
     time_fields = ["syncTime", "amzUnitDate", "updatedTime", "availableDate", "firstReviewDate"]
@@ -302,15 +394,7 @@ async def save_cleaned_data_orign_to_excel(df: pd.DataFrame, keyword: str, asin:
     # 列名中文化
     # price_cleaning_data_chinese = price_cleaning_data.rename(columns=column_mapping)
 
-    # 4. 保存清洗后的数据源 Excel 文件
-    output_dir = await verify_path(asin=asin, keyword=keyword)
-
-    # 9. 确保保存目录存在
-    os.makedirs(output_dir, exist_ok=True)
-
-    # 10. 保存 Excel
-    output_path = os.path.join(output_dir, f'{keyword}_data_origin.xlsx')
-
+    # 保存 Excel（禁止用空表覆盖已有 data_origin，避免 Search 全表被标黄）
     price_cleaning_data.to_excel(output_path, index=False)
     print(f"文件已保存至: {output_path}")
     return price_cleaning_data
@@ -499,6 +583,8 @@ async def save_ad_efficiency_table(
         clean_data: pd.DataFrame,
         keyword: str,
         target_asin: str,
+        *,
+        ads_cache: dict | None = None,
 ):
     """
     保存广告效率表：
@@ -518,8 +604,23 @@ async def save_ad_efficiency_table(
         asin_list.append(current_asin)
 
     # ==================== 3. 获取广告词数据（不含 totalUnits） ====================
+    max_ss = env_max_concurrent('sellersprite', 6)
     try:
-        ads_result = await advertisement_main(asin_list, max_concurrent=1)
+        if ads_cache is not None:
+            missing = [
+                str(a).strip().upper()
+                for a in asin_list
+                if not ads_cache_get(ads_cache, a)
+            ]
+            if missing:
+                await ensure_ads_cached(ads_cache, missing, max_concurrent=max_ss)
+            ads_result = {}
+            for a in asin_list:
+                row = ads_cache_get(ads_cache, a)
+                if row:
+                    ads_result[a] = row
+        else:
+            ads_result = await advertisement_main(asin_list, max_concurrent=max_ss)
         print("广告词数据示例：", list(ads_result.items())[:3])
     except Exception as e:
         print(f"获取广告词数据失败：{e}")
@@ -683,6 +784,30 @@ async def save_ad_efficiency_table(
     return ranking_percent
 
 
+def _collect_ad_fetch_asins_from_nested(nested_result: dict) -> list[str]:
+    """汇总目标 ASIN 及本地竞品列表中所有需请求广告数据的 ASIN。"""
+    seen: set[str] = set()
+    for asin, kw_map in (nested_result or {}).items():
+        a = str(asin).strip().upper()
+        if a:
+            seen.add(a)
+        for products in (kw_map or {}).values():
+            for rec in products or []:
+                if isinstance(rec, dict):
+                    ca = str(rec.get('asin') or '').strip().upper()
+                    if ca:
+                        seen.add(ca)
+    return sorted(seen)
+
+
+def _ad_progress_emit_interval(total: int) -> int:
+    if total <= 20:
+        return 1
+    if total <= 100:
+        return 5
+    return max(1, total // 40)
+
+
 def _ops_gt10_ignore_200(review_interval: dict) -> bool:
     """运营难度是否命中 >10%，仅判断前4段（忽略 200以上）。"""
     if not isinstance(review_interval, dict):
@@ -709,74 +834,259 @@ async def _ad_difficulty_for_one_asin(
     kw_map: dict,
     source_map: dict,
     asin_price_dict: dict,
+    *,
+    ads_cache: dict | None = None,
+    progress_state: dict | None = None,
 ) -> tuple[str, dict]:
-    """单 ASIN 广告难度（供并发调度）。"""
+    """单 ASIN 广告难度；关键词并发，广告数据走预取缓存。"""
+    asin_key = str(asin).strip().upper()
+    price_info = (
+        asin_price_dict.get(asin_key)
+        or asin_price_dict.get(asin)
+        or (ads_cache_get(ads_cache, asin_key) if ads_cache else None)
+        or {}
+    )
     rp_candidates: list[float] = []
     details: dict = {}
-    price_info = asin_price_dict.get(asin) or asin_price_dict.get(str(asin).upper()) or {}
-    for keyword, products in (kw_map or {}).items():
+
+    async def _one_keyword(keyword: str, products: list) -> tuple[str, dict]:
         df = pd.DataFrame(products)
         if df.empty:
-            details[keyword] = {'matched': False, 'ranking_percent': 0}
-            continue
-        source_kind = (source_map.get(asin, {}) or {}).get(keyword, 'search')
+            return keyword, {'matched': False, 'ranking_percent': 0}
+        source_kind = (source_map.get(asin_key, {}) or source_map.get(asin, {}) or {}).get(
+            keyword, 'search'
+        )
         if source_kind == 'data_origin':
             clean_data = df
         else:
             clean_data = await save_cleaned_data_orign_to_excel(
-                df, keyword, asin, price_info
+                df,
+                keyword,
+                asin_key,
+                price_info,
+                ads_cache=ads_cache,
             )
-        review_interval = await save_review_interval_analysis_to_excel(clean_data, keyword, asin)
+        review_interval = await save_review_interval_analysis_to_excel(
+            clean_data, keyword, asin_key
+        )
         matched = _ops_gt10_ignore_200(review_interval)
         if not matched:
-            details[keyword] = {'matched': False, 'ranking_percent': 0}
-            print(f"ASIN {asin} 关键词 {keyword} 运营难度<=10%(前4段)，跳过广告效率表。")
-            continue
-        rp = await save_ad_efficiency_table(clean_data, keyword, asin)
+            print(f"ASIN {asin_key} 关键词 {keyword} 运营难度<=10%(前4段)，跳过广告效率表。")
+            return keyword, {'matched': False, 'ranking_percent': 0}
+        rp = await save_ad_efficiency_table(
+            clean_data,
+            keyword,
+            asin_key,
+            ads_cache=ads_cache,
+        )
         rp_num = pd.to_numeric(rp, errors='coerce')
         if not pd.isna(rp_num) and float(rp_num) >= 0:
-            rp_candidates.append(float(rp_num))
-            details[keyword] = {'matched': True, 'ranking_percent': float(rp_num)}
-        else:
-            details[keyword] = {'matched': True, 'ranking_percent': 0}
+            return keyword, {'matched': True, 'ranking_percent': float(rp_num)}
+        return keyword, {'matched': True, 'ranking_percent': 0}
+
+    kw_items = list((kw_map or {}).items())
+    if not kw_items:
+        return asin_key, {'ranking_percent': 0.0, 'keywords': {}}
+
+    kw_results = await asyncio.gather(
+        *[_one_keyword(kw, prods) for kw, prods in kw_items],
+        return_exceptions=True,
+    )
+
+    for item in kw_results:
+        if isinstance(item, Exception):
+            raise item
+        keyword, detail = item
+        details[keyword] = detail
+        if detail.get('matched') and detail.get('ranking_percent', 0) > 0:
+            rp_candidates.append(float(detail['ranking_percent']))
+        if progress_state is not None:
+            async with progress_state['lock']:
+                progress_state['done'] += 1
+                done_n = progress_state['done']
+                total_n = progress_state['total']
+            step = _ad_progress_emit_interval(total_n)
+            if done_n >= total_n or done_n == 1 or done_n % step == 0:
+                emit_progress(f'广告难度计算进度 {done_n}/{total_n}：{asin_key}')
+
     payload = {
         'ranking_percent': round(min(rp_candidates), 3) if rp_candidates else 0.0,
         'keywords': details,
     }
-    return asin, payload
+    return asin_key, payload
 
 
 async def calculate_ad_difficulty_for_asins(target_asins: list[str] | None = None) -> dict:
     """
-    从本地 file/{ASIN}/{关键词} 数据重算广告难度：
+    从本地 file/{ASIN}/{关键词} 数据重算广告难度（使用批量账号池）：
     - 每个关键词先判断运营难度前4段是否存在 >10%（忽略 200以上）
     - 命中才生成广告效率表并产出该关键词 ranking_percent
     - ASIN 级 ranking_percent 取有效关键词最小值；若都不命中则为 0
-    - 多 ASIN 并发（受 ROI_SCHEDULER_ASIN_MAX_CONCURRENT 限制）
+    - 多 ASIN 并发；遇禁号自动切换最久未用批量账号并续算未完成 ASIN
     """
+    from seller_account_guard import (
+        SellerAccountBannedError,
+        bulk_rotate_if_available,
+        clear_seller_login_cache,
+        ensure_seller_login,
+    )
+
+    try:
+        from bulk_account_pool import pop_ban_pending_asins
+
+        pending_resume = pop_ban_pending_asins(task='ad')
+        if pending_resume:
+            if target_asins:
+                target_asins = sorted(
+                    {str(x).strip().upper() for x in target_asins if str(x).strip()}
+                    | set(pending_resume)
+                )
+            else:
+                target_asins = pending_resume
+            emit_progress(f'续算上次因禁号未完成的广告难度：{len(pending_resume)} 个 ASIN…')
+    except ImportError:
+        pass
+
     nested_result, _keyword_dict, source_map = await asyncio.to_thread(
         load_products_from_local_files, None, target_asins
     )
-    asin_price_dict = await advertisement_main(target_asins)
     if not nested_result:
         return {}
 
-    max_asin = env_max_concurrent('scheduler_asin', 4)
-    sem = asyncio.Semaphore(max_asin)
-    out: dict = {}
+    n_asin = len(nested_result)
+    n_kw = sum(len(km or {}) for km in nested_result.values())
+    emit_progress(f'广告难度：共 {n_asin} 个 ASIN、{n_kw} 个关键词待分析')
 
-    async def _run_one(asin: str, kw_map: dict) -> None:
-        async with sem:
-            try:
-                a, payload = await _ad_difficulty_for_one_asin(
-                    asin, kw_map, source_map, asin_price_dict
+    all_fetch_asins = _collect_ad_fetch_asins_from_nested(nested_result)
+    rotation_state: dict = {'count': 0, 'max': 16}
+    max_ss = env_max_concurrent('sellersprite', 6)
+    ads_cache: dict = {}
+    fetch_progress_state = {'last': 0}
+
+    def _on_ad_fetch_progress(done: int, total: int, _asin: str = '') -> None:
+        step = _ad_progress_emit_interval(total)
+        if done >= total or done == 1 or done % step == 0:
+            if fetch_progress_state.get('last') != done:
+                fetch_progress_state['last'] = done
+                emit_progress(f'广告数据请求进度 {done}/{total}')
+
+    emit_progress(f'正在登录卖家精灵（批量账号）…')
+    await ensure_seller_login()
+    emit_progress(
+        f'正在向卖家精灵请求 {len(all_fetch_asins)} 个 ASIN 的广告数据（并发 {max_ss}）…'
+    )
+
+    async def _prefetch_ads(batch_fetch: list[str], *, rotated: bool = False):
+        try:
+            async with async_api_slot('sellersprite'):
+                await ensure_ads_cached(
+                    ads_cache,
+                    batch_fetch,
+                    max_concurrent=max_ss,
+                    on_progress=_on_ad_fetch_progress,
                 )
-                out[a] = payload
-            except Exception as exc:
-                print(f"警告: ASIN {asin} 广告难度计算失败: {exc}")
-                out[asin] = {'ranking_percent': 0.0, 'keywords': {}, 'error': str(exc)}
+        except Exception as e:
+            if is_seller_account_banned_error(e) and not rotated:
+                emit_progress('广告难度：卖家精灵被禁，正在切换批量账号…')
+                clear_seller_login_cache()
+                if await bulk_rotate_if_available(
+                    batch_fetch,
+                    rotation_state=rotation_state,
+                    pending_task='ad',
+                ):
+                    await ensure_seller_login()
+                    return await _prefetch_ads(batch_fetch, rotated=True)
+            if is_seller_account_banned_error(e):
+                raise SellerAccountBannedError(str(e)) from e
+            raise RuntimeError(f'广告数据批量获取失败: {e}') from e
 
-    await asyncio.gather(*[_run_one(a, m) for a, m in nested_result.items()])
+    await _prefetch_ads(all_fetch_asins)
+    emit_progress(f'广告数据请求完成（{len(all_fetch_asins)} 个 ASIN）')
+
+    asin_price_dict = {
+        a: ads_cache_get(ads_cache, a)
+        for a in nested_result.keys()
+        if ads_cache_get(ads_cache, a)
+    }
+    remaining = list(nested_result.keys())
+    out: dict = {}
+    calc_total = n_kw
+    progress_state = {
+        'done': 0,
+        'total': calc_total,
+        'lock': asyncio.Lock(),
+    }
+    if calc_total:
+        emit_progress(f'开始计算广告难度（0/{calc_total} 个关键词任务）…')
+
+    while remaining:
+        max_asin = env_max_concurrent('scheduler_asin', 4)
+        sem = asyncio.Semaphore(max_asin)
+
+        async def _run_one(asin: str, kw_map: dict):
+            async with sem:
+                return await _ad_difficulty_for_one_asin(
+                    asin,
+                    kw_map,
+                    source_map,
+                    asin_price_dict,
+                    ads_cache=ads_cache,
+                    progress_state=progress_state,
+                )
+
+        raw_results = await asyncio.gather(
+            *[_run_one(a, nested_result[a]) for a in remaining],
+            return_exceptions=True,
+        )
+
+        ban_pending: list[str] | None = None
+        for asin, item in zip(remaining, raw_results):
+            if isinstance(item, Exception) and is_seller_account_banned_error(item):
+                done_keys = {
+                    a for a, it in zip(remaining, raw_results)
+                    if not isinstance(it, Exception)
+                }
+                ban_pending = [a for a in remaining if a not in done_keys]
+                break
+
+        for asin, item in zip(remaining, raw_results):
+            if ban_pending and asin in ban_pending:
+                continue
+            if isinstance(item, Exception):
+                if is_seller_account_banned_error(item):
+                    continue
+                print(f"警告: ASIN {asin} 广告难度计算失败: {item}")
+                out[asin] = {'ranking_percent': 0.0, 'keywords': {}, 'error': str(item)}
+                continue
+            asin_key, payload = item
+            out[asin_key] = payload
+
+        if ban_pending:
+            emit_progress('广告难度：检测到子账号被禁，切换账号并续算未完成 ASIN…')
+            clear_seller_login_cache()
+            if not await bulk_rotate_if_available(
+                ban_pending,
+                rotation_state=rotation_state,
+                pending_task='ad',
+            ):
+                from bulk_account_pool import record_ban_pending_asins
+
+                record_ban_pending_asins(ban_pending, task='ad')
+                raise SellerAccountBannedError('批量账号被禁且无法轮换（广告难度）')
+            await ensure_seller_login()
+            refetch = _collect_ad_fetch_asins_from_nested(
+                {a: nested_result[a] for a in ban_pending if a in nested_result}
+            )
+            await _prefetch_ads(refetch)
+            remaining = ban_pending
+            continue
+        break
+
+    if calc_total:
+        emit_progress(
+            f'广告难度全部完成：{progress_state["done"]}/{calc_total} 个关键词任务，'
+            f'{len(out)} 个 ASIN 有结果'
+        )
     return out
 
 
@@ -1932,6 +2242,18 @@ async def seller_wizard_main(
         tokens = []
 
     # 1. 从 file/{ASIN}/{关键词}/ 读取 Excel（指定 asins 时只扫对应目录，不全库遍历）
+    try:
+        from bulk_account_pool import pop_ban_pending_asins
+
+        pending_resume = pop_ban_pending_asins(task='roi')
+        if pending_resume:
+            if asins:
+                asins = sorted({str(x).strip().upper() for x in asins if str(x).strip()} | set(pending_resume))
+            else:
+                asins = pending_resume
+            emit_progress(f'续算上次因禁号未完成的 {len(pending_resume)} 个 ASIN…')
+    except ImportError:
+        pass
     if asins:
         n = len({str(x).strip().upper() for x in asins if str(x).strip()})
         emit_progress(f'正在扫描本地 Excel（仅 {n} 个目标 ASIN，不全库扫盘）…')
@@ -1950,32 +2272,40 @@ async def seller_wizard_main(
 
     from seller_account_guard import (
         SellerAccountBannedError,
+        bulk_rotate_if_available,
         clear_seller_login_cache,
         ensure_seller_login,
+        is_seller_account_banned_error,
     )
+
+    rotation_state: dict = {'count': 0, 'max': 16}
 
     emit_progress('正在登录卖家精灵并批量拉取 FBA / 广告数据…')
     await ensure_seller_login()
     max_ss = env_max_concurrent('sellersprite', 6)
 
-    async def _fetch_fba_and_ad(*, retried: bool = False):
+    async def _fetch_fba_and_ad(batch_asins: list[str], *, rotated: bool = False):
         try:
             async with async_api_slot('sellersprite'):
                 return await asyncio.gather(
-                    async_fba_batch(target_asins, max_concurrent=max_ss),
-                    advertisement_main(target_asins, max_concurrent=max_ss),
+                    async_fba_batch(batch_asins, max_concurrent=max_ss),
+                    advertisement_main(batch_asins, max_concurrent=max_ss),
                 )
         except Exception as e:
-            if is_seller_account_banned_error(e) and not retried:
-                emit_progress('卖家精灵会话失效或子账号被禁，正在清缓存、解禁并重新登录…')
+            if is_seller_account_banned_error(e) and not rotated:
+                emit_progress('卖家精灵会话失效或子账号被禁，正在解禁并切换批量账号…')
                 clear_seller_login_cache()
-                await ensure_seller_login(force_refresh=True)
-                return await _fetch_fba_and_ad(retried=True)
+                if await bulk_rotate_if_available(
+                    batch_asins,
+                    rotation_state=rotation_state,
+                    pending_task='roi',
+                ):
+                    return await _fetch_fba_and_ad(batch_asins, rotated=True)
             if is_seller_account_banned_error(e):
                 raise SellerAccountBannedError(str(e)) from e
             raise RuntimeError(f'卖家精灵 FBA/广告批量获取失败: {e}') from e
 
-    fba_info_dict, asin_info_dict = await _fetch_fba_and_ad()
+    fba_info_dict, asin_info_dict = await _fetch_fba_and_ad(target_asins)
     print(fba_info_dict, '666666')
     if not isinstance(asin_info_dict, dict):
         asin_info_dict = {}
@@ -2039,7 +2369,10 @@ async def seller_wizard_main(
                 clean_data = df
                 print(f"ASIN={asin} 关键词={keyword} 检测到 ROI 表，直接使用 data_origin 作为数据源。")
             else:
-                clean_data = await save_cleaned_data_orign_to_excel(df, keyword, asin)
+                price_info = asin_info_dict.get(str(asin).strip().upper()) or {}
+                clean_data = await save_cleaned_data_orign_to_excel(
+                    df, keyword, asin, price_info if isinstance(price_info, dict) else None
+                )
             target_monthly = await save_top5_market_capacity_to_excel(clean_data, keyword, asin)
             review_interval = await save_review_interval_analysis_to_excel(clean_data, keyword, asin)
             ranking_percent = 0
@@ -2130,51 +2463,81 @@ async def seller_wizard_main(
                 print(f"警告: ASIN {asin} 强制生成 ROI-US-pack 仍失败: {e2}")
                 return None
 
-    # ========== 5. 并发生成每个 ASIN 的 ROI 表（单个 ASIN 缺数据则跳过，不中断整批）==========
-    roi_tasks = []
-    roi_task_asins: list[str] = []
-    for asin in target_asins:
-        asin_key = str(asin).strip().upper()
-        info = dict(asin_info_dict.get(asin_key) or {})
-        if not info:
-            print(f"警告: ASIN {asin_key} 无卖家精灵 advertisement 数据，将用默认值生成 ROI-US-pack")
-            emit_progress(f'提示 {asin_key}：无广告接口数据，使用默认值生成 ROI 表')
-        path = asin_to_image_path.get(asin_key, "")
-        co = (cost_overrides or {}).get(asin) or (cost_overrides or {}).get(asin_key) or {}
-        up = pd.to_numeric(co.get('unit_purchase'), errors='coerce') if isinstance(co, dict) else np.nan
-        hd = pd.to_numeric(co.get('head_distance'), errors='coerce') if isinstance(co, dict) else np.nan
-        up_val = None if pd.isna(up) else float(up)
-        hd_val = None if pd.isna(hd) else float(hd)
-        roi_task_asins.append(asin_key)
-        roi_tasks.append(
-            save_roi_safe(asin_key, asin_path_dict.get(asin_key, ""), info, path, up_val, hd_val)
-        )
+    async def _build_roi_tasks(asin_list: list[str]):
+        tasks = []
+        keys: list[str] = []
+        for asin in asin_list:
+            asin_key = str(asin).strip().upper()
+            info = dict(asin_info_dict.get(asin_key) or {})
+            if not info:
+                print(f"警告: ASIN {asin_key} 无卖家精灵 advertisement 数据，将用默认值生成 ROI-US-pack")
+                emit_progress(f'提示 {asin_key}：无广告接口数据，使用默认值生成 ROI 表')
+            path = asin_to_image_path.get(asin_key, "")
+            co = (cost_overrides or {}).get(asin) or (cost_overrides or {}).get(asin_key) or {}
+            up = pd.to_numeric(co.get('unit_purchase'), errors='coerce') if isinstance(co, dict) else np.nan
+            hd = pd.to_numeric(co.get('head_distance'), errors='coerce') if isinstance(co, dict) else np.nan
+            up_val = None if pd.isna(up) else float(up)
+            hd_val = None if pd.isna(hd) else float(hd)
+            keys.append(asin_key)
+            tasks.append(
+                save_roi_safe(asin_key, asin_path_dict.get(asin_key, ""), info, path, up_val, hd_val)
+            )
+        return keys, tasks
 
-    if not roi_tasks:
-        emit_progress('未找到可生成 ROI 的 ASIN')
-        print("警告: target_asins 为空，ROI 表未生成")
-        out = info_dict if isinstance(info_dict, dict) else {}
-        if isinstance(out, dict):
-            out['__roi_failures__'] = roi_failures
-        return out
-
+    remaining_roi = list(target_asins)
+    info_result: list = []
     done_count = 0
-    info_result_raw = await asyncio.gather(*roi_tasks, return_exceptions=True)
-    info_result = []
-    for asin_key, item in zip(roi_task_asins, info_result_raw):
-        if isinstance(item, Exception):
-            err = f'{type(item).__name__}: {item}'
-            roi_failures.append({'asin': asin_key, 'error': err})
-            emit_progress(f'失败 {asin_key}：{item}')
-            print(f"警告: ROI 任务异常 ({asin_key}): {item}")
+
+    while remaining_roi:
+        roi_task_asins, roi_tasks = await _build_roi_tasks(remaining_roi)
+        if not roi_tasks:
+            break
+
+        info_result_raw = await asyncio.gather(*roi_tasks, return_exceptions=True)
+        ban_pending: list[str] | None = None
+        for asin_key, item in zip(roi_task_asins, info_result_raw):
+            if isinstance(item, Exception) and is_seller_account_banned_error(item):
+                done_keys = {
+                    a for a, it in zip(roi_task_asins, info_result_raw)
+                    if it and not isinstance(it, Exception)
+                }
+                ban_pending = [a for a in roi_task_asins if a not in done_keys]
+                break
+
+        for asin_key, item in zip(roi_task_asins, info_result_raw):
+            if ban_pending and asin_key in ban_pending:
+                continue
+            if isinstance(item, Exception):
+                err = f'{type(item).__name__}: {item}'
+                roi_failures.append({'asin': asin_key, 'error': err})
+                emit_progress(f'失败 {asin_key}：{item}')
+                print(f"警告: ROI 任务异常 ({asin_key}): {item}")
+                continue
+            if item:
+                info_result.append(item)
+                done_count += 1
+                emit_progress(f'进度 {done_count}/{len(target_asins)}：{asin_key} ROI 已完成')
+            else:
+                if not any(f.get('asin') == asin_key for f in roi_failures):
+                    roi_failures.append({'asin': asin_key, 'error': 'ROI-US-pack 生成失败'})
+
+        if ban_pending:
+            emit_progress('ROI 生成中检测到子账号被禁，正在切换批量账号并续算…')
+            clear_seller_login_cache()
+            if not await bulk_rotate_if_available(
+                ban_pending,
+                rotation_state=rotation_state,
+                pending_task='roi',
+            ):
+                from bulk_account_pool import record_ban_pending_asins
+
+                record_ban_pending_asins(ban_pending, task='roi')
+                raise SellerAccountBannedError('批量账号被禁且无法轮换')
+            await ensure_seller_login()
+            remaining_roi = ban_pending
             continue
-        if item:
-            info_result.append(item)
-            done_count += 1
-            emit_progress(f'进度 {done_count}/{len(roi_task_asins)}：{asin_key} ROI 已完成')
-        else:
-            if not any(f.get('asin') == asin_key for f in roi_failures):
-                roi_failures.append({'asin': asin_key, 'error': 'ROI-US-pack 生成失败'})
+        break
+
     print(info_result, 'wangxian2')
 
     merging_data = await async_merging_data(info_result, info_dict)

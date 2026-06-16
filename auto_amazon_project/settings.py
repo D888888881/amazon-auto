@@ -181,6 +181,10 @@ CACHES = {
 SCHEDULER_ENABLED = os.environ.get('SCHEDULER_ENABLED', 'true').lower() in ('1', 'true', 'yes', 'on')
 PRIORITY_ROI_INTERVAL_DAYS = int(os.environ.get('PRIORITY_ROI_INTERVAL_DAYS', '7'))
 PRIORITY_AD_INTERVAL_DAYS = int(os.environ.get('PRIORITY_AD_INTERVAL_DAYS', '7'))
+# 定时批次：到期项不分散执行，统一在指定小时窗口内合并跑批（先 ROI 后广告难度）
+SCHEDULER_BATCH_MODE = os.environ.get('SCHEDULER_BATCH_MODE', 'true').lower() in ('1', 'true', 'yes', 'on')
+SCHEDULER_BATCH_HOUR = int(os.environ.get('SCHEDULER_BATCH_HOUR', '23'))
+SCHEDULER_BATCH_WINDOW_HOURS = max(1, int(os.environ.get('SCHEDULER_BATCH_WINDOW_HOURS', '2')))
 USD_CNY_RATE_FALLBACK = float(os.environ.get('USD_CNY_RATE_FALLBACK', '7.2'))
 USD_CNY_RATE_CACHE_SECONDS = int(os.environ.get('USD_CNY_RATE_CACHE_SECONDS', '21600'))
 
@@ -197,6 +201,7 @@ else:
     ROI_USE_RQ = _roi_use_rq_raw.lower() in ('1', 'true', 'yes', 'on')
 ROI_WIZARD_EXEC_MODE = os.environ.get('ROI_WIZARD_EXEC_MODE', 'subprocess')  # worker 容器设为 inprocess
 ROI_BULK_ASIN_THRESHOLD = int(os.environ.get('ROI_BULK_ASIN_THRESHOLD', '20'))
+ROI_BULK_ACCOUNT_COOLDOWN_DAYS = int(os.environ.get('ROI_BULK_ACCOUNT_COOLDOWN_DAYS', '3'))
 RQ_QUEUE_ROI_SINGLE = os.environ.get('RQ_QUEUE_ROI_SINGLE', 'roi_single')
 RQ_QUEUE_ROI_BULK = os.environ.get('RQ_QUEUE_ROI_BULK', 'roi_bulk')
 RQ_QUEUE_ROI_HIGH = os.environ.get('RQ_QUEUE_ROI_HIGH', RQ_QUEUE_ROI_SINGLE)
