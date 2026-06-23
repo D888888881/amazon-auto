@@ -65,9 +65,7 @@ def append_chunk(
     total_chunks: int,
     chunk_bytes: bytes,
 ) -> tuple[str, dict]:
-    """写入分片；完成时生成 upload.zip 并写入 meta['conflicts']。"""
-    from .excel_import_utils import list_zip_target_rels
-
+    """写入分片；全部上传完成后仅校验 ZIP 有效性（路径解析推迟到 commit，避免最后一片超时）。"""
     sdir, meta = init_or_resume_staging(user_id, staging_id, total_chunks)
     if int(meta.get('user_id')) != int(user_id):
         raise PermissionError('staging 不属于当前用户')
@@ -103,20 +101,8 @@ def append_chunk(
             save_meta(sdir, meta)
             raise ValueError(meta['error'])
 
-        targets, _skipped = list_zip_target_rels(zip_path)
-        if not targets:
-            meta['status'] = 'error'
-            meta['error'] = 'ZIP 中未找到符合 B0XXXXXXXX 的 ASIN 路径（请确认压缩包内包含 ASIN 文件夹）'
-            save_meta(sdir, meta)
-            raise ValueError(meta['error'])
-        from .media_paths import media_root as _media_root_fn
-
-        _mr = _media_root_fn()
-        conflicts = compute_conflicts(_mr, targets)
         meta['status'] = 'ready'
-        meta['target_paths'] = targets
-        meta['file_count'] = len(targets)
-        meta['conflicts'] = conflicts
+        meta['conflicts'] = []
         save_meta(sdir, meta)
         return meta['staging_id'], meta
 
@@ -146,7 +132,27 @@ def compute_conflicts(media_root: Path, target_rels: list[str]) -> list[str]:
     return sorted(set(conflicts))
 
 
+def ensure_staging_target_paths(sdir: Path, meta: dict) -> list[str]:
+    """解析 ZIP 内 ASIN 路径（commit 阶段执行，避免分片上传最后一片超时）。"""
+    targets = meta.get('target_paths') or []
+    if targets:
+        return targets
+    from .excel_import_utils import list_zip_target_rels
+
+    zip_path = sdir / 'upload.zip'
+    targets, _skipped = list_zip_target_rels(zip_path)
+    if not targets:
+        raise ValueError(
+            'ZIP 中未找到符合 B0XXXXXXXX 的 ASIN 路径（请确认压缩包内包含 ASIN 文件夹）'
+        )
+    meta['target_paths'] = targets
+    meta['file_count'] = len(targets)
+    save_meta(sdir, meta)
+    return targets
+
+
 def refresh_conflicts_in_meta(media_root: Path, sdir: Path, meta: dict) -> list[str]:
+    ensure_staging_target_paths(sdir, meta)
     targets = meta.get('target_paths') or []
     c = compute_conflicts(media_root, targets)
     meta['conflicts'] = c

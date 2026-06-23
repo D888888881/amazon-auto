@@ -83,6 +83,16 @@
                     {% endfor %}
                 </select>
             </label>
+            {% if viewer_is_superuser %}
+            <label>上传人
+                <select name="uploaded_by">
+                    <option value="">不限</option>
+                    {% for u in uploader_choices %}
+                    <option value="{{ u }}" {% if request.GET.uploaded_by == u %}selected{% endif %}>{{ u }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            {% endif %}
             <label>是否校验
                 <select name="roi_verified">
                     <option value="" {% if filters.roi_verified != 'yes' and filters.roi_verified != 'no' %}selected{% endif %}>全部</option>
@@ -180,6 +190,7 @@
                     <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=ranking_percent&amp;dir={% if sort == 'ranking_percent' and dir == 'asc' %}desc{% else %}asc{% endif %}">广告难度%</a></th>
                     <th class="col-grade"><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=product_grade&amp;dir={% if sort == 'product_grade' and dir == 'asc' %}desc{% else %}asc{% endif %}">产品等级</a></th>
                     <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=updated_at&amp;dir={% if sort == 'updated_at' and dir == 'asc' %}desc{% else %}asc{% endif %}">更新时间</a></th>
+                    {% if viewer_is_superuser %}<th>上传人</th>{% endif %}
                     <th>分配人</th>
                     <th>是否校验</th>
                     <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=follow_status&amp;dir={% if sort == 'follow_status' and dir == 'asc' %}desc{% else %}asc{% endif %}">关注</a></th>
@@ -237,6 +248,7 @@
                     {% endif %}
                 </td>
                     <td class="col-updated-at">{% if row.data_updated_at %}{{ row.data_updated_at|date:'Y-m-d H:i:s' }}{% else %}—{% endif %}</td>
+                    {% if viewer_is_superuser %}<td class="col-uploader" title="该 ASIN 资料上传者">{{ row.uploader_display }}</td>{% endif %}
                     <td class="col-assignees" title="该 ASIN 文件夹当前分配的用户">{{ row.assignee_display }}</td>
                     <td class="col-roi-verify" title="在 ROI-US-pack 编辑器中点击「确认校验」后为「是」">{% if row.roi_pack_verified %}是{% else %}否{% endif %}</td>
                     <td class="col-follow">

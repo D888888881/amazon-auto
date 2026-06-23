@@ -386,10 +386,10 @@ def _execute_scheduled_batch_worker_impl(items: list[ScheduledWorkItem]) -> dict
     ad_ok: set[str] = set()
     if ad_asins:
         logger.info(
-            'scheduled batch ad difficulty: %d asins (bulk account pool, after roi)',
+            'scheduled batch ad difficulty: %d asins (bulk account pool, sequential, after roi)',
             len(ad_asins),
         )
-        ad_batch = run_ad_difficulty_asins_batch(ad_asins)
+        ad_batch = run_ad_difficulty_asins_batch(ad_asins, sequential=True)
         for failure in ad_batch.failures:
             ad_errors[normalize_asin(failure.asin)] = failure.error
         ad_ok = {normalize_asin(a) for a in ad_batch.succeeded}

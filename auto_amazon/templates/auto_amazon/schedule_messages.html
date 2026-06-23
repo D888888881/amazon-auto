@@ -37,6 +37,15 @@
             <option value="normal" {% if filters.alert == 'normal' %}selected{% endif %}>未预警</option>
         </select>
     </label>
+    <label>
+        上传人
+        <select name="uploader">
+            <option value="">全部</option>
+            {% for u in uploader_choices %}
+            <option value="{{ u }}" {% if filters.uploader == u %}selected{% endif %}>{{ u }}</option>
+            {% endfor %}
+        </select>
+    </label>
     <button type="submit" class="btn btn-primary">筛选</button>
     <a href="{% url 'schedule_messages' %}" class="btn btn-ghost">重置</a>
 </form>
@@ -47,6 +56,7 @@
             <tr>
                 <th>发送时间</th>
                 <th>ASIN</th>
+                <th>上传人</th>
                 <th>当前去广告投产比</th>
                 <th>最新去广告投产比</th>
                 <th>对比</th>
@@ -64,6 +74,7 @@
             <tr class="{% if m.alert_status == 'eliminate' %}msg-row--eliminate{% elif m.alert_status == 'alert' %}msg-row--alert{% endif %}">
                 <td>{{ m.sent_at|date:"Y-m-d H:i" }}</td>
                 <td><code>{{ m.asin }}</code></td>
+                <td>{{ m.uploader_display }}</td>
                 <td>{% if m.curr_ad_roi is not None %}{{ m.curr_ad_roi|floatformat:2 }}%{% else %}—{% endif %}</td>
                 <td>{% if m.latest_ad_roi is not None %}{{ m.latest_ad_roi|floatformat:2 }}%{% else %}—{% endif %}</td>
                 <td class="msg-delta">{% if m.delta_ad_roi_text %}{{ m.delta_ad_roi_text }}{% else %}—{% endif %}</td>
@@ -85,7 +96,7 @@
             </tr>
             {% empty %}
             <tr>
-                <td colspan="12" class="msg-empty">暂无定时任务消息</td>
+                <td colspan="13" class="msg-empty">暂无定时任务消息</td>
             </tr>
             {% endfor %}
         </tbody>

@@ -10,6 +10,10 @@ _ASIN = re.compile(r'^B0[A-Z0-9]{8}$', re.IGNORECASE)
 # 作为路径段出现的 ASIN（用于 ZIP 内路径在任意前缀目录下的定位）
 _ASIN_SEG_BOUND = re.compile(r'(?:^|/)(B0[A-Z0-9]{8})(?:/|$)', re.IGNORECASE)
 
+# cp437 可解码任意字节；B0 ASIN 为 ASCII，中文包通常一次即可识别
+_ZIP_FAST_ENCODINGS: tuple[str | None, ...] = ('cp437', 'latin1')
+_ZIP_SLOW_ENCODINGS: tuple[str | None, ...] = (None, 'gbk', 'cp936', 'utf-8')
+
 
 def normalize_rel(rel: str) -> str:
     return str(rel or '').strip().replace('\\', '/').strip('/')
@@ -29,21 +33,12 @@ def target_rel_from_archive_path(archive_name: str) -> str | None:
         seg = p.strip().upper()
         if _ASIN.match(seg):
             return '/'.join([seg] + [x.strip() for x in parts[i + 1 :]])
-    # 兜底：部分压缩工具/编码下分段异常时，仍按「路径段中的 B0XXXXXXXX」定位
     m = _ASIN_SEG_BOUND.search(n)
     if not m:
         return None
     asin = m.group(1).upper()
     tail = n[m.end() :].lstrip('/')
     return f'{asin}/{tail}' if tail else asin
-
-
-def open_zipfile_read(path: Path):
-    """优先使用 UTF-8 元数据解码 ZIP 内路径（中文文件夹名等）。"""
-    try:
-        return zipfile.ZipFile(path, 'r', metadata_encoding='utf-8')
-    except TypeError:
-        return zipfile.ZipFile(path, 'r')
 
 
 def is_safe_media_rel(rel: str) -> bool:
@@ -54,6 +49,74 @@ def is_safe_media_rel(rel: str) -> bool:
     return bool(_ASIN.match(first))
 
 
+def _zip_entry_name(info: zipfile.ZipInfo) -> str | None:
+    try:
+        return info.filename.replace('\\', '/')
+    except (UnicodeDecodeError, UnicodeError):
+        return None
+
+
+def _entry_target_rel(info: zipfile.ZipInfo) -> str | None:
+    name = _zip_entry_name(info)
+    if not name:
+        return None
+    if info.is_dir() or name.endswith('/'):
+        return target_rel_from_archive_path(name.rstrip('/'))
+    tr = target_rel_from_archive_path(name)
+    if tr and is_safe_media_rel(tr):
+        return tr
+    return None
+
+
+def _open_zip_with_encoding(path: Path, enc: str | None) -> zipfile.ZipFile:
+    if enc is None:
+        return zipfile.ZipFile(path, 'r')
+    try:
+        return zipfile.ZipFile(path, 'r', metadata_encoding=enc)
+    except TypeError:
+        return zipfile.ZipFile(path, 'r')
+
+
+def _zip_has_asin_target(zf: zipfile.ZipFile) -> bool:
+    for info in zf.infolist():
+        if _entry_target_rel(info):
+            return True
+    return False
+
+
+def _try_open_for_asin_paths(path: Path, enc: str | None) -> zipfile.ZipFile | None:
+    try:
+        zf = _open_zip_with_encoding(path, enc)
+    except zipfile.BadZipFile:
+        raise
+    except (UnicodeDecodeError, UnicodeError):
+        return None
+    try:
+        if _zip_has_asin_target(zf):
+            return zf
+    except (UnicodeDecodeError, UnicodeError):
+        zf.close()
+        return None
+    zf.close()
+    return None
+
+
+def open_zipfile_read(path: Path) -> zipfile.ZipFile:
+    """
+    选择可解析 ASIN 路径的 ZIP 文件名编码。
+    先走 cp437 快路径（找到即返回），避免对大 ZIP 重复全量扫描导致 HTTP 超时。
+    """
+    for enc in _ZIP_FAST_ENCODINGS:
+        zf = _try_open_for_asin_paths(path, enc)
+        if zf is not None:
+            return zf
+    for enc in _ZIP_SLOW_ENCODINGS:
+        zf = _try_open_for_asin_paths(path, enc)
+        if zf is not None:
+            return zf
+    return _open_zip_with_encoding(path, 'cp437')
+
+
 def list_zip_target_rels(zip_path: Path) -> tuple[list[str], list[str]]:
     """返回 (目标相对路径列表, 跳过的 zip 内路径说明)。"""
     targets: list[str] = []
@@ -62,13 +125,17 @@ def list_zip_target_rels(zip_path: Path) -> tuple[list[str], list[str]]:
         zf = open_zipfile_read(zip_path)
     except zipfile.BadZipFile as e:
         return [], [f'无效 ZIP：{e}']
+    except (UnicodeDecodeError, UnicodeError) as e:
+        return [], [f'ZIP 内文件名编码无法识别：{e}']
     try:
         for info in zf.infolist():
-            name = info.filename.replace('\\', '/')
+            name = _zip_entry_name(info)
+            if not name:
+                skipped.append('<decode-error>')
+                continue
             if info.is_dir() or name.endswith('/'):
                 tr = target_rel_from_archive_path(name.rstrip('/'))
                 if tr:
-                    # 目录在提取时由文件创建；跳过纯目录条目避免重复
                     continue
                 skipped.append(name)
                 continue
@@ -91,7 +158,6 @@ def extract_zip_to_media_root(
     """
     将 zip 内文件解压到 media_root，仅允许落入 B0XXXXXXXX/... 下。
     返回 (已写入的相对路径列表, 因已存在而跳过的路径列表)（均为文件路径）。
-    skip_if_exists 为 True 时：目标已存在则跳过该文件（不覆盖），其余照常写入。
     """
     written: list[str] = []
     skipped_existing: list[str] = []
@@ -100,7 +166,9 @@ def extract_zip_to_media_root(
         for info in zf.infolist():
             if info.is_dir():
                 continue
-            name = info.filename.replace('\\', '/')
+            name = _zip_entry_name(info)
+            if not name:
+                continue
             tr = target_rel_from_archive_path(name)
             if not tr or not is_safe_media_rel(tr):
                 continue

@@ -837,8 +837,9 @@ async def _ad_difficulty_for_one_asin(
     *,
     ads_cache: dict | None = None,
     progress_state: dict | None = None,
+    keyword_sequential: bool = False,
 ) -> tuple[str, dict]:
-    """单 ASIN 广告难度；关键词并发，广告数据走预取缓存。"""
+    """单 ASIN 广告难度；默认关键词并发，定时任务可改为顺序执行。"""
     asin_key = str(asin).strip().upper()
     price_info = (
         asin_price_dict.get(asin_key)
@@ -888,10 +889,15 @@ async def _ad_difficulty_for_one_asin(
     if not kw_items:
         return asin_key, {'ranking_percent': 0.0, 'keywords': {}}
 
-    kw_results = await asyncio.gather(
-        *[_one_keyword(kw, prods) for kw, prods in kw_items],
-        return_exceptions=True,
-    )
+    if keyword_sequential:
+        kw_results = []
+        for kw, prods in kw_items:
+            kw_results.append(await _one_keyword(kw, prods))
+    else:
+        kw_results = await asyncio.gather(
+            *[_one_keyword(kw, prods) for kw, prods in kw_items],
+            return_exceptions=True,
+        )
 
     for item in kw_results:
         if isinstance(item, Exception):
@@ -916,13 +922,18 @@ async def _ad_difficulty_for_one_asin(
     return asin_key, payload
 
 
-async def calculate_ad_difficulty_for_asins(target_asins: list[str] | None = None) -> dict:
+async def calculate_ad_difficulty_for_asins(
+    target_asins: list[str] | None = None,
+    *,
+    sequential: bool = False,
+) -> dict:
     """
     从本地 file/{ASIN}/{关键词} 数据重算广告难度（使用批量账号池）：
     - 每个关键词先判断运营难度前4段是否存在 >10%（忽略 200以上）
     - 命中才生成广告效率表并产出该关键词 ranking_percent
     - ASIN 级 ranking_percent 取有效关键词最小值；若都不命中则为 0
-    - 多 ASIN 并发；遇禁号自动切换最久未用批量账号并续算未完成 ASIN
+    - sequential=True：定时任务顺序模式（逐个 ASIN、逐个请求卖家精灵，无并发）
+    - 默认多 ASIN 并发；遇禁号自动切换最久未用批量账号并续算未完成 ASIN
     """
     from seller_account_guard import (
         SellerAccountBannedError,
@@ -959,7 +970,7 @@ async def calculate_ad_difficulty_for_asins(target_asins: list[str] | None = Non
 
     all_fetch_asins = _collect_ad_fetch_asins_from_nested(nested_result)
     rotation_state: dict = {'count': 0, 'max': 16}
-    max_ss = env_max_concurrent('sellersprite', 6)
+    max_ss = 1 if sequential else env_max_concurrent('sellersprite', 6)
     ads_cache: dict = {}
     fetch_progress_state = {'last': 0}
 
@@ -972,9 +983,6 @@ async def calculate_ad_difficulty_for_asins(target_asins: list[str] | None = Non
 
     emit_progress(f'正在登录卖家精灵（批量账号）…')
     await ensure_seller_login()
-    emit_progress(
-        f'正在向卖家精灵请求 {len(all_fetch_asins)} 个 ASIN 的广告数据（并发 {max_ss}）…'
-    )
 
     async def _prefetch_ads(batch_fetch: list[str], *, rotated: bool = False):
         try:
@@ -1000,14 +1008,23 @@ async def calculate_ad_difficulty_for_asins(target_asins: list[str] | None = Non
                 raise SellerAccountBannedError(str(e)) from e
             raise RuntimeError(f'广告数据批量获取失败: {e}') from e
 
-    await _prefetch_ads(all_fetch_asins)
-    emit_progress(f'广告数据请求完成（{len(all_fetch_asins)} 个 ASIN）')
-
-    asin_price_dict = {
-        a: ads_cache_get(ads_cache, a)
-        for a in nested_result.keys()
-        if ads_cache_get(ads_cache, a)
-    }
+    if sequential:
+        emit_progress(
+            f'广告难度：定时任务顺序模式，共 {n_asin} 个 ASIN、{n_kw} 个关键词'
+            f'（逐个 ASIN 顺序请求卖家精灵）'
+        )
+        asin_price_dict: dict = {}
+    else:
+        emit_progress(
+            f'正在向卖家精灵请求 {len(all_fetch_asins)} 个 ASIN 的广告数据（并发 {max_ss}）…'
+        )
+        await _prefetch_ads(all_fetch_asins)
+        emit_progress(f'广告数据请求完成（{len(all_fetch_asins)} 个 ASIN）')
+        asin_price_dict = {
+            a: ads_cache_get(ads_cache, a)
+            for a in nested_result.keys()
+            if ads_cache_get(ads_cache, a)
+        }
     remaining = list(nested_result.keys())
     out: dict = {}
     calc_total = n_kw
@@ -1020,7 +1037,23 @@ async def calculate_ad_difficulty_for_asins(target_asins: list[str] | None = Non
         emit_progress(f'开始计算广告难度（0/{calc_total} 个关键词任务）…')
 
     while remaining:
-        max_asin = env_max_concurrent('scheduler_asin', 4)
+        if sequential:
+            work_batch = [remaining[0]]
+            per_fetch = _collect_ad_fetch_asins_from_nested(
+                {work_batch[0]: nested_result[work_batch[0]]}
+            )
+            emit_progress(
+                f'顺序模式：{work_batch[0]} 请求广告数据（{len(per_fetch)} 个 ASIN）…'
+            )
+            await _prefetch_ads(per_fetch)
+            batch_price = {
+                work_batch[0]: ads_cache_get(ads_cache, work_batch[0]) or {}
+            }
+        else:
+            work_batch = remaining
+            batch_price = asin_price_dict
+
+        max_asin = 1 if sequential else env_max_concurrent('scheduler_asin', 4)
         sem = asyncio.Semaphore(max_asin)
 
         async def _run_one(asin: str, kw_map: dict):
@@ -1029,27 +1062,28 @@ async def calculate_ad_difficulty_for_asins(target_asins: list[str] | None = Non
                     asin,
                     kw_map,
                     source_map,
-                    asin_price_dict,
+                    batch_price,
                     ads_cache=ads_cache,
                     progress_state=progress_state,
+                    keyword_sequential=sequential,
                 )
 
         raw_results = await asyncio.gather(
-            *[_run_one(a, nested_result[a]) for a in remaining],
+            *[_run_one(a, nested_result[a]) for a in work_batch],
             return_exceptions=True,
         )
 
         ban_pending: list[str] | None = None
-        for asin, item in zip(remaining, raw_results):
+        for asin, item in zip(work_batch, raw_results):
             if isinstance(item, Exception) and is_seller_account_banned_error(item):
                 done_keys = {
-                    a for a, it in zip(remaining, raw_results)
+                    a for a, it in zip(work_batch, raw_results)
                     if not isinstance(it, Exception)
                 }
                 ban_pending = [a for a in remaining if a not in done_keys]
                 break
 
-        for asin, item in zip(remaining, raw_results):
+        for asin, item in zip(work_batch, raw_results):
             if ban_pending and asin in ban_pending:
                 continue
             if isinstance(item, Exception):
@@ -1080,7 +1114,11 @@ async def calculate_ad_difficulty_for_asins(target_asins: list[str] | None = Non
             await _prefetch_ads(refetch)
             remaining = ban_pending
             continue
-        break
+
+        if sequential:
+            remaining = remaining[len(work_batch):]
+        else:
+            break
 
     if calc_total:
         emit_progress(

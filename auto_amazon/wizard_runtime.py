@@ -140,6 +140,8 @@ def run_seller_wizard_inprocess(
 def run_ad_difficulty_inprocess(
     asins: list[str],
     on_stderr_line: Callable[[str], None] | None = None,
+    *,
+    sequential: bool = False,
 ) -> dict:
     with asin_script_cwd():
         from async_seller_wizard_api import calculate_ad_difficulty_for_asins
@@ -154,7 +156,8 @@ def run_ad_difficulty_inprocess(
         try:
             raw = asyncio.run(
                 calculate_ad_difficulty_for_asins(
-                    [str(x).strip().upper() for x in asins if str(x).strip()] or None
+                    [str(x).strip().upper() for x in asins if str(x).strip()] or None,
+                    sequential=sequential,
                 )
             )
         finally:

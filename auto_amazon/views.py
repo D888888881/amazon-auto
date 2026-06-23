@@ -46,18 +46,30 @@ from .excel_io import (
 from .excel_search_restore import build_origin_row_from_search, search_row_to_api_record
 from .forms import RegisterForm
 from .media_paths import media_root, parent_rel, safe_media_path_global
+from .excel_browse_index import (
+    apply_root_filters,
+    build_root_index_items,
+    bust_excel_browse_cache,
+    enrich_root_page_delete_flags,
+)
 from .dashboard_ops_filter import run_dashboard_ops_filter
+from .dashboard_index import build_dashboard_page, stamp_map_for_asins, verified_asins_on_page
 from .asin_access import (
+    asin_importer_user_ids,
+    asin_root_from_rel_path,
     bulk_assign_asin_folders,
-    dedupe_dashboard_rows,
     normalize_asin,
     resolve_dashboard_row_for_persist,
     user_assigned_asin_codes,
     user_can_access_excel_media_path,
+    user_can_delete_asin_media_folder,
     user_can_delete_dashboard_row,
+    user_can_delete_excel_media_path,
     user_can_operate_dashboard_row,
     user_dashboard_rows_qs,
     user_imported_asin_codes,
+    user_is_assigned_to_asin,
+    uploader_label_map,
 )
 from .asin_product_image import (
     attach_product_image_urls,
@@ -140,20 +152,6 @@ def _merge_cost_overrides_from_db(
     return merged
 
 
-def _dashboard_per_page(request) -> int:
-    raw = (request.GET.get('per_page') or '').strip().lower()
-    custom = _get_int(request.GET.get('per_page_custom'))
-    if raw == 'custom' and custom is not None:
-        return max(1, min(custom, 500))
-    try:
-        n = int(raw)
-    except (TypeError, ValueError):
-        n = 10
-    if n in (10, 20, 40, 100):
-        return n
-    return 10
-
-
 def _compute_roi_per_page(request) -> int:
     raw = (request.GET.get('per_page') or '').strip().lower()
     custom = _get_int(request.GET.get('per_page_custom'))
@@ -209,18 +207,22 @@ def _parse_dt_local(raw: str | None, end_of_day: bool = False):
 def _attach_row_assignee_labels(
     rows,
     label_map: dict[str, str],
-    viewer_id: int,
+    viewer,
     viewer_assigned_asins: set[str],
-    viewer_is_superuser: bool,
     roi_verified_asins: set[str] | None = None,
+    uploader_map: dict[str, str] | None = None,
 ) -> None:
     verified = roi_verified_asins or set()
+    upl_map = uploader_map or {}
+    viewer_id = viewer.id
+    viewer_is_superuser = bool(getattr(viewer, 'is_superuser', False))
     for r in rows:
         key = normalize_asin(r.asin)
         r.assignee_display = label_map.get(key) or '—'
+        r.uploader_display = upl_map.get(key) or '—'
         can_operate = viewer_is_superuser or r.user_id == viewer_id or key in viewer_assigned_asins
         r.ops_readonly = not can_operate
-        r.can_delete_row = viewer_is_superuser or r.user_id == viewer_id
+        r.can_delete_row = user_can_delete_dashboard_row(viewer, r)
         r.can_open_dir = can_operate
         r.roi_pack_verified = key in verified
 
@@ -579,24 +581,6 @@ def user_management(request):
     )
 
 
-DASHBOARD_SORT_FIELDS = {
-    'asin': 'asin',
-    'profit_margin': 'profit_margin',
-    'ranking_percent': 'ranking_percent',
-    'unit_purchase': 'unit_purchase',
-    'monthly_results': 'monthly_results',
-    'profit_per_order': 'profit_per_order',
-    'monthly_sales_total': 'monthly_sales_total',
-    'ad_removed_roi': 'ad_removed_roi',
-    'head_actual_total': 'head_actual_total',
-    'monthly_profit1': 'monthly_profit1',
-    'product_grade': 'monthly_profit1',
-    'created_at': 'created_at',
-    'updated_at': 'updated_at',
-    'follow_status': 'follow_status',
-}
-
-
 def _get_float(val: str | None):
     if val is None:
         return None
@@ -621,118 +605,19 @@ def _get_int(val: str | None):
         return None
 
 
-OPS_REVIEW_INTERVAL_OPTIONS = ('0-30', '31-50', '51-100', '101-200', '200以上')
-
-
-def _is_200_plus_review_label(label: str) -> bool:
-    t = str(label).strip()
-    return '200以上' in t or t.replace(' ', '') in ('200+', '200＋')
-
-
-def _review_labels_equivalent(selected: str, actual: str) -> bool:
-    """看板筛选用的评价数量区间与 JSON 内「区间」标签是否等同。"""
-    sel = str(selected).strip()
-    act = str(actual).strip()
-    if not sel or not act:
-        return False
-    if sel == act:
-        return True
-    if sel == '101-200' and act in ('101-150', '151-200'):
-        return True
-    if sel == '200以上' and _is_200_plus_review_label(act):
-        return True
-    return False
-
-
-def _parse_ops_json(raw: str) -> list[tuple[str, float]]:
-    """从运营难度 JSON 中提取(评价数量区间, 运营难度百分比)。"""
-    if not raw or not str(raw).strip():
-        return []
-    s = str(raw).strip()
-    out: list[tuple[str, float]] = []
-
-    def _to_num(x):
-        t = str(x).replace('%', '').replace('％', '').strip()
-        if not t:
-            return None
-        try:
-            return float(t)
-        except (TypeError, ValueError):
-            m = re.search(r'(\d+(?:\.\d+)?)', t)
-            if m:
-                return float(m.group(1))
-            return None
-
-    # 新格式：严格 JSON
-    if s.startswith('{'):
-        try:
-            obj = json.loads(s)
-        except json.JSONDecodeError:
-            obj = None
-        if isinstance(obj, dict) and obj:
-            kw = next(iter(obj.keys()))
-            wrap = obj.get(kw)
-            if isinstance(wrap, dict):
-                ri = wrap.get('review_interval')
-                if isinstance(ri, dict):
-                    labels = list(ri.get('区间') or [])
-                    ops = list(ri.get('运营难度') or [])
-                    if ops:
-                        for i, x in enumerate(ops):
-                            label = str(labels[i]).strip() if i < len(labels) else f'idx-{i}'
-                            v = _to_num(x)
-                            if v is not None:
-                                out.append((label, v))
-                        if out:
-                            return out
-
-    # 兼容旧格式文本：兜底提取百分比
-    fallback_labels = ['0-30', '31-50', '51-100', '101-200', '200以上']
-    nums = re.findall(r'(\d+(?:\.\d+)?)\s*[%％]', s)
-    for i, n in enumerate(nums):
-        label = fallback_labels[i] if i < len(fallback_labels) else f'idx-{i}'
-        out.append((label, float(n)))
-    return out
-
-
-def _ops_match(
-    raw: str,
-    lo: float | None,
-    hi: float | None,
-    *,
-    review_interval: str = 'all',
-) -> bool:
-    pairs = _parse_ops_json(raw)
-    if not pairs:
-        return False
-    for label, v in pairs:
-        if review_interval == 'all':
-            if _is_200_plus_review_label(label):
-                continue
-        elif not _review_labels_equivalent(review_interval, label):
-            continue
-        if lo is not None and v < lo:
-            continue
-        if hi is not None and v > hi:
-            continue
-        return True
-    return False
-
-
 def _delete_asin_folder_if_allowed(user, asin: str) -> tuple[bool, str]:
     """
     删除 media/file/<ASIN> 目录。
     返回 (是否成功删除, 说明信息)。
-    普通用户仅可删除本人导入过的 ASIN 目录；超管可删除任意 ASIN 目录。
+    普通用户可删除本人导入或被分配的 ASIN 目录；超管可删除任意 ASIN 目录。
     """
     asin = normalize_asin(asin)
     if not asin:
         return False, 'ASIN 无效'
     if not re.match(r'^B0[A-Z0-9]{8}$', asin):
         return False, f'ASIN 非法：{asin}'
-    if not getattr(user, 'is_superuser', False):
-        if not ImportedMediaPath.objects.filter(user=user, rel_path=asin).exists():
-            return False, f'无权限删除 ASIN 文件夹：{asin}（仅可删除本人导入目录）'
+    if not user_can_delete_asin_media_folder(user, asin):
+        return False, f'无权限删除 ASIN 文件夹：{asin}'
     d = media_root() / asin
     if not d.exists():
         ImportedMediaPath.objects.filter(Q(rel_path=asin) | Q(rel_path__startswith=f'{asin}/')).delete()
@@ -758,10 +643,19 @@ def index(request):
                     'on',
                     'yes',
                 )
-                rows = list(AsinDashboardRow.objects.filter(user=request.user, pk__in=ids).only('asin'))
+                accessible = user_dashboard_rows_qs(request.user)
+                rows = [
+                    r
+                    for r in accessible.filter(pk__in=ids).only('pk', 'asin')
+                    if user_can_delete_dashboard_row(request.user, r)
+                ]
+                if not rows:
+                    messages.error(request, '没有可删除的记录或无权限。')
+                    return redirect('index')
+                pks = [r.pk for r in rows]
                 asins = sorted({normalize_asin(r.asin) for r in rows if r.asin})
-                AsinDashboardRow.objects.filter(user=request.user, pk__in=ids).delete()
-                messages.success(request, f'已删除 {len(ids)} 条记录。')
+                AsinDashboardRow.objects.filter(pk__in=pks).delete()
+                messages.success(request, f'已删除 {len(pks)} 条记录。')
                 if delete_with_folder and asins:
                     ok_cnt = 0
                     err_msgs: list[str] = []
@@ -910,9 +804,12 @@ def index(request):
                     'on',
                     'yes',
                 )
-                row = AsinDashboardRow.objects.filter(user=request.user, pk=rid).only('asin').first()
-                asin = normalize_asin(row.asin) if row and row.asin else ''
-                AsinDashboardRow.objects.filter(user=request.user, pk=rid).delete()
+                row = user_dashboard_rows_qs(request.user).filter(pk=rid).only('asin').first()
+                if not row or not user_can_delete_dashboard_row(request.user, row):
+                    messages.error(request, '无权删除该记录。')
+                    return redirect('index')
+                asin = normalize_asin(row.asin) if row.asin else ''
+                AsinDashboardRow.objects.filter(pk=rid).delete()
                 messages.success(request, '已删除该条记录。')
                 if delete_with_folder and asin:
                     ok, msg = _delete_asin_folder_if_allowed(request.user, asin)
@@ -936,182 +833,38 @@ def index(request):
             return redirect('index')
         return redirect('index')
 
-    sort_key = request.GET.get('sort', 'updated_at')
-    direction = request.GET.get('dir', 'desc')
-    if direction not in ('asc', 'desc'):
-        direction = 'desc'
-    field = DASHBOARD_SORT_FIELDS.get(sort_key, 'updated_at')
-    order_prefix = '-' if direction == 'desc' else ''
-    order_by = f'{order_prefix}{field}'
-
     assigned_codes = user_assigned_asin_codes(request.user)
     assigned_set = {normalize_asin(a) for a in assigned_codes}
     viewer_is_superuser = bool(request.user.is_superuser)
-    rows_qs = user_dashboard_rows_qs(request.user)
-    updated_stamp_map = {
-        normalize_asin(a): t
-        for a, t in AsinDataUpdateStamp.objects.values_list('asin', 'updated_at')
-    }
-    asin_kw = (request.GET.get('asin_kw') or '').strip()
-    if asin_kw:
-        rows_qs = rows_qs.filter(asin__icontains=asin_kw)
 
-    assignee_username = (request.GET.get('assignee_user') or '').strip()
-    if assignee_username:
-        u = User.objects.filter(username__iexact=assignee_username, is_active=True).first()
-        if u:
-            asins_for_u = AsinFolderAssignment.objects.filter(assignees=u).values_list('asin', flat=True)
-            rows_qs = rows_qs.filter(asin__in=list(asins_for_u))
+    page_result = build_dashboard_page(
+        request.user,
+        request,
+        assigned_set=assigned_set,
+        parse_dt_local=_parse_dt_local,
+    )
+    rows = page_result.rows
+    page_obj = page_result.page_obj
+    page_numbers = page_result.page_numbers
+    sort_key = page_result.sort_key
+    direction = page_result.direction
+    ops_params = page_result.ops_params
+    filter_meta = page_result.filter_meta
 
-    # 更新时间筛选
-    updated_from = _parse_dt_local(request.GET.get('updated_from'))
-    updated_to = _parse_dt_local(request.GET.get('updated_to'), end_of_day=True)
-    if updated_from or updated_to:
-        filtered_asins = set()
-        for a, dt in updated_stamp_map.items():
-            if dt is None:
-                continue
-            if updated_from and dt < updated_from:
-                continue
-            if updated_to and dt > updated_to:
-                continue
-            filtered_asins.add(a)
-        rows_qs = rows_qs.filter(asin__in=list(filtered_asins))
-
-    # 数值区间筛选
-    numeric_fields = [
-        ('profit_margin_min', 'profit_margin__gte'),
-        ('profit_margin_max', 'profit_margin__lte'),
-        ('ad_removed_roi_min', 'ad_removed_roi__gte'),
-        ('ad_removed_roi_max', 'ad_removed_roi__lte'),
-        ('monthly_results_min', 'monthly_results__gte'),
-        ('monthly_results_max', 'monthly_results__lte'),
-        ('profit_per_order_min', 'profit_per_order__gte'),
-        ('profit_per_order_max', 'profit_per_order__lte'),
-        ('monthly_sales_total_min', 'monthly_sales_total__gte'),
-        ('monthly_sales_total_max', 'monthly_sales_total__lte'),
-        ('unit_purchase_min', 'unit_purchase__gte'),
-        ('unit_purchase_max', 'unit_purchase__lte'),
-        ('head_actual_total_min', 'head_actual_total__gte'),
-        ('head_actual_total_max', 'head_actual_total__lte'),
-        ('ranking_percent_min', 'ranking_percent__gte'),
-        ('ranking_percent_max', 'ranking_percent__lte'),
-    ]
-    for key, lookup in numeric_fields:
-        v = _get_float(request.GET.get(key))
-        if v is not None:
-            rows_qs = rows_qs.filter(**{lookup: v})
-
-    # 产品等级筛选（A-E，多选）
-    grades = [g.upper() for g in request.GET.getlist('product_grade') if str(g).strip()]
-    allowed = [g for g in grades if g in ('A', 'B', 'C', 'D', 'E')]
-    if allowed:
-        rows_qs = rows_qs.filter(product_grade__in=allowed)
-
-    roi_verified_f = (request.GET.get('roi_verified') or '').strip().lower()
-    if roi_verified_f in ('yes', 'no'):
-        verified_codes = list(AsinRoiPackVerification.objects.values_list('asin', flat=True))
-        if roi_verified_f == 'yes':
-            rows_qs = rows_qs.filter(asin__in=verified_codes)
-        else:
-            rows_qs = rows_qs.exclude(asin__in=verified_codes)
-
-    follow_f = (request.GET.get('follow_filter') or '').strip()
-    if follow_f == AsinDashboardRow.FollowStatus.NORMAL:
-        rows_qs = rows_qs.filter(follow_status=AsinDashboardRow.FollowStatus.NORMAL)
-    elif follow_f == AsinDashboardRow.FollowStatus.PRIORITY:
-        rows_qs = rows_qs.filter(follow_status=AsinDashboardRow.FollowStatus.PRIORITY)
-
-    if field == 'updated_at':
-        rows = list(rows_qs)
-        rows.sort(
-            key=lambda r: updated_stamp_map.get(normalize_asin(r.asin)) or timezone.make_aware(
-                datetime(1970, 1, 1), timezone.get_current_timezone()
-            ),
-            reverse=(direction == 'desc'),
-        )
-    else:
-        rows_qs = rows_qs.order_by(order_by)
-        rows = rows_qs
-
-    # 运营难度筛选（列选择 + 百分比区间 + 评价数量区间）
-    ops_slot = (request.GET.get('ops_slot') or 'any').strip()
-    ops_range = (request.GET.get('ops_range') or 'all').strip()
-    ops_review_interval = (request.GET.get('ops_review_interval') or 'all').strip()
-    if ops_review_interval not in OPS_REVIEW_INTERVAL_OPTIONS:
-        ops_review_interval = 'all'
-    ops_min = None
-    ops_max = None
-    preset = {
-        '0-5': (0.0, 5.0),
-        '5-10': (5.0, 10.0),
-        '10-20': (10.0, 20.0),
-        '30-100': (30.0, 100.0),
-    }
-    if ops_range in preset:
-        ops_min, ops_max = preset[ops_range]
-    elif ops_range == 'custom':
-        ops_min = _get_float(request.GET.get('ops_custom_min'))
-        ops_max = _get_float(request.GET.get('ops_custom_max'))
-
-    if field != 'updated_at':
-        rows = rows_qs
-    if ops_range != 'all':
-        if ops_slot == '1':
-            fields = ('ops_difficulty_1',)
-        elif ops_slot == '2':
-            fields = ('ops_difficulty_2',)
-        elif ops_slot == '3':
-            fields = ('ops_difficulty_3',)
-        else:
-            fields = ('ops_difficulty_1', 'ops_difficulty_2', 'ops_difficulty_3')
-        filtered = []
-        src_rows = rows if field == 'updated_at' else rows_qs
-        for r in src_rows:
-            hit = False
-            for fn in fields:
-                if _ops_match(
-                    getattr(r, fn, ''),
-                    ops_min,
-                    ops_max,
-                    review_interval=ops_review_interval,
-                ):
-                    hit = True
-                    break
-            if hit:
-                filtered.append(r)
-        rows = filtered
-
-    if not isinstance(rows, list):
-        rows = list(rows)
-    rows = dedupe_dashboard_rows(rows, request.user.id, assigned_set)
-
-    page_num = request.GET.get('page') or 1
-    per_page = _dashboard_per_page(request)
-    paginator = Paginator(rows, per_page)
-    page_obj = paginator.get_page(page_num)
-    rows = page_obj.object_list
     asins_on_page = {normalize_asin(r.asin) for r in rows}
-    verified_norm = {
-        normalize_asin(a)
-        for a in AsinRoiPackVerification.objects.filter(asin__in=list(asins_on_page)).values_list(
-            'asin', flat=True
-        )
-    }
+    verified_norm = verified_asins_on_page(asins_on_page)
     _attach_row_assignee_labels(
         rows,
         _assignment_label_map(asins_on_page),
-        request.user.id,
+        request.user,
         assigned_set,
-        viewer_is_superuser,
         roi_verified_asins=verified_norm,
+        uploader_map=uploader_label_map(asins_on_page),
     )
     attach_product_image_urls(rows)
+    stamp_map = stamp_map_for_asins(asins_on_page)
     for r in rows:
-        r.data_updated_at = updated_stamp_map.get(normalize_asin(r.asin))
-    page_start = page_obj.number
-    page_end = min(paginator.num_pages, page_start + 9)
-    page_numbers = list(range(page_start, page_end + 1))
+        r.data_updated_at = stamp_map.get(normalize_asin(r.asin))
 
     kept = request.GET.copy()
     kept.pop('sort', None)
@@ -1121,6 +874,12 @@ def index(request):
     filter_qs = kept.urlencode()
     assignee_choices = list(
         User.objects.filter(is_active=True).order_by('username').values_list('username', flat=True)
+    )
+    uploader_user_ids = ImportedMediaPath.objects.values_list('user_id', flat=True).distinct()
+    uploader_choices = list(
+        User.objects.filter(id__in=uploader_user_ids, is_active=True)
+        .order_by('username')
+        .values_list('username', flat=True)
     )
     return render(
         request,
@@ -1132,20 +891,27 @@ def index(request):
             'sort': sort_key,
             'dir': direction,
             'filter_qs': filter_qs,
-            'per_page': per_page,
+            'per_page': page_obj.paginator.per_page,
             'assignee_choices': assignee_choices,
+            'uploader_choices': uploader_choices,
+            'viewer_is_superuser': viewer_is_superuser,
             'filters': {
-                'ops_slot': ops_slot,
-                'ops_range': ops_range,
-                'ops_review_interval': ops_review_interval,
-                'selected_grades': allowed,
-                'roi_verified': roi_verified_f if roi_verified_f in ('yes', 'no') else '',
-                'follow_filter': follow_f if follow_f in (
+                'ops_slot': ops_params['ops_slot'],
+                'ops_range': ops_params['ops_range'],
+                'ops_review_interval': ops_params['ops_review_interval'],
+                'selected_grades': filter_meta['allowed_grades'],
+                'roi_verified': filter_meta['roi_verified_f']
+                if filter_meta['roi_verified_f'] in ('yes', 'no')
+                else '',
+                'follow_filter': filter_meta['follow_f']
+                if filter_meta['follow_f']
+                in (
                     AsinDashboardRow.FollowStatus.NORMAL,
                     AsinDashboardRow.FollowStatus.PRIORITY,
-                ) else '',
-                'updated_from': (request.GET.get('updated_from') or '').strip(),
-                'updated_to': (request.GET.get('updated_to') or '').strip(),
+                )
+                else '',
+                'updated_from': filter_meta['updated_from'],
+                'updated_to': filter_meta['updated_to'],
             },
             'default_exchange_rate': _default_exchange_rate_for_form(),
         },
@@ -1350,6 +1116,12 @@ def _persist_wizard_results(
         existing = resolve_dashboard_row_for_persist(user, asin, row_id_map) if user else None
         if existing is None:
             existing = AsinDashboardRow.objects.filter(user_id=user_id, asin=asin).first()
+        if existing is None and user and user_is_assigned_to_asin(user, asin):
+            importer_ids = asin_importer_user_ids(asin)
+            if importer_ids:
+                existing = AsinDashboardRow.objects.filter(
+                    user_id=importer_ids[0], asin=asin
+                ).first()
         ranking_to_store = rp
         if existing is not None and existing.ranking_percent is not None:
             try:
@@ -1397,7 +1169,12 @@ def _persist_wizard_results(
             AsinDashboardRow.objects.filter(pk=existing.pk).update(**defaults)
             AsinDashboardRow.objects.filter(user_id=user_id, asin=asin).exclude(pk=existing.pk).delete()
         else:
-            AsinDashboardRow.objects.create(user_id=user_id, asin=asin, **defaults)
+            owner_id = user_id
+            if user and user_is_assigned_to_asin(user, asin):
+                importer_ids = asin_importer_user_ids(asin)
+                if importer_ids:
+                    owner_id = importer_ids[0]
+            AsinDashboardRow.objects.create(user_id=owner_id, asin=asin, **defaults)
         n += 1
         touched_asins.add(asin)
     _touch_asin_updates(touched_asins)
@@ -1917,6 +1694,17 @@ def schedule_messages_page(request):
             | Q(dashboard_row__user=request.user)
         ).distinct()
 
+    uploader_filter = (request.GET.get('uploader') or '').strip()
+    if uploader_filter:
+        upl = User.objects.filter(username__iexact=uploader_filter, is_active=True).first()
+        if upl:
+            uploaded_asins = user_imported_asin_codes(upl)
+            catalog_asins = {
+                normalize_asin(a)
+                for a in AsinCatalogItem.objects.filter(uploaded_by=upl).values_list('asin', flat=True)
+            }
+            qs = qs.filter(asin__in=list(uploaded_asins | catalog_asins))
+
     alert_filter = (request.GET.get('alert') or '').strip().lower()
     if alert_filter == 'alert':
         qs = qs.filter(alert_status=ScheduledTaskMessage.AlertStatus.ALERT)
@@ -1959,6 +1747,11 @@ def schedule_messages_page(request):
     paginator = Paginator(qs, per_page)
     page_obj = paginator.get_page(request.GET.get('page') or 1)
 
+    asins_on_page = {normalize_asin(m.asin) for m in page_obj.object_list if m.asin}
+    upl_map = uploader_label_map(asins_on_page)
+    for m in page_obj.object_list:
+        m.uploader_display = upl_map.get(normalize_asin(m.asin)) or '—'
+
     page_start = max(1, page_obj.number - 4)
     page_end = min(paginator.num_pages, page_obj.number + 5)
     page_numbers = list(range(page_start, page_end + 1)) if paginator.num_pages else []
@@ -1967,6 +1760,13 @@ def schedule_messages_page(request):
     kept.pop('page', None)
     filter_qs = kept.urlencode()
 
+    uploader_user_ids = ImportedMediaPath.objects.values_list('user_id', flat=True).distinct()
+    uploader_choices = list(
+        User.objects.filter(id__in=uploader_user_ids, is_active=True)
+        .order_by('username')
+        .values_list('username', flat=True)
+    )
+
     return render(
         request,
         'auto_amazon/schedule_messages.html',
@@ -1974,11 +1774,13 @@ def schedule_messages_page(request):
             'page_obj': page_obj,
             'page_numbers': page_numbers,
             'filter_qs': filter_qs,
+            'uploader_choices': uploader_choices,
             'filters': {
                 'alert': alert_filter,
                 'asin': asin_q,
                 'date_from': date_from_raw,
                 'date_to': date_to_raw,
+                'uploader': uploader_filter,
             },
         },
     )
@@ -2311,6 +2113,47 @@ def excel_editor_page(request):
     )
 
 
+_EXCEL_BROWSE_DEFAULT_LIMIT = 100
+_EXCEL_BROWSE_MAX_LIMIT = 2000
+
+
+def _excel_browse_pagination(request, rel: str) -> tuple[int, int]:
+    if rel:
+        return 0, 0
+    try:
+        limit = int(request.GET.get('limit', str(_EXCEL_BROWSE_DEFAULT_LIMIT)))
+    except (TypeError, ValueError):
+        limit = _EXCEL_BROWSE_DEFAULT_LIMIT
+    limit = max(1, min(limit, _EXCEL_BROWSE_MAX_LIMIT))
+    try:
+        offset = int(request.GET.get('offset', '0'))
+    except (TypeError, ValueError):
+        offset = 0
+    return limit, max(0, offset)
+
+
+def _excel_browse_filter_params(request) -> dict:
+    def _ms(key: str) -> int:
+        raw = (request.GET.get(key) or '').strip()
+        if not raw:
+            return 0
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            return 0
+
+    return {
+        'q': (request.GET.get('q') or '').strip().lower(),
+        'calc': (request.GET.get('calc') or 'all').strip() or 'all',
+        'roi_verified': (request.GET.get('roi_verified') or 'all').strip() or 'all',
+        'assign_status': (request.GET.get('assign_status') or 'all').strip() or 'all',
+        'assignee': (request.GET.get('assignee') or '').strip(),
+        'updated_from_ms': _ms('updated_from'),
+        'updated_to_ms': _ms('updated_to'),
+        'uploaded_by': (request.GET.get('uploaded_by') or '').strip(),
+    }
+
+
 @login_required
 @require_GET
 def excel_browse(request):
@@ -2319,6 +2162,39 @@ def excel_browse(request):
     if not is_super and rel:
         if not user_can_access_excel_media_path(request.user, rel):
             return JsonResponse({'ok': False, 'error': '无权限访问该目录'}, status=403)
+
+    if rel == '':
+        try:
+            fp = _excel_browse_filter_params(request)
+            all_items = build_root_index_items(request.user, is_super=is_super)
+            filtered = apply_root_filters(all_items, fp)
+            total = len(filtered)
+            limit, offset = _excel_browse_pagination(request, rel)
+            page_items = [dict(it) for it in filtered[offset : offset + limit]]
+            enrich_root_page_delete_flags(request.user, is_super=is_super, items=page_items)
+            has_more = offset + len(page_items) < total
+        except DatabaseError as e:
+            return JsonResponse(
+                {
+                    'ok': False,
+                    'error': (
+                        '数据库未就绪：请在服务器项目目录执行 python manage.py migrate 后再试。'
+                        f' 详情：{e}'
+                    ),
+                },
+                status=503,
+            )
+        return JsonResponse({
+            'ok': True,
+            'path': '',
+            'parent': None,
+            'items': page_items,
+            'total': total,
+            'limit': limit,
+            'offset': offset,
+            'has_more': has_more,
+        })
+
     target = safe_media_path_global(rel)
     if target is None:
         return JsonResponse({'ok': False, 'error': '路径非法'}, status=400)
@@ -2337,16 +2213,36 @@ def excel_browse(request):
             if re.match(r'^B0[A-Z0-9]{8}$', nm):
                 asin_names_in_view.append(nm)
     try:
-        dashboard_asins = {
-            normalize_asin(a) for a in AsinDashboardRow.objects.values_list('asin', flat=True)
-        }
-        roi_verified_asins = {
-            normalize_asin(a) for a in AsinRoiPackVerification.objects.values_list('asin', flat=True)
-        }
-        updated_map = {
-            normalize_asin(a): t
-            for a, t in AsinDataUpdateStamp.objects.values_list('asin', 'updated_at')
-        }
+        dashboard_asins = (
+            {
+                normalize_asin(a)
+                for a in AsinDashboardRow.objects.filter(asin__in=asin_names_in_view).values_list(
+                    'asin', flat=True
+                )
+            }
+            if asin_names_in_view
+            else set()
+        )
+        roi_verified_asins = (
+            {
+                normalize_asin(a)
+                for a in AsinRoiPackVerification.objects.filter(
+                    asin__in=asin_names_in_view
+                ).values_list('asin', flat=True)
+            }
+            if asin_names_in_view
+            else set()
+        )
+        updated_map = (
+            {
+                normalize_asin(a): t
+                for a, t in AsinDataUpdateStamp.objects.filter(
+                    asin__in=asin_names_in_view
+                ).values_list('asin', 'updated_at')
+            }
+            if asin_names_in_view
+            else {}
+        )
         assign_map: dict[str, list[str]] = {}
         if asin_names_in_view:
             for obj in (
@@ -2370,18 +2266,7 @@ def excel_browse(request):
             else:
                 owned_paths = set(oq.values_list('rel_path', flat=True))
         uploaders_by_asin: dict[str, set[str]] = defaultdict(set)
-        if rel == '' and asin_names_in_view:
-            asins_in_view = set(asin_names_in_view)
-            for rpath, uname in ImportedMediaPath.objects.values_list(
-                'rel_path', 'user__username'
-            ):
-                rp = str(rpath).replace('\\', '/').strip('/')
-                if not rp:
-                    continue
-                seg = rp.split('/')[0].strip().upper()
-                if seg in asins_in_view:
-                    uploaders_by_asin[seg].add(uname)
-        elif rel != '':
+        if rel != '':
             for rpath, uname in ImportedMediaPath.objects.filter(
                 Q(rel_path=rel) | Q(rel_path__startswith=f'{rel}/')
             ).values_list('rel_path', 'user__username'):
@@ -2402,7 +2287,6 @@ def excel_browse(request):
             },
             status=503,
         )
-    uploaded_by_filter = (request.GET.get('uploaded_by') or '').strip()
     items = []
     path_batch: list[str] = []
     for p in entries:
@@ -2436,9 +2320,6 @@ def excel_browse(request):
                 elif not user_can_access_excel_media_path(request.user, child_rel):
                     continue
             uploaders_list = sorted(uploaders_by_asin.get(nm, [])) if is_asin_dir else []
-            if rel == '' and uploaded_by_filter and is_asin_dir:
-                if uploaded_by_filter not in uploaders_by_asin.get(nm, set()):
-                    continue
             assignees = assign_map.get(nm, []) if is_asin_dir else []
             updated_at = updated_map.get(nm)
             updated_label = timezone.localtime(updated_at).strftime('%Y-%m-%d %H:%M:%S') if updated_at else ''
@@ -2487,21 +2368,19 @@ def excel_browse(request):
                 'uploaders': [fu_file] if fu_file else [],
                 'can_delete': can_delete_item,
             })
-    if rel == '':
-        items.sort(
-            key=lambda it: (
-                it.get('type') != 'dir',
-                not bool(it.get('is_asin_dir')),
-                -(it.get('updated_at_ts') or 0),
-                str(it.get('name') or '').lower(),
-            )
-        )
+    limit, offset = 0, 0
+    total = len(items)
+    has_more = False
     parent = parent_rel(rel) if rel else None
     return JsonResponse({
         'ok': True,
         'path': rel,
         'parent': parent,
         'items': items,
+        'total': total,
+        'limit': limit,
+        'offset': offset,
+        'has_more': has_more,
     })
 
 
@@ -2615,30 +2494,37 @@ def excel_delete(request):
             return JsonResponse({'ok': False, 'error': f'非法路径: {rel}'}, status=400)
         if path == root:
             return JsonResponse({'ok': False, 'error': '不能删除根目录'}, status=400)
+        root_asin = asin_root_from_rel_path(rel)
+        assigned_tree = bool(
+            not is_super
+            and root_asin
+            and user_is_assigned_to_asin(request.user, root_asin)
+            and (rel == root_asin or rel.startswith(f'{root_asin}/'))
+        )
         if not is_super:
-            if not user_can_access_excel_media_path(request.user, rel):
+            if not user_can_delete_excel_media_path(request.user, rel):
                 return JsonResponse({'ok': False, 'error': '无权限删除该路径'}, status=403)
-            if not ImportedMediaPath.objects.filter(user=request.user, rel_path=rel).exists():
-                return JsonResponse(
-                    {'ok': False, 'error': '只能删除本人通过「导入」上传的文件或文件夹（管理员分配的资料无删除权限）'},
-                    status=403,
-                )
-            if path.is_dir():
-                for fp in path.rglob('*'):
-                    if not fp.is_file():
-                        continue
-                    sub_rel = str(fp.relative_to(root)).replace('\\', '/')
-                    if not ImportedMediaPath.objects.filter(user=request.user, rel_path=sub_rel).exists():
-                        return JsonResponse(
-                            {
-                                'ok': False,
-                                'error': f'文件夹内存在非本人导入的文件，无法整夹删除：{sub_rel}',
-                            },
-                            status=403,
-                        )
+            if not assigned_tree:
+                if path.is_dir():
+                    for fp in path.rglob('*'):
+                        if not fp.is_file():
+                            continue
+                        sub_rel = str(fp.relative_to(root)).replace('\\', '/')
+                        if not ImportedMediaPath.objects.filter(
+                            user=request.user, rel_path=sub_rel
+                        ).exists():
+                            return JsonResponse(
+                                {
+                                    'ok': False,
+                                    'error': f'文件夹内存在非本人导入的文件，无法整夹删除：{sub_rel}',
+                                },
+                                status=403,
+                            )
         try:
-            if is_super:
-                ImportedMediaPath.objects.filter(Q(rel_path=rel) | Q(rel_path__startswith=f'{rel}/')).delete()
+            if is_super or assigned_tree:
+                ImportedMediaPath.objects.filter(
+                    Q(rel_path=rel) | Q(rel_path__startswith=f'{rel}/')
+                ).delete()
             else:
                 ImportedMediaPath.objects.filter(user=request.user).filter(
                     Q(rel_path=rel) | Q(rel_path__startswith=f'{rel}/')
@@ -2661,6 +2547,7 @@ def excel_delete(request):
                 path.unlink()
         except OSError as e:
             return JsonResponse({'ok': False, 'error': str(e)}, status=400)
+    bust_excel_browse_cache()
     return JsonResponse({'ok': True})
 
 
@@ -2684,6 +2571,17 @@ def excel_import_chunk(request):
         return JsonResponse({'ok': False, 'error': str(e)}, status=403)
     except ValueError as e:
         return JsonResponse({'ok': False, 'error': str(e)}, status=400)
+    except UnicodeDecodeError as e:
+        return JsonResponse(
+            {
+                'ok': False,
+                'error': (
+                    'ZIP 内中文路径编码无法识别，请用 7-Zip 重新压缩并勾选 UTF-8 文件名后重试。'
+                    f' 详情：{e}'
+                ),
+            },
+            status=400,
+        )
     out: dict = {
         'ok': True,
         'staging_id': sid,
@@ -2719,7 +2617,10 @@ def excel_import_commit(request):
     except (ValueError, FileNotFoundError) as e:
         return JsonResponse({'ok': False, 'error': str(e)}, status=400)
     mr = media_root()
-    conflicts = refresh_conflicts_in_meta(mr, sdir, meta)
+    try:
+        conflicts = refresh_conflicts_in_meta(mr, sdir, meta)
+    except ValueError as e:
+        return JsonResponse({'ok': False, 'error': str(e)}, status=400)
     if conflicts and not overwrite and not skip_existing:
         return JsonResponse(
             {
@@ -2734,6 +2635,17 @@ def excel_import_commit(request):
     skip_if_exists = skip_existing and not overwrite
     try:
         written, skipped_existing = extract_zip_to_media_root(zip_path, mr, skip_if_exists=skip_if_exists)
+    except UnicodeDecodeError as e:
+        return JsonResponse(
+            {
+                'ok': False,
+                'error': (
+                    'ZIP 内中文路径编码无法识别，请用 7-Zip 重新压缩并勾选 UTF-8 文件名后重试。'
+                    f' 详情：{e}'
+                ),
+            },
+            status=400,
+        )
     except Exception as e:
         return JsonResponse({'ok': False, 'error': f'解压失败：{e}'}, status=400)
     try:
@@ -2755,6 +2667,7 @@ def excel_import_commit(request):
             status=503,
         )
     cleanup_staging_dir(sdir)
+    bust_excel_browse_cache()
     return JsonResponse(
         {
             'ok': True,
@@ -3140,6 +3053,7 @@ def excel_assign_folders(request):
         users,
         assigned_by=request.user,
     )
+    bust_excel_browse_cache()
     return JsonResponse(
         {
             'ok': True,

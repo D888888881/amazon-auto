@@ -396,21 +396,25 @@ def run_ad_difficulty_asins_batch(
     on_asin_done: Callable[[str, dict], None] | None = None,
     on_asin_failed: Callable[[AsinFailure], None] | None = None,
     max_retries: int | None = None,
+    sequential: bool = False,
 ) -> BatchRunResult:
-    """一次调用批量计算广告难度（内部多 ASIN 并发）；失败 ASIN 单独记录。"""
+    """一次调用批量计算广告难度；sequential=True 时供定时任务顺序拉取（无并发）。"""
     asin_list = ordered_unique_asins(asins)
     result = BatchRunResult()
     if not asin_list:
         return result
     if on_progress:
-        on_progress(f'批量计算广告难度：共 {len(asin_list)} 个 ASIN（并发）…')
+        mode = '顺序' if sequential else '并发'
+        on_progress(f'批量计算广告难度：共 {len(asin_list)} 个 ASIN（{mode}）…')
     retries = max_retries if max_retries is not None else roi_asin_max_retries()
     try:
         merged = _run_one_asin_with_retry(
             'batch',
             max_retries=retries,
             run_fn=lambda: run_ad_difficulty_for_asins(
-                asin_list, on_stderr_line=on_stderr_line
+                asin_list,
+                on_stderr_line=on_stderr_line,
+                sequential=sequential,
             ),
             on_progress=on_progress,
         )

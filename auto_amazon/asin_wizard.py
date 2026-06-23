@@ -155,6 +155,8 @@ def _raise_wizard_subprocess_error(err: str, *, script: str) -> None:
 def _run_ad_difficulty_subprocess(
     asins: list[str],
     on_stderr_line: Callable[[str], None] | None = None,
+    *,
+    sequential: bool = False,
 ) -> dict:
     import os
 
@@ -163,6 +165,8 @@ def _run_ad_difficulty_subprocess(
     if not runner.is_file():
         raise FileNotFoundError(f'未找到脚本：{runner}')
     payload_obj = {'asins': [str(x).strip().upper() for x in asins if str(x).strip()]}
+    if sequential:
+        payload_obj['sequential'] = True
     payload = json.dumps(payload_obj, ensure_ascii=False).encode('utf-8')
 
     env = os.environ.copy()
@@ -234,12 +238,14 @@ def _run_seller_wizard_impl(
 def _run_ad_difficulty_impl(
     asins: list[str],
     on_stderr_line: Callable[[str], None] | None = None,
+    *,
+    sequential: bool = False,
 ) -> dict:
     if _wizard_exec_mode() == 'inprocess':
         from .wizard_runtime import run_ad_difficulty_inprocess
 
-        return run_ad_difficulty_inprocess(asins, on_stderr_line)
-    return _run_ad_difficulty_subprocess(asins, on_stderr_line)
+        return run_ad_difficulty_inprocess(asins, on_stderr_line, sequential=sequential)
+    return _run_ad_difficulty_subprocess(asins, on_stderr_line, sequential=sequential)
 
 
 def run_seller_wizard(
@@ -263,11 +269,14 @@ def run_seller_wizard(
 def run_ad_difficulty_for_asins(
     asins: list[str],
     on_stderr_line: Callable[[str], None] | None = None,
+    *,
+    sequential: bool = False,
 ) -> dict:
     """
     运行广告难度计算（统一使用批量账号池；禁号轮换在 calculate_ad_difficulty_for_asins 内处理）。
+    sequential=True 时逐个 ASIN/请求顺序执行（供定时任务使用）。
     """
     from .roi_routing import ad_difficulty_credential_profile_context
 
     with ad_difficulty_credential_profile_context():
-        return _run_ad_difficulty_impl(asins, on_stderr_line)
+        return _run_ad_difficulty_impl(asins, on_stderr_line, sequential=sequential)

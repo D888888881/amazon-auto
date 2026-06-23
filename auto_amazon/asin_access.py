@@ -65,15 +65,20 @@ def user_can_access_excel_media_path(user: User, rel_path: str) -> bool:
 
 
 def user_dashboard_rows_qs(user: User):
-    """首页看板可见行：本人数据 + 被分配的 ASIN。"""
+    """首页看板可见行：超管全部；否则本人 + 被分配 + 本人导入的 ASIN。"""
     from django.db.models import Q
 
     from .models import AsinDashboardRow
 
     if not getattr(user, 'is_authenticated', False):
         return AsinDashboardRow.objects.none()
+    if getattr(user, 'is_superuser', False):
+        return AsinDashboardRow.objects.all()
     assigned = user_assigned_asin_codes(user)
-    return AsinDashboardRow.objects.filter(Q(user=user) | Q(asin__in=assigned)).distinct()
+    imported = user_imported_asin_codes(user)
+    return AsinDashboardRow.objects.filter(
+        Q(user=user) | Q(asin__in=assigned) | Q(asin__in=imported)
+    ).distinct()
 
 
 def user_can_operate_dashboard_row(user: User, row) -> bool:
@@ -86,10 +91,82 @@ def user_can_operate_dashboard_row(user: User, row) -> bool:
 
 
 def user_can_delete_dashboard_row(user: User, row) -> bool:
-    """看板行删除：仅数据归属者或超管；被分配用户不可删。"""
+    """看板行删除：超管、数据归属者或被分配用户。"""
     if getattr(user, 'is_superuser', False):
         return True
-    return row.user_id == user.id
+    if row.user_id == user.id:
+        return True
+    return user_is_assigned_to_asin(user, row.asin)
+
+
+def user_can_delete_asin_media_folder(user: User, asin: str | None) -> bool:
+    """是否可删除 media/file/<ASIN> 整目录。"""
+    if getattr(user, 'is_superuser', False):
+        return True
+    a = normalize_asin(asin)
+    if not a:
+        return False
+    if user_is_assigned_to_asin(user, a):
+        return True
+    from .models import ImportedMediaPath
+
+    return ImportedMediaPath.objects.filter(user=user, rel_path=a).exists()
+
+
+def user_can_delete_excel_media_path(user: User, rel_path: str) -> bool:
+    """数据审核页删除：超管、被分配 ASIN 下任意路径，或本人导入的路径。"""
+    if getattr(user, 'is_superuser', False):
+        return True
+    if not user_can_access_excel_media_path(user, rel_path):
+        return False
+    root = asin_root_from_rel_path(rel_path)
+    if root and user_is_assigned_to_asin(user, root):
+        return True
+    from .models import ImportedMediaPath
+
+    return ImportedMediaPath.objects.filter(user=user, rel_path=rel_path).exists()
+
+
+def uploader_label_map(asins: set[str]) -> dict[str, str]:
+    """批量解析 ASIN 上传者显示名（与定时消息收件人规则一致）。"""
+    if not asins:
+        return {}
+    from .models import AsinCatalogItem, ImportedMediaPath
+
+    norm = {normalize_asin(a) for a in asins if normalize_asin(a)}
+    out: dict[str, str] = {}
+    for a, uname in (
+        AsinCatalogItem.objects.filter(asin__in=norm)
+        .select_related('uploaded_by')
+        .values_list('asin', 'uploaded_by__username')
+    ):
+        key = normalize_asin(a)
+        if uname and key not in out:
+            out[key] = uname
+    missing = norm - set(out.keys())
+    if missing:
+        for rp, uname in (
+            ImportedMediaPath.objects.filter(rel_path__in=missing)
+            .select_related('user')
+            .values_list('rel_path', 'user__username')
+        ):
+            key = normalize_asin(rp)
+            if uname and key not in out:
+                out[key] = uname
+    still = norm - set(out.keys())
+    if still:
+        from .models import AsinDashboardRow
+
+        for a, uname in (
+            AsinDashboardRow.objects.filter(asin__in=still)
+            .select_related('user')
+            .order_by('-created_at')
+            .values_list('asin', 'user__username')
+        ):
+            key = normalize_asin(a)
+            if uname and key not in out:
+                out[key] = uname
+    return out
 
 
 def resolve_dashboard_row_for_persist(
@@ -97,7 +174,7 @@ def resolve_dashboard_row_for_persist(
     asin: str,
     target_row_ids: dict[str, int] | None = None,
 ):
-    """ROI 结果写入时定位看板行：勾选行 > 被分配共享行 > 本人行。"""
+    """ROI 结果写入时定位看板行：勾选行 > 上传者行 > 其他共享行 > 本人行。"""
     from .models import AsinDashboardRow
 
     a = normalize_asin(asin)
@@ -110,6 +187,15 @@ def resolve_dashboard_row_for_persist(
         if row:
             return row
     if user_is_assigned_to_asin(user, a):
+        importer_ids = asin_importer_user_ids(a)
+        if importer_ids:
+            upl = (
+                AsinDashboardRow.objects.filter(asin=a, user_id__in=importer_ids)
+                .order_by('-created_at')
+                .first()
+            )
+            if upl:
+                return upl
         shared = (
             AsinDashboardRow.objects.filter(asin=a)
             .exclude(user_id=user.id)
@@ -122,7 +208,10 @@ def resolve_dashboard_row_for_persist(
 
 
 def pick_preferred_dashboard_row(row_a, row_b, viewer_id: int, assigned_asins: set[str]):
-    """同一 ASIN 多行时：被分配 ASIN 优先展示/保留管理员共享行，否则优先本人行。"""
+    """同一 ASIN 多行时：优先有 ROI 数据的行，再按分配/归属规则取舍。"""
+    ra, rb = _row_metric_rank(row_a), _row_metric_rank(row_b)
+    if ra != rb:
+        return row_a if ra > rb else row_b
     key = normalize_asin(row_a.asin)
     if key in assigned_asins:
         if row_a.user_id != viewer_id and row_b.user_id == viewer_id:
@@ -162,6 +251,31 @@ def user_imported_asin_codes(user: User) -> set[str]:
         if _ASIN_DIR.match(seg):
             out.add(seg)
     return out
+
+
+def asin_importer_user_ids(asin: str | None) -> list[int]:
+    """曾导入过该 ASIN 媒体目录的用户 id（含根目录或子路径）。"""
+    from django.db.models import Q
+
+    from .models import ImportedMediaPath
+
+    a = normalize_asin(asin)
+    if not a:
+        return []
+    return list(
+        ImportedMediaPath.objects.filter(Q(rel_path=a) | Q(rel_path__startswith=f'{a}/'))
+        .values_list('user_id', flat=True)
+        .distinct()
+    )
+
+
+def _row_metric_rank(row) -> int:
+    """已写入 ROI 的字段越多，排名越高（去重时优先展示有数据的行）。"""
+    n = 0
+    for field in ('monthly_results', 'profit_margin', 'ad_removed_roi', 'monthly_profit1'):
+        if getattr(row, field, None) is not None:
+            n += 1
+    return n
 
 
 def bulk_assign_asin_folders(

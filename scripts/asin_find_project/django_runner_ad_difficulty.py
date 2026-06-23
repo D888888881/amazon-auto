@@ -36,8 +36,14 @@ async def _main():
     payload = json.loads(raw or '{}')
     asins = payload.get('asins') or []
     asins = [str(x).strip().upper() for x in asins if str(x).strip()]
+    sequential = bool(payload.get('sequential'))
     print('PROGRESS:开始计算广告难度…', file=sys.stderr, flush=True)
-    result = await calculate_ad_difficulty_for_asins(asins if asins else None)
+    if sequential:
+        print('PROGRESS:定时任务顺序模式（无并发）…', file=sys.stderr, flush=True)
+    result = await calculate_ad_difficulty_for_asins(
+        asins if asins else None,
+        sequential=sequential,
+    )
     print('PROGRESS:计算完成，正在输出 JSON…', file=sys.stderr, flush=True)
     return _to_jsonable(result)
 
