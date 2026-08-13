@@ -22,7 +22,11 @@ from .models import (
     ScheduledJobLog,
     ScheduledTaskMessage,
 )
-from .ops_metrics import refresh_row_ops_from_media, row_metrics_snapshot
+from .ops_metrics import (
+    refresh_row_ops_from_media,
+    row_metrics_snapshot,
+    should_skip_scheduled_ad_difficulty,
+)
 from .resilient_wizard import (
     ordered_unique_asins,
     run_ad_difficulty_asins_batch,
@@ -133,7 +137,9 @@ def resolve_asin_message_recipient(asin: str) -> User | None:
     )
     if imp and imp.user_id:
         return imp.user
-    row = AsinDashboardRow.objects.filter(asin=a).order_by('-created_at').first()
+    row = AsinDashboardRow.objects.filter(
+        asin=a, marketplace=AsinDashboardRow.Marketplace.US
+    ).order_by('-created_at').first()
     return row.user if row else None
 
 
@@ -252,6 +258,7 @@ def _resolve_priority_row(
     return (
         AsinDashboardRow.objects.filter(
             asin=key,
+            marketplace=AsinDashboardRow.Marketplace.US,
             follow_status=AsinDashboardRow.FollowStatus.PRIORITY,
         )
         .order_by('-created_at')
@@ -279,11 +286,15 @@ def _persist_ad_batch_results(
         row = row_by_asin.get(norm)
         if not row:
             continue
+        if not payload.get('computed_ad'):
+            continue
         rp = payload.get('ranking_percent')
+        if rp is None:
+            continue
         try:
             rp_num = float(rp)
         except (TypeError, ValueError):
-            rp_num = 0.0
+            continue
         AsinDashboardRow.objects.filter(pk=row.pk).update(ranking_percent=rp_num)
         touched.add(normalize_asin(asin))
     if touched:
@@ -324,7 +335,9 @@ def _execute_scheduled_batch_worker_impl(items: list[ScheduledWorkItem]) -> dict
         row.refresh_from_db()
         before_map[w.row_pk] = row_metrics_snapshot(row)
 
-    ad_asins = ordered_unique_asins([w.asin for w in items if w.ad_due])
+    ad_due_asins = ordered_unique_asins([w.asin for w in items if w.ad_due])
+    ad_skipped: set[str] = set()
+    ad_asins: list[str] = []
     roi_items = [w for w in items if w.roi_due]
     roi_asins = ordered_unique_asins([w.asin for w in roi_items])
 
@@ -382,7 +395,33 @@ def _execute_scheduled_batch_worker_impl(items: list[ScheduledWorkItem]) -> dict
                 logger.exception('scheduled roi persist failed %s', norm)
                 roi_errors[norm] = f'{type(exc).__name__}: {exc}'
 
+    if ad_due_asins:
+        to_run: list[str] = []
+        for asin in ad_due_asins:
+            norm = normalize_asin(asin)
+            row = _resolve_priority_row(asin, rows_by_pk, items)
+            if not row:
+                to_run.append(norm)
+                continue
+            row.refresh_from_db()
+            if should_skip_scheduled_ad_difficulty(row, media_fallback=True):
+                ad_skipped.add(norm)
+                # 写入时间戳，避免淘汰跳过导致每周反复入队空跑
+                AsinDashboardRow.objects.filter(pk=row.pk).update(
+                    last_scheduled_ad_at=timezone.now()
+                )
+                logger.info(
+                    'scheduled ad skip %s: latest ad_roi<=%s or ops<=%s (eliminate)',
+                    norm,
+                    80,
+                    10,
+                )
+            else:
+                to_run.append(norm)
+        ad_asins = to_run
+
     ad_errors: dict[str, str] = {}
+    ad_zero_words: set[str] = set()
     ad_ok: set[str] = set()
     if ad_asins:
         logger.info(
@@ -391,7 +430,11 @@ def _execute_scheduled_batch_worker_impl(items: list[ScheduledWorkItem]) -> dict
         )
         ad_batch = run_ad_difficulty_asins_batch(ad_asins, sequential=True)
         for failure in ad_batch.failures:
-            ad_errors[normalize_asin(failure.asin)] = failure.error
+            norm = normalize_asin(failure.asin)
+            if failure.error == '广告词数量为0':
+                ad_zero_words.add(norm)
+            else:
+                ad_errors[norm] = failure.error
         ad_ok = {normalize_asin(a) for a in ad_batch.succeeded}
         _persist_ad_batch_results(items, rows_by_pk, ad_batch.merged)
         now = timezone.now()
@@ -406,6 +449,11 @@ def _execute_scheduled_batch_worker_impl(items: list[ScheduledWorkItem]) -> dict
             if not row:
                 continue
             AsinDashboardRow.objects.filter(pk=row.pk).update(last_scheduled_ad_at=now)
+        for norm in ad_zero_words:
+            row = _resolve_priority_row(norm, rows_by_pk, items)
+            if row:
+                AsinDashboardRow.objects.filter(pk=row.pk).update(last_scheduled_ad_at=now)
+                logger.info('scheduled ad skip %s: zero ad words', norm)
 
     messages_created = 0
     for w in items:
@@ -428,7 +476,11 @@ def _execute_scheduled_batch_worker_impl(items: list[ScheduledWorkItem]) -> dict
         roi_ran = w.roi_due and asin in roi_ok
 
         if w.ad_due:
-            if ad_ran:
+            if asin in ad_skipped:
+                detail_parts.append('skip ad difficulty (roi or ops eliminated)')
+            elif asin in ad_zero_words:
+                detail_parts.append('skip ad difficulty (zero ad words)')
+            elif ad_ran:
                 detail_parts.append('run ad difficulty')
             elif asin in ad_errors:
                 item_errors.append(f'ad: {ad_errors[asin]}')
@@ -464,6 +516,9 @@ def _execute_scheduled_batch_worker_impl(items: list[ScheduledWorkItem]) -> dict
             job_log.detail = '; '.join(detail_parts + [f'partial fail: {"; ".join(item_errors)}'])
         elif ran_any:
             job_log.status = ScheduledJobLog.Status.SUCCESS
+            job_log.detail = '; '.join(detail_parts)
+        elif detail_parts:
+            job_log.status = ScheduledJobLog.Status.SKIPPED
             job_log.detail = '; '.join(detail_parts)
         else:
             job_log.status = ScheduledJobLog.Status.SKIPPED
@@ -665,6 +720,7 @@ def run_scheduled_asin_jobs(*, due_only: bool = True, dry_run: bool = False) -> 
     rows = list(
         AsinDashboardRow.objects.filter(
             follow_status=AsinDashboardRow.FollowStatus.PRIORITY,
+            marketplace=AsinDashboardRow.Marketplace.US,
         ).select_related('user')
     )
     rows = dedupe_priority_rows_for_scheduler(rows)

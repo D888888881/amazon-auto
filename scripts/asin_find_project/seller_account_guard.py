@@ -53,6 +53,19 @@ _login_lock = asyncio.Lock()
 class SellerAccountBannedError(Exception):
     """子账号被禁用时登录无法返回 rank-login-user。"""
 
+    def __init__(
+        self,
+        message: str = '',
+        *,
+        partial_results: dict | None = None,
+        ban_pending: list[str] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.partial_results = partial_results or {}
+        self.ban_pending = [
+            str(a).strip().upper() for a in (ban_pending or []) if str(a).strip()
+        ]
+
 
 def looks_like_seller_auth_message(text: str) -> bool:
     """API/登录响应文本是否像会话失效或子账号被禁。"""
@@ -64,11 +77,10 @@ def looks_like_seller_auth_message(text: str) -> bool:
         'selleraccountbannederror',
         '请先登录', '请登录', '未登录', '登录失效', '登录过期', '会话失效', '会话过期',
         'sign in', 'signin', 'not login', 'not logged', 'login required',
-        'unauthorized', 'forbidden', 'sprite-x-token', 'token invalid', 'token expired',
-        '子账号', '被禁用', '账号禁用', 'account banned', 'account disabled',
-        'child-account/unlock', 'unlock', '权限不足', 'permission denied',
+        'unauthorized', 'sprite-x-token', 'token invalid', 'token expired',
+        '子账号被禁', '子账号禁用', '账号被禁', '账号禁用', 'account banned', 'account disabled',
+        'child-account/unlock', '权限不足', 'permission denied',
         'session expired', 'session invalid', 'err_not_login', 'err_login',
-        'data 字段类型异常', '会话失效',
     )
     return any(m in lowered for m in markers)
 
@@ -81,18 +93,18 @@ def parse_sellersprite_api_payload(
 ) -> dict[str, Any]:
     """
     从卖家精灵 API 顶层 JSON 提取 data dict。
-    会话失效或子账号禁用时抛出 SellerAccountBannedError。
+    仅会话失效/子账号禁用时抛出 SellerAccountBannedError；普通业务错误返回空 dict。
     """
     if not isinstance(payload, dict):
-        raise SellerAccountBannedError(
-            f'{api} ASIN {asin} 响应格式异常（非 JSON 对象）'
-        )
+        print(f'{api} ASIN {asin} 响应格式异常（非 JSON 对象）')
+        return {}
 
     if payload.get('error'):
         err_text = str(payload.get('error'))
         if looks_like_seller_auth_message(err_text):
             raise SellerAccountBannedError(f'{api} ASIN {asin}: {err_text}')
-        raise SellerAccountBannedError(f'{api} ASIN {asin} 请求失败: {err_text}')
+        print(f'{api} ASIN {asin} 业务错误（非禁号）: {err_text[:200]}')
+        return {}
 
     code = payload.get('code')
     msg = str(payload.get('message') or payload.get('msg') or '')
@@ -103,6 +115,8 @@ def parse_sellersprite_api_payload(
             raise SellerAccountBannedError(
                 f'{api} ASIN {asin} 会话失效(code={code}): {detail[:300]}'
             )
+        print(f'{api} ASIN {asin} 业务 code={code}: {detail[:200]}')
+        return {}
 
     if looks_like_seller_auth_message(msg):
         raise SellerAccountBannedError(f'{api} ASIN {asin}: {msg[:300]}')
@@ -123,9 +137,8 @@ def parse_sellersprite_api_payload(
         print(f'{api} ASIN {asin} data 为字符串（非对象）: {text[:120]}')
         return {}
 
-    raise SellerAccountBannedError(
-        f'{api} ASIN {asin} data 字段类型异常: {type(data_content).__name__}'
-    )
+    print(f'{api} ASIN {asin} data 字段类型异常: {type(data_content).__name__}')
+    return {}
 
 
 def is_seller_account_banned_error(exc: BaseException) -> bool:

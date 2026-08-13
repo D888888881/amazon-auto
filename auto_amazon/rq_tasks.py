@@ -47,6 +47,21 @@ def run_ad_difficulty_job_task(
         close_old_connections()
 
 
+def run_ops_difficulty_job_task(
+    job_id: str,
+    user_id: int,
+    asins: list[str],
+    marketplace: str = 'UK',
+) -> None:
+    from .views import _run_ops_difficulty_job
+
+    close_old_connections()
+    try:
+        _run_ops_difficulty_job(job_id, user_id, asins, marketplace=marketplace)
+    finally:
+        close_old_connections()
+
+
 def run_scheduled_batch_task(work_items: list[dict]) -> None:
     from .asin_job_lock import release
     from .scheduled_jobs import execute_scheduled_batch_worker
@@ -87,4 +102,14 @@ def run_scheduled_asin_task(
             'job_log_id': job_log_id,
         }
     ])
+
+
+def run_auto_roi_task(run_id: int) -> None:
+    from .auto_roi_runner import run_auto_roi
+
+    close_old_connections()
+    try:
+        run_auto_roi(int(run_id))
+    finally:
+        close_old_connections()
 

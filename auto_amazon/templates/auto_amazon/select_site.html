@@ -1,0 +1,88 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="zh-hans">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>选择站点 — Amazon 自动化</title>
+    <link rel="stylesheet" href="{% static 'css/app.css' %}">
+    <link rel="stylesheet" href="{% static 'css/select_site.css' %}">
+    <link rel="shortcut icon" href="{% static 'images/20260401-174406_24x24.ico' %}" type="image/x-icon">
+</head>
+<body class="site-pick">
+    <div class="site-pick__bg" aria-hidden="true"></div>
+
+    <header class="site-pick__top">
+        <a href="{% url 'index' %}" class="site-pick__brand">
+            <span class="site-pick__brand-mark" aria-hidden="true"></span>
+            Amazon 自动化
+        </a>
+        <div class="site-pick__top-right">
+            <div class="site-pick__user {% if user.is_superuser %}site-pick__user--admin{% endif %}" title="{{ user.username }}">
+                <span class="site-pick__user-avatar" aria-hidden="true">{{ user.username|slice:":1"|upper }}</span>
+                <span class="site-pick__user-meta">
+                    <span class="site-pick__user-name">{{ user.username }}</span>
+                    {% if user.is_superuser %}
+                    <span class="site-pick__user-badge">超级管理员</span>
+                    {% endif %}
+                </span>
+            </div>
+            {% if current %}
+            <a href="{% url 'index' %}" class="site-pick__back">返回看板</a>
+            {% endif %}
+        </div>
+    </header>
+
+    <main class="site-pick__main">
+        <p class="site-pick__eyebrow">选择站点</p>
+        <h1 class="site-pick__title">进入对应分析环境</h1>
+        <p class="site-pick__lead">美国站与英国站共用 ROI / 广告难度等指标，仅运营难度区间不同。可随时在导航栏切换。</p>
+
+        {% if messages %}
+        <ul class="site-pick__messages">
+            {% for message in messages %}
+            <li class="{{ message.tags }}">{{ message }}</li>
+            {% endfor %}
+        </ul>
+        {% endif %}
+
+        <div class="site-pick__panels">
+            <form method="post" class="site-pick__panel {% if current == 'US' %}site-pick__panel--active{% endif %}">
+                {% csrf_token %}
+                <input type="hidden" name="marketplace" value="US">
+                <div class="site-pick__panel-head">
+                    <span class="site-pick__code">US</span>
+                    <span class="site-pick__market-tag">Amazon.com</span>
+                </div>
+                <h2 class="site-pick__panel-title">美国站</h2>
+                <p class="site-pick__panel-desc">现有看板与 ROI / 广告难度主流程；运营难度按美国评论分段。</p>
+                <ul class="site-pick__bins">
+                    <li>运营难度区间</li>
+                    <li>0–30 · 31–50 · 51–100 · 101–200 · 200+</li>
+                </ul>
+                <button type="submit" class="site-pick__cta">
+                    {% if current == 'US' %}继续使用美国站{% else %}进入美国站{% endif %}
+                </button>
+            </form>
+
+            <form method="post" class="site-pick__panel {% if current == 'UK' %}site-pick__panel--active{% endif %}">
+                {% csrf_token %}
+                <input type="hidden" name="marketplace" value="UK">
+                <div class="site-pick__panel-head">
+                    <span class="site-pick__code">UK</span>
+                    <span class="site-pick__market-tag">Amazon.co.uk</span>
+                </div>
+                <h2 class="site-pick__panel-title">英国站</h2>
+                <p class="site-pick__panel-desc">共用看板其它指标；运营难度按英国评论分段独立计算。</p>
+                <ul class="site-pick__bins">
+                    <li>运营难度区间</li>
+                    <li>0–10 · 11–30 · 31–50 · 51–100 · 101–150 · 150+</li>
+                </ul>
+                <button type="submit" class="site-pick__cta">
+                    {% if current == 'UK' %}继续使用英国站{% else %}进入英国站{% endif %}
+                </button>
+            </form>
+        </div>
+    </main>
+</body>
+</html>

@@ -1,9 +1,12 @@
 from django.urls import path
 
+from . import auto_roi_views as views_auto
 from . import views
 
 urlpatterns = [
     path('', views.index, name='index'),
+    path('select-site/', views.select_site_page, name='select_site'),
+    path('select-site/switch/', views.select_site_switch, name='select_site_switch'),
 
     path('dashboard/export/', views.dashboard_export_excel, name='dashboard_export_excel'),
 
@@ -15,14 +18,23 @@ urlpatterns = [
     path('users/', views.user_management, name='user_management'),
 
     path('upload/start/', views.upload_start, name='upload_start'),
+    path('upload/ops-difficulty/start/', views.ops_difficulty_start, name='ops_difficulty_start'),
     path('upload/status/<uuid:job_id>/', views.upload_job_status, name='upload_job_status'),
     path('upload/active/', views.active_wizard_job, name='active_wizard_job'),
     path('upload/dismiss/', views.dismiss_active_wizard_job, name='dismiss_active_wizard_job'),
     path('upload/', views.upload_page, name='upload'),
     path('compute-roi/', views.compute_roi_page, name='compute_roi'),
+    path('auto-roi/', views_auto.auto_roi_page, name='auto_roi'),
+    path('auto-roi/status/', views_auto.auto_roi_status, name='auto_roi_status'),
+    path('auto-roi/start/', views_auto.auto_roi_start, name='auto_roi_start'),
+    path('auto-roi/pause/', views_auto.auto_roi_pause, name='auto_roi_pause'),
+    path('auto-roi/stop/', views_auto.auto_roi_stop, name='auto_roi_stop'),
+    path('auto-roi/config/', views_auto.auto_roi_save_config, name='auto_roi_save_config'),
     path('fetch-data/', views.fetch_data_page, name='fetch_data'),
     path('upload-asin/', views.asin_upload_page, name='asin_upload'),
     path('upload-asin/export/<int:batch_id>/', views.asin_upload_export, name='asin_upload_export'),
+    path('asin-dedupe/', views.asin_dedupe_page, name='asin_dedupe'),
+    path('asin-dedupe/download/', views.asin_dedupe_download, name='asin_dedupe_download'),
     path('messages/', views.schedule_messages_page, name='schedule_messages'),
     path('asin-image/<str:asin>/', views.asin_product_image, name='asin_product_image'),
     path('settings/credentials/', views.credentials_config_page, name='credentials_config'),

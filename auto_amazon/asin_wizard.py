@@ -82,16 +82,21 @@ def _run_seller_wizard_subprocess(
     parity: float,
     cost_overrides: dict | None = None,
     on_stderr_line: Callable[[str], None] | None = None,
+    *,
+    marketplace: str = 'US',
+    roi_defaults: dict | None = None,
 ) -> dict:
     base = Path(settings.BASE_DIR).resolve()
     runner = base / 'scripts' / 'asin_find_project' / 'django_runner_seller_wizard.py'
     if not runner.is_file():
         raise FileNotFoundError(f'未找到脚本：{runner}')
-    payload_obj = {'parity': parity}
+    payload_obj = {'parity': parity, 'marketplace': marketplace}
     if asins is not None:
         payload_obj['asins'] = asins
     if cost_overrides:
         payload_obj['cost_overrides'] = cost_overrides
+    if roi_defaults:
+        payload_obj['roi_defaults'] = roi_defaults
     payload = json.dumps(payload_obj, ensure_ascii=False).encode('utf-8')
 
     proc = subprocess.Popen(
@@ -157,6 +162,7 @@ def _run_ad_difficulty_subprocess(
     on_stderr_line: Callable[[str], None] | None = None,
     *,
     sequential: bool = False,
+    marketplace: str = 'US',
 ) -> dict:
     import os
 
@@ -164,7 +170,10 @@ def _run_ad_difficulty_subprocess(
     runner = base / 'scripts' / 'asin_find_project' / 'django_runner_ad_difficulty.py'
     if not runner.is_file():
         raise FileNotFoundError(f'未找到脚本：{runner}')
-    payload_obj = {'asins': [str(x).strip().upper() for x in asins if str(x).strip()]}
+    payload_obj = {
+        'asins': [str(x).strip().upper() for x in asins if str(x).strip()],
+        'marketplace': str(marketplace or 'US').strip().upper() or 'US',
+    }
     if sequential:
         payload_obj['sequential'] = True
     payload = json.dumps(payload_obj, ensure_ascii=False).encode('utf-8')
@@ -223,15 +232,28 @@ def _run_seller_wizard_impl(
     parity: float,
     cost_overrides: dict | None = None,
     on_stderr_line: Callable[[str], None] | None = None,
+    *,
+    marketplace: str = 'US',
+    roi_defaults: dict | None = None,
 ) -> dict:
     if _wizard_exec_mode() == 'inprocess':
         from .wizard_runtime import run_seller_wizard_inprocess
 
         return run_seller_wizard_inprocess(
-            asins, parity, cost_overrides, on_stderr_line
+            asins,
+            parity,
+            cost_overrides,
+            on_stderr_line,
+            marketplace=marketplace,
+            roi_defaults=roi_defaults,
         )
     return _run_seller_wizard_subprocess(
-        asins, parity, cost_overrides, on_stderr_line
+        asins,
+        parity,
+        cost_overrides,
+        on_stderr_line,
+        marketplace=marketplace,
+        roi_defaults=roi_defaults,
     )
 
 
@@ -240,12 +262,23 @@ def _run_ad_difficulty_impl(
     on_stderr_line: Callable[[str], None] | None = None,
     *,
     sequential: bool = False,
+    marketplace: str = 'US',
 ) -> dict:
     if _wizard_exec_mode() == 'inprocess':
         from .wizard_runtime import run_ad_difficulty_inprocess
 
-        return run_ad_difficulty_inprocess(asins, on_stderr_line, sequential=sequential)
-    return _run_ad_difficulty_subprocess(asins, on_stderr_line, sequential=sequential)
+        return run_ad_difficulty_inprocess(
+            asins,
+            on_stderr_line,
+            sequential=sequential,
+            marketplace=marketplace,
+        )
+    return _run_ad_difficulty_subprocess(
+        asins,
+        on_stderr_line,
+        sequential=sequential,
+        marketplace=marketplace,
+    )
 
 
 def run_seller_wizard(
@@ -253,14 +286,23 @@ def run_seller_wizard(
     parity: float,
     cost_overrides: dict | None = None,
     on_stderr_line: Callable[[str], None] | None = None,
+    *,
+    marketplace: str = 'US',
+    roi_defaults: dict | None = None,
 ) -> dict:
     """
     运行 ROI 分析。
     遇 rank-login-user（子账号被禁）时自动执行解禁并重试一次。
+    marketplace=US|UK；roi_defaults 可覆盖平台佣金等定值。
     """
     return execute_with_seller_unlock_retry(
         lambda: _run_seller_wizard_impl(
-            asins, parity, cost_overrides, on_stderr_line
+            asins,
+            parity,
+            cost_overrides,
+            on_stderr_line,
+            marketplace=marketplace,
+            roi_defaults=roi_defaults,
         ),
         on_log=on_stderr_line,
     )
@@ -271,12 +313,23 @@ def run_ad_difficulty_for_asins(
     on_stderr_line: Callable[[str], None] | None = None,
     *,
     sequential: bool = False,
+    marketplace: str = 'US',
 ) -> dict:
     """
     运行广告难度计算（统一使用批量账号池；禁号轮换在 calculate_ad_difficulty_for_asins 内处理）。
     sequential=True 时逐个 ASIN/请求顺序执行（供定时任务使用）。
+    外层再包一层解禁/换号，覆盖单账号或内部无法换号的情况。
+    marketplace=US|UK：卖家精灵 market / marketId。
     """
     from .roi_routing import ad_difficulty_credential_profile_context
 
     with ad_difficulty_credential_profile_context():
-        return _run_ad_difficulty_impl(asins, on_stderr_line, sequential=sequential)
+        return execute_with_seller_unlock_retry(
+            lambda: _run_ad_difficulty_impl(
+                asins,
+                on_stderr_line,
+                sequential=sequential,
+                marketplace=marketplace,
+            ),
+            on_log=on_stderr_line,
+        )

@@ -13,6 +13,14 @@ from seller_account_guard import (
     looks_like_seller_auth_message,
     parse_sellersprite_api_payload,
 )
+from sellersprite_market import (
+    get_sellersprite_marketplace,
+    normalize_sellersprite_marketplace,
+    response_matches_sellersprite_marketplace,
+    sellersprite_market_code,
+    sellersprite_market_com,
+    sellersprite_reversing_referer,
+)
 
 
 # ---------- 全局配置 ----------
@@ -61,7 +69,7 @@ COOKIES = {
 BASE_URL = "https://www.sellersprite.com/v3/api/relation/ta/source"
 BASE_URL_totalUnits = "https://www.sellersprite.com/v3/api/competing-lookup"
 BASE_PARAMS = {
-    "market": "COM",
+    "market": "COM",  # US=COM；UK=UK（运行时按站点覆盖；勿用 CO.UK）
     "pageNo": "1",
     "pageSize": "50",
     "order": "1",
@@ -71,7 +79,7 @@ BASE_PARAMS = {
 
 # monthName: "bsr_sales_monthly_202510"
 data_totalUnits = {
-    "market": "US",
+    "market": "US",  # competing-lookup：US / UK
     "monthName": "bsr_sales_nearly",
     "asins": [
         "B0F6MTPQVG"
@@ -95,12 +103,22 @@ async def random_sleep():
         await asyncio.sleep(delay)
 
 
-async def fetch_source(session: aiohttp.ClientSession, asin: str, retries: int = 2, timeout: int = 10) -> Dict[
-    str, Any]:
+async def fetch_source(
+    session: aiohttp.ClientSession,
+    asin: str,
+    retries: int = 3,
+    timeout: int = 20,
+    *,
+    marketplace: str | None = None,
+) -> Dict[str, Any]:
     """
-    异步获取单个 ASIN 的 source 数据，支持重试和超时
+    异步获取单个 ASIN 的 source 数据，支持重试和超时。
+    默认 timeout=20、retries=3，降低大批量时偶发超时导致静默丢 ASIN。
+    market：US→COM，UK→UK（不要用 CO.UK，会被服务端忽略并回落美国站）。
     """
+    mp = normalize_sellersprite_marketplace(marketplace or get_sellersprite_marketplace())
     params = BASE_PARAMS.copy()
+    params["market"] = sellersprite_market_com(mp)
     params["keywordOrAsin"] = asin
 
     for attempt in range(retries + 1):
@@ -137,13 +155,15 @@ async def fetch_multiple_asins(
     max_concurrent: int = 1,
     *,
     on_progress: Any = None,
+    marketplace: str | None = None,
 ) -> Dict[str, Any]:
     """
     并发获取多个 ASIN 的数据，并对每个 ASIN 的所有 items 进行聚合：
     - 计算 ADS、HIGHLY_RATED、SPONSOR_VIDEO、SPONSOR_BRAND 的总和
     - 计算平均价格和平均评论数
-    - 忽略 imageUrl（因为多个 item 无法合并为单个）
+    - imageUrl 取 items 中第一条非空
     """
+    mp = normalize_sellersprite_marketplace(marketplace or get_sellersprite_marketplace())
     semaphore = asyncio.Semaphore(max_concurrent)
 
     results_dict = {}
@@ -154,7 +174,7 @@ async def fetch_multiple_asins(
     async def bounded_fetch(asin: str):
         nonlocal done_count
         async with semaphore:
-            result = await fetch_source(session, asin)
+            result = await fetch_source(session, asin, marketplace=mp)
             print(result)
             print(f'{asin},请求广告值成功')
             await random_sleep()  # 每次请求后等待 1 秒
@@ -168,7 +188,11 @@ async def fetch_multiple_asins(
                     pass
             return asin, result
 
-    async with aiohttp.ClientSession(headers=HEADERS, cookies=COOKIES) as session:
+    req_headers = dict(HEADERS)
+    req_headers['referer'] = sellersprite_reversing_referer(
+        asin_list[0] if asin_list else '', mp
+    )
+    async with aiohttp.ClientSession(headers=req_headers, cookies=COOKIES) as session:
         tasks = [bounded_fetch(asin) for asin in asin_list]
         results = await asyncio.gather(*tasks)
 
@@ -195,6 +219,16 @@ async def fetch_multiple_asins(
             print(f"ASIN {asin} 的 items 列表为空")
             continue
 
+        # 防止错误 market 参数被服务端回落成其它站点数据
+        sample = next((x for x in items_list if isinstance(x, dict)), None)
+        if sample is not None and not response_matches_sellersprite_marketplace(
+            sample, mp
+        ):
+            print(
+                f"ASIN {asin} 广告数据站点不匹配（期望 {mp}），已丢弃"
+            )
+            continue
+
         # 初始化累加器
         total_ads = 0
         total_highly_rated = 0
@@ -207,9 +241,16 @@ async def fetch_multiple_asins(
         item_count = len(items_list)
         image_url = ''
         try:
-            image_url = items_list[0].get('imageUrl','')
+            # 取第一条非空 imageUrl（首条常为广告位，可能无图）
+            for item in items_list:
+                if not isinstance(item, dict):
+                    continue
+                cand = str(item.get('imageUrl') or '').strip()
+                if cand and cand.upper() not in ('N/A', 'NA', 'NAN'):
+                    image_url = cand
+                    break
         except Exception as e:
-            print(f"ASIN {asin} <UNK> imageUrl <UNK> {e}")
+            print(f"ASIN {asin} 解析 imageUrl 失败: {e}")
         try:
             for item in items_list:
                 counter = item.get('counter', {})
@@ -249,6 +290,7 @@ async def ensure_ads_cached(
     max_concurrent: int = 6,
     *,
     on_progress: Any = None,
+    marketplace: str | None = None,
 ) -> Dict[str, Any]:
     """批量拉取广告数据，仅请求 cache 中尚未存在的 ASIN。"""
     needed: list[str] = []
@@ -269,8 +311,48 @@ async def ensure_ads_cached(
         needed,
         max_concurrent,
         on_progress=on_progress,
+        marketplace=marketplace,
     )
     cache.update(fetched)
+    return cache
+
+
+async def ensure_ads_cached_robust(
+    cache: Dict[str, Any],
+    asins: List[str],
+    max_concurrent: int = 6,
+    *,
+    max_rounds: int = 3,
+    pause_sec: float = 2.0,
+    on_progress: Any = None,
+    marketplace: str | None = None,
+) -> Dict[str, Any]:
+    """多次尝试拉取广告数据，直至全部命中 cache 或达到 max_rounds。"""
+    pending: list[str] = []
+    seen: set[str] = set()
+    for raw in asins or []:
+        key = str(raw or '').strip().upper()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        pending.append(key)
+    for round_i in range(max(1, max_rounds)):
+        missing = [a for a in pending if not ads_cache_get(cache, a)]
+        if not missing:
+            break
+        await ensure_ads_cached(
+            cache,
+            missing,
+            max_concurrent=max_concurrent,
+            on_progress=on_progress,
+            marketplace=marketplace,
+        )
+        still = [a for a in missing if not ads_cache_get(cache, a)]
+        if not still:
+            break
+        pending = still
+        if round_i + 1 < max_rounds and pause_sec > 0:
+            await asyncio.sleep(pause_sec)
     return cache
 
 
@@ -284,11 +366,21 @@ def ads_cache_get(cache: dict | None, asin: str) -> dict | None:
     return cache.get(asin) if isinstance(cache.get(asin), dict) else None
 
 
-async def fetch_source_totalUnits(session: aiohttp.ClientSession, asin: str, retries: int = 2, timeout: int = 10) -> Dict[str, Any]:
+async def fetch_source_totalUnits(
+    session: aiohttp.ClientSession,
+    asin: str,
+    retries: int = 2,
+    timeout: int = 10,
+    *,
+    marketplace: str | None = None,
+) -> Dict[str, Any]:
     """
-    异步获取单个 ASIN 的 source 数据，支持重试和超时
+    异步获取单个 ASIN 的 source 数据，支持重试和超时。
+    competing-lookup 的 market 使用 US / UK。
     """
+    mp = normalize_sellersprite_marketplace(marketplace or get_sellersprite_marketplace())
     payload = data_totalUnits.copy()
+    payload["market"] = sellersprite_market_code(mp)
     payload["asins"] = [asin]
 
     for attempt in range(retries + 1):
@@ -319,15 +411,22 @@ async def fetch_source_totalUnits(session: aiohttp.ClientSession, asin: str, ret
     return {"error": "Max retries exceeded", "asin": asin}
 
 
-async def fetch_multiple_asins_totalUnits(asin_list: List[str], max_concurrent: int = 1) -> Dict[str, Any]:
+async def fetch_multiple_asins_totalUnits(
+    asin_list: List[str],
+    max_concurrent: int = 1,
+    *,
+    marketplace: str | None = None,
+) -> Dict[str, Any]:
     """
     并发获取多个 ASIN 的数据，并计算每个 ASIN 的最大广告计数
+    competing-lookup 的 market 为 US / UK。
     """
+    mp = normalize_sellersprite_marketplace(marketplace or get_sellersprite_marketplace())
     semaphore = asyncio.Semaphore(max_concurrent)
 
     async def bounded_fetch(asin: str):
         async with semaphore:
-            result = await fetch_source_totalUnits(session, asin)
+            result = await fetch_source_totalUnits(session, asin, marketplace=mp)
             # print(result)
             await random_sleep()  # 每次请求后等待 1 秒
             return asin, result
@@ -349,6 +448,8 @@ async def fetch_multiple_asins_totalUnits(asin_list: List[str], max_concurrent: 
             items = data_content.get('items') or []
             bast_totalUnits = -1
             for value in items:
+                if not response_matches_sellersprite_marketplace(value, mp):
+                    continue
                 totalUnits = value.get('totalUnits', 0)
                 if totalUnits is None:
                     totalUnits = 0
@@ -368,28 +469,28 @@ async def fetch_multiple_asins_totalUnits(asin_list: List[str], max_concurrent: 
 
 
 # ---------- 使用示例 ----------
-async def advertisement_main(asins: List[str], max_concurrent: int = 1) -> Dict[str, Any]:
-    # 假设要查询的 ASIN 列表
+async def advertisement_main(
+    asins: List[str],
+    max_concurrent: int = 1,
+    *,
+    marketplace: str | None = None,
+) -> Dict[str, Any]:
+    mp = normalize_sellersprite_marketplace(marketplace or get_sellersprite_marketplace())
     config = await ensure_seller_login()
     print(config)
     apply_login_config(COOKIES, config)
     apply_login_headers(HEADERS, config)
-    # totalUnits_dict = await fetch_multiple_asins_totalUnits(asins, max_concurrent=max_concurrent)
-    result_dict = await fetch_multiple_asins(asins, max_concurrent=max_concurrent)
-    # for asin, value in totalUnits_dict.items():
-    #     try:
-    #         result_dict[asin]['totalUnits'] = value['totalUnits']
-    #         result_dict[asin]['salesTrend'] = value['salesTrend']
-    #     except Exception as e:
-    #         print(f"ASIN {asin} 数据出现问题 {e}")
-    # # print(result_dict)
+    HEADERS['referer'] = sellersprite_reversing_referer(asins[0] if asins else '', mp)
+    result_dict = await fetch_multiple_asins(
+        asins, max_concurrent=max_concurrent, marketplace=mp
+    )
     return result_dict
 
 
 if __name__ == "__main__":
     # asins = ["B0F6MTPQVG","B0F9WW826V",'B0FWJ8HNCB','B0FY5S16DK','B0C62HMMCJ']
     # asins = ['B0FWJ8HNCB', 'B0D3M1WHQ6','B0D6XKFPF1','B0DXF3TQRD','B0DFH5Z3JB','B08HJR2RL2', 'B0D3M1WHQ6','B0DXF3TQRD','B0DFH5Z3JB','B0GCCXBK14','B0DGKTRZN2','B0D299X6KN','B0CSJZVHKX','B0DR2LC897','B0D6XKFPF1','B0C3QQJ8YF','B093QZ6V3S','B0DT4JGZY5']
-    asins = ['B0F6MTPQVG']
+    asins = ['B0H14TCNSV']
     # result = asyncio.run(fetch_multiple_asins(asins))
     # result = asyncio.run(fetch_multiple_asins(asins,1))
     result = asyncio.run(advertisement_main(asins))

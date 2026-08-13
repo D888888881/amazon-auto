@@ -41,12 +41,23 @@ class AsinDashboardRow(models.Model):
         NORMAL = 'normal', '未关注'
         PRIORITY = 'priority', '重点关注'
 
+    class Marketplace(models.TextChoices):
+        US = 'US', '美国站'
+        UK = 'UK', '英国站'
+
     user = models.ForeignKey(
         User,
         on_delete=models.CASCADE,
         related_name='asin_rows',
     )
     asin = models.CharField(max_length=32, db_index=True)
+    marketplace = models.CharField(
+        '站点',
+        max_length=8,
+        choices=Marketplace.choices,
+        default=Marketplace.US,
+        db_index=True,
+    )
     profit_margin = models.FloatField('利润率(%)', null=True, blank=True)
     ranking_percent = models.FloatField('广告难度', null=True, blank=True)
     ops_difficulty_1 = models.TextField('运营难度1', blank=True)
@@ -81,13 +92,13 @@ class AsinDashboardRow(models.Model):
         verbose_name_plural = 'ASIN 分析行'
         constraints = [
             models.UniqueConstraint(
-                fields=['user', 'asin'],
-                name='uniq_asin_dashboard_user_asin',
+                fields=['user', 'asin', 'marketplace'],
+                name='uniq_asin_dashboard_user_asin_marketplace',
             ),
         ]
 
     def __str__(self) -> str:
-        return f'{self.asin} · {self.user_id}'
+        return f'{self.asin} · {self.marketplace} · {self.user_id}'
 
 
 class AsinFolderAssignment(models.Model):
@@ -154,10 +165,21 @@ class AsinDataUpdateStamp(models.Model):
 
 
 class ImportedMediaPath(models.Model):
-    """记录用户通过数据审核导入到 media/file 下的路径（文件或目录）。"""
+    """记录用户通过数据审核导入到 media/file 下的路径（文件或目录），按站点区分。"""
+
+    class Marketplace(models.TextChoices):
+        US = 'US', '美国站'
+        UK = 'UK', '英国站'
 
     # MySQL 唯一索引与 CharField 建议 <=255；常见 ASIN 相对路径足够
-    rel_path = models.CharField(max_length=255, unique=True, db_index=True)
+    rel_path = models.CharField(max_length=255, db_index=True)
+    marketplace = models.CharField(
+        '站点',
+        max_length=8,
+        choices=Marketplace.choices,
+        default=Marketplace.US,
+        db_index=True,
+    )
     user = models.ForeignKey(
         User,
         on_delete=models.CASCADE,
@@ -168,19 +190,70 @@ class ImportedMediaPath(models.Model):
     class Meta:
         verbose_name = '导入文件路径'
         verbose_name_plural = '导入文件路径'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['rel_path', 'marketplace'],
+                name='uniq_imported_media_path_marketplace',
+            ),
+        ]
 
     def __str__(self) -> str:
-        return self.rel_path
+        return f'{self.rel_path} · {self.marketplace}'
+
+
+class MarketplaceAsinRoot(models.Model):
+    """站点 × ASIN 根目录物化表（导入时维护，供看板/ROI/审核快速查询）。"""
+
+    class Marketplace(models.TextChoices):
+        US = 'US', '美国站'
+        UK = 'UK', '英国站'
+
+    marketplace = models.CharField(
+        '站点',
+        max_length=8,
+        choices=Marketplace.choices,
+        db_index=True,
+    )
+    asin = models.CharField(max_length=32, db_index=True)
+    first_imported_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = '站点 ASIN 根'
+        verbose_name_plural = '站点 ASIN 根'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['marketplace', 'asin'],
+                name='uniq_marketplace_asin_root',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['marketplace', 'asin'], name='idx_mp_asin_root_mp_asin'),
+        ]
+
+    def __str__(self) -> str:
+        return f'{self.marketplace} · {self.asin}'
 
 
 class AsinUploadBatch(models.Model):
     """一次 ASIN 文件上传记录（列表页每一行）。"""
+
+    class Marketplace(models.TextChoices):
+        US = 'US', '美国站'
+        UK = 'UK', '英国站'
 
     user = models.ForeignKey(
         User,
         on_delete=models.CASCADE,
         related_name='asin_upload_batches',
         verbose_name='上传用户',
+    )
+    marketplace = models.CharField(
+        '站点',
+        max_length=8,
+        choices=Marketplace.choices,
+        default=Marketplace.US,
+        db_index=True,
     )
     source_filename = models.CharField('源文件名', max_length=255, blank=True)
     total_in_file = models.PositiveIntegerField('文件内 ASIN 数', default=0)
@@ -204,13 +277,24 @@ class AsinUploadBatch(models.Model):
         verbose_name_plural = 'ASIN 上传批次'
 
     def __str__(self) -> str:
-        return f'{self.user.username} · {self.new_count} · {self.created_at:%Y-%m-%d %H:%M}'
+        return f'{self.user.username} · {self.marketplace} · {self.new_count} · {self.created_at:%Y-%m-%d %H:%M}'
 
 
 class AsinCatalogItem(models.Model):
-    """全局 ASIN 库（用于上传去重）。"""
+    """按站点去重的 ASIN 库（用于上传去重）。"""
 
-    asin = models.CharField(max_length=32, unique=True, db_index=True)
+    class Marketplace(models.TextChoices):
+        US = 'US', '美国站'
+        UK = 'UK', '英国站'
+
+    asin = models.CharField(max_length=32, db_index=True)
+    marketplace = models.CharField(
+        '站点',
+        max_length=8,
+        choices=Marketplace.choices,
+        default=Marketplace.US,
+        db_index=True,
+    )
     batch = models.ForeignKey(
         AsinUploadBatch,
         on_delete=models.CASCADE,
@@ -229,9 +313,15 @@ class AsinCatalogItem(models.Model):
         ordering = ['-created_at', 'asin']
         verbose_name = 'ASIN 库条目'
         verbose_name_plural = 'ASIN 库条目'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['asin', 'marketplace'],
+                name='uniq_asin_catalog_asin_marketplace',
+            ),
+        ]
 
     def __str__(self) -> str:
-        return self.asin
+        return f'{self.asin} · {self.marketplace}'
 
 
 class ScheduledJobLog(models.Model):
@@ -319,3 +409,132 @@ class ScheduledTaskMessage(models.Model):
 
     def __str__(self) -> str:
         return f'{self.asin} → {self.recipient_id}'
+
+
+class RoiSiteConfig(models.Model):
+    """自动 ROI 按站点的定值与节流参数。"""
+
+    class Marketplace(models.TextChoices):
+        US = 'US', '美国站'
+        UK = 'UK', '英国站'
+
+    marketplace = models.CharField(
+        '站点',
+        max_length=8,
+        choices=Marketplace.choices,
+        unique=True,
+        db_index=True,
+    )
+    platform_commission = models.FloatField('平台佣金(%)', default=15.0)
+    default_refund_rate = models.FloatField('默认退款率(%)', default=10.0)
+    default_fba_fee = models.FloatField('默认FBA($)', default=5.0)
+    default_unit_purchase = models.FloatField('默认采购价(￥)', default=10.0)
+    batch_size = models.PositiveIntegerField('批大小', default=20)
+    asin_delay_min_sec = models.FloatField('ASIN间隔最小秒', default=1.0)
+    asin_delay_max_sec = models.FloatField('ASIN间隔最大秒', default=3.0)
+    batch_delay_min_sec = models.FloatField('批间隔最小秒', default=4.0)
+    batch_delay_max_sec = models.FloatField('批间隔最大秒', default=8.0)
+    max_ban_rotations_per_run = models.PositiveIntegerField('单次跑最大换号次数', default=30)
+    consecutive_fail_pause = models.PositiveIntegerField('连续失败暂停阈值', default=10)
+    max_ban_retries_per_asin = models.PositiveIntegerField('单ASIN禁号重试', default=3)
+    exchange_rate_override = models.FloatField('汇率覆盖', null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'ROI 站点定值'
+        verbose_name_plural = 'ROI 站点定值'
+
+    def __str__(self) -> str:
+        return f'{self.marketplace} · 佣金{self.platform_commission}%'
+
+
+class RoiAutoRun(models.Model):
+    """一次自动 ROI 长跑任务。"""
+
+    class Marketplace(models.TextChoices):
+        US = 'US', '美国站'
+        UK = 'UK', '英国站'
+
+    class Status(models.TextChoices):
+        RUNNING = 'running', '运行中'
+        PAUSED = 'paused', '已暂停'
+        STOPPED = 'stopped', '已停止'
+        DONE = 'done', '已完成'
+        ERROR = 'error', '出错'
+
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='roi_auto_runs',
+    )
+    marketplace = models.CharField(
+        '站点',
+        max_length=8,
+        choices=Marketplace.choices,
+        db_index=True,
+    )
+    status = models.CharField(
+        max_length=16,
+        choices=Status.choices,
+        default=Status.RUNNING,
+        db_index=True,
+    )
+    total = models.PositiveIntegerField(default=0)
+    succeeded = models.PositiveIntegerField(default=0)
+    failed = models.PositiveIntegerField(default=0)
+    skipped = models.PositiveIntegerField(default=0)
+    current_asin = models.CharField(max_length=32, blank=True)
+    last_account = models.CharField(max_length=128, blank=True)
+    parity = models.FloatField('汇率', default=7.2)
+    done_asins = models.JSONField(default=list, blank=True)
+    ban_rotations = models.PositiveIntegerField(default=0)
+    consecutive_fails = models.PositiveIntegerField(default=0)
+    error_message = models.TextField(blank=True)
+    rq_job_id = models.CharField(max_length=64, blank=True)
+    started_at = models.DateTimeField(auto_now_add=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-started_at', '-id']
+        verbose_name = '自动 ROI 任务'
+        verbose_name_plural = '自动 ROI 任务'
+        indexes = [
+            models.Index(fields=['user', 'marketplace', 'status'], name='idx_roi_auto_user_mp_st'),
+        ]
+
+    def __str__(self) -> str:
+        return f'#{self.pk} · {self.marketplace} · {self.status}'
+
+
+class RoiAutoRunLog(models.Model):
+    """自动 ROI 逐 ASIN 详细日志。"""
+
+    class Status(models.TextChoices):
+        SUCCESS = 'success', '成功'
+        FAILED = 'failed', '失败'
+        RETRY = 'retry', '重试'
+        BANNED_ROTATED = 'banned_rotated', '禁号换号'
+
+    run = models.ForeignKey(
+        RoiAutoRun,
+        on_delete=models.CASCADE,
+        related_name='logs',
+    )
+    asin = models.CharField(max_length=32, db_index=True)
+    seq = models.PositiveIntegerField(default=0)
+    status = models.CharField(max_length=16, choices=Status.choices)
+    attempt = models.PositiveIntegerField(default=1)
+    account_username = models.CharField(max_length=128, blank=True)
+    duration_ms = models.PositiveIntegerField(null=True, blank=True)
+    error_summary = models.CharField(max_length=500, blank=True)
+    error_detail = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ['-created_at', '-id']
+        verbose_name = '自动 ROI 日志'
+        verbose_name_plural = '自动 ROI 日志'
+
+    def __str__(self) -> str:
+        return f'{self.asin} · {self.status}'

@@ -95,6 +95,9 @@ def run_seller_wizard_inprocess(
     parity: float,
     cost_overrides: dict | None = None,
     on_stderr_line: Callable[[str], None] | None = None,
+    *,
+    marketplace: str = 'US',
+    roi_defaults: dict | None = None,
 ) -> dict:
     if on_stderr_line:
         on_stderr_line('PROGRESS:inprocess 模式：正在准备脚本环境…')
@@ -116,6 +119,8 @@ def run_seller_wizard_inprocess(
                     parity,
                     asins=asins,
                     cost_overrides=cost_overrides or None,
+                    marketplace=marketplace,
+                    roi_defaults=roi_defaults,
                 )
             )
         finally:
@@ -142,6 +147,7 @@ def run_ad_difficulty_inprocess(
     on_stderr_line: Callable[[str], None] | None = None,
     *,
     sequential: bool = False,
+    marketplace: str = 'US',
 ) -> dict:
     with asin_script_cwd():
         from async_seller_wizard_api import calculate_ad_difficulty_for_asins
@@ -158,6 +164,7 @@ def run_ad_difficulty_inprocess(
                 calculate_ad_difficulty_for_asins(
                     [str(x).strip().upper() for x in asins if str(x).strip()] or None,
                     sequential=sequential,
+                    marketplace=marketplace,
                 )
             )
         finally:

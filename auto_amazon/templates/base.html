@@ -1,4 +1,3 @@
-
 {% load static %}
 <!DOCTYPE html>
 <html lang="zh-hans">
@@ -17,10 +16,13 @@
 {% if user.is_authenticated %}
 <header class="site-header">
     <div class="brand">Amazon 自动化</div>
-    <nav class="nav">
+
+    <nav class="nav" aria-label="主导航">
         <a href="{% url 'index' %}" class="{% if request.resolver_match.url_name == 'index' %}active{% endif %}">首页</a>
         <a href="{% url 'compute_roi' %}" class="{% if request.resolver_match.url_name == 'compute_roi' or request.resolver_match.url_name == 'upload' %}active{% endif %}">计算ROI</a>
+        <a href="{% url 'auto_roi' %}" class="{% if request.resolver_match.url_name == 'auto_roi' %}active{% endif %}">自动ROI</a>
         <a href="{% url 'asin_upload' %}" class="{% if request.resolver_match.url_name == 'asin_upload' or request.resolver_match.url_name == 'fetch_data' %}active{% endif %}">上传ASIN</a>
+        <a href="{% url 'asin_dedupe' %}" class="{% if request.resolver_match.url_name == 'asin_dedupe' %}active{% endif %}">ASIN去重</a>
         <a href="{% url 'excel' %}" class="{% if request.resolver_match.url_name == 'excel' %}active{% endif %}">数据审核</a>
         <a href="{% url 'schedule_messages' %}" class="{% if request.resolver_match.url_name == 'schedule_messages' %}active{% endif %}">消息</a>
         <a id="nav-wizard-job" class="nav-wizard-job" hidden
@@ -35,12 +37,47 @@
         <a href="{% url 'user_management' %}" class="{% if request.resolver_match.url_name == 'user_management' %}active{% endif %}">用户管理</a>
         <a href="{% url 'credentials_config' %}" class="{% if request.resolver_match.url_name == 'credentials_config' or request.resolver_match.url_name == 'sif_config' %}active{% endif %}">凭证配置</a>
         {% endif %}
-        <span class="nav-user" title="当前登录账号">用户：{{ user.username }}{% if user.is_superuser %} <span class="nav-user__role">（超级管理员）</span>{% endif %}</span>
+
+        {% if current_marketplace %}
+        <div class="nav-mp" data-nav-mp>
+            <button type="button" class="nav-mp__btn" id="nav-mp-btn" aria-haspopup="listbox" aria-expanded="false">
+                <span class="nav-mp__label">站点</span>
+                <span class="nav-mp__value">{% if current_marketplace == MARKETPLACE_UK %}英国站{% else %}美国站{% endif %}</span>
+                <span class="nav-mp__chev" aria-hidden="true"></span>
+            </button>
+            <div class="nav-mp__menu" id="nav-mp-menu" hidden role="listbox">
+                <form method="post" action="{% url 'select_site_switch' %}" class="nav-mp__form">
+                    {% csrf_token %}
+                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                    <button type="submit" name="marketplace" value="US" class="nav-mp__option {% if current_marketplace == MARKETPLACE_US %}is-active{% endif %}" role="option">美国站 · US</button>
+                    <button type="submit" name="marketplace" value="UK" class="nav-mp__option {% if current_marketplace == MARKETPLACE_UK %}is-active{% endif %}" role="option">英国站 · UK</button>
+                </form>
+                <a class="nav-mp__page" href="{% url 'select_site' %}">选站页</a>
+            </div>
+        </div>
+        {% else %}
+        <a href="{% url 'select_site' %}" class="nav-mp-cta">选择站点</a>
+        {% endif %}
+    </nav>
+
+    <div class="nav-account">
+        <a href="{% url 'select_site' %}" class="nav-select-site">选择站点</a>
+        <div class="nav-user {% if user.is_superuser %}nav-user--admin{% endif %}" title="当前登录账号：{{ user.username }}">
+            <span class="nav-user__avatar" aria-hidden="true">{{ user.username|slice:":1"|upper }}</span>
+            <span class="nav-user__meta">
+                <span class="nav-user__name">{{ user.username }}</span>
+                {% if user.is_superuser %}
+                <span class="nav-user__badge">超级管理员</span>
+                {% else %}
+                <span class="nav-user__badge nav-user__badge--member">成员</span>
+                {% endif %}
+            </span>
+        </div>
         <form action="{% url 'logout' %}" method="post" class="nav-logout">
             {% csrf_token %}
             <button type="submit" class="link-btn">退出</button>
         </form>
-    </nav>
+    </div>
 </header>
 {% endif %}
 <main class="main {% block main_class %}{% endblock %}">
@@ -52,6 +89,31 @@
   if (window.WizardActiveJob) {
     WizardActiveJob.initNavIndicator();
   }
+  var root = document.querySelector('[data-nav-mp]');
+  if (!root) return;
+  var btn = document.getElementById('nav-mp-btn');
+  var menu = document.getElementById('nav-mp-menu');
+  if (!btn || !menu) return;
+  function closeMp() {
+    menu.hidden = true;
+    btn.setAttribute('aria-expanded', 'false');
+    root.classList.remove('is-open');
+  }
+  function openMp() {
+    menu.hidden = false;
+    btn.setAttribute('aria-expanded', 'true');
+    root.classList.add('is-open');
+  }
+  btn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    if (menu.hidden) openMp(); else closeMp();
+  });
+  document.addEventListener('click', function (e) {
+    if (!root.contains(e.target)) closeMp();
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') closeMp();
+  });
 })();
 </script>
 {% block page_scripts %}{% endblock %}

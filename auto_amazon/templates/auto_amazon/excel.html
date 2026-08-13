@@ -73,7 +73,11 @@
                         </select>
                         <button type="button" class="fs-btn fs-btn--primary" id="fs-btn-assign">分配选中</button>
                     </div>
-                    <button type="button" class="fs-btn fs-btn--primary" id="fs-btn-import" title="选择 ZIP 上传：根目录下含多个 B0XXXXXXXX 文件夹">导入 ZIP</button>
+                    <select id="fs-import-marketplace" class="fs-input" title="导入 ZIP 所属站点（与导航当前站点一致，可单独改）">
+                        <option value="US" {% if current_marketplace == 'US' or not current_marketplace %}selected{% endif %}>① 导入站点：美国站</option>
+                        <option value="UK" {% if current_marketplace == 'UK' %}selected{% endif %}>① 导入站点：英国站</option>
+                    </select>
+                    <button type="button" class="fs-btn fs-btn--primary" id="fs-btn-import" title="先选上方导入站点，再选择 ZIP 上传">② 导入 ZIP</button>
                     <input type="file" id="fs-import-file" accept=".zip,application/zip" hidden>
                     <span class="fs-import-status" id="fs-import-status" hidden></span>
                     <button type="button" class="fs-btn" id="fs-btn-download" title="选中一个文件直接下载；多选则打包为 ZIP">下载</button>
@@ -817,6 +821,7 @@
         staging_id: stagingId,
         overwrite: !!overwrite,
         skip_existing: !!skipExisting,
+        marketplace: (document.getElementById('fs-import-marketplace') || {}).value || 'US',
       }),
     }).then(function (r) {
       return readJsonResponse(r).then(function (d) {

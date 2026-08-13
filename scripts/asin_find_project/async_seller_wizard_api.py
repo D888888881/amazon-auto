@@ -10,7 +10,14 @@ import pandas as pd
 import numpy as np
 from async_read_config import read_main, read_taobao_config
 import async_sif_api
-from async_advertisement_api import advertisement_main, fetch_multiple_asins, fetch_multiple_asins_totalUnits, ads_cache_get, ensure_ads_cached
+from async_advertisement_api import (
+    advertisement_main,
+    fetch_multiple_asins,
+    fetch_multiple_asins_totalUnits,
+    ads_cache_get,
+    ensure_ads_cached,
+    ensure_ads_cached_robust,
+)
 from typing import List, Dict, Any, Optional
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
@@ -245,6 +252,83 @@ def _load_existing_data_origin(output_path: str) -> pd.DataFrame | None:
     return None
 
 
+def _keyword_artifact_paths(output_dir: str, keyword: str) -> dict[str, str]:
+    return {
+        'data_origin': os.path.join(output_dir, f'{keyword}_data_origin.xlsx'),
+        'review': os.path.join(output_dir, f'{keyword}_review_interval_analysis_US.xlsx'),
+        'review_legacy': os.path.join(output_dir, f'{keyword}_review_interval_analysis.xlsx'),
+        'ad_efficiency': os.path.join(output_dir, f'{keyword}_ad_efficiency_table.xlsx'),
+    }
+
+
+def _review_interval_file_exists(paths: dict[str, str]) -> bool:
+    return os.path.isfile(paths.get('review', '')) or os.path.isfile(paths.get('review_legacy', ''))
+
+
+def _read_ranking_from_ad_efficiency_xlsx(
+    path: str,
+    target_asin: str,
+) -> float | None:
+    """从已保存的广告效率表读取 ranking_percent；文件不存在或无效时返回 None。"""
+    if not os.path.isfile(path):
+        return None
+    try:
+        df = pd.read_excel(path)
+        if df.empty or '链接' not in df.columns:
+            return None
+        work = df.copy()
+        work['_asin_norm'] = work['链接'].astype(str).str.strip().str.upper()
+        work = work[work['_asin_norm'].str.match(r'^B[A-Z0-9]{9}$', na=False)]
+        if work.empty:
+            return None
+        if '广告词数量' in work.columns:
+            work['广告词数量'] = pd.to_numeric(work['广告词数量'], errors='coerce')
+            valid_df = work[work['广告词数量'] > 0].reset_index(drop=True)
+        else:
+            return None
+        if valid_df.empty:
+            return None
+        target = str(target_asin or '').strip().upper()
+        if target not in valid_df['_asin_norm'].values:
+            return None
+        rank = valid_df[valid_df['_asin_norm'] == target].index[0] + 1
+        total_valid = len(valid_df)
+        if total_valid <= 0:
+            return None
+        return round((rank / total_valid) * 100, 3)
+    except Exception as e:
+        print(f'读取广告效率表 ranking 失败 {path}: {e}')
+        return None
+
+
+async def _rotate_ad_account_for_keyword_resume(
+    asin_key: str,
+    keyword: str,
+    *,
+    rotation_state: dict,
+) -> None:
+    from seller_account_guard import (
+        SellerAccountBannedError,
+        bulk_rotate_if_available,
+        clear_seller_login_cache,
+        ensure_seller_login,
+    )
+
+    emit_progress(
+        f'广告难度：关键词「{keyword}」({asin_key}) 遇禁号，切换账号并断点续算…'
+    )
+    clear_seller_login_cache()
+    if not await bulk_rotate_if_available(
+        [asin_key],
+        rotation_state=rotation_state,
+        pending_task='ad',
+    ):
+        raise SellerAccountBannedError(
+            f'批量账号被禁且无法轮换（关键词 {keyword} / {asin_key}）'
+        )
+    await ensure_seller_login()
+
+
 # 清洗脏数据
 async def save_cleaned_data_orign_to_excel(
     df: pd.DataFrame,
@@ -310,6 +394,8 @@ async def save_cleaned_data_orign_to_excel(
             if asin_price is not None:
                 print(f'ASIN {asin} 价格（广告接口）：{asin_price}')
         except Exception as e:
+            if is_seller_account_banned_error(e):
+                raise
             print(f'价格获取失败（将跳过价格过滤，避免清空 data_origin）：{e}')
 
     if asin_price is not None and asin_price > 0:
@@ -480,18 +566,33 @@ async def save_top5_market_capacity_to_excel(price_cleaning_data: pd.DataFrame, 
 
 
 # 分析出区间前五数据
-async def save_review_interval_analysis_to_excel(df: pd.DataFrame, keyword: str, asin: str):
+async def save_review_interval_analysis_to_excel(
+    df: pd.DataFrame,
+    keyword: str,
+    asin: str,
+    *,
+    marketplace: str = 'US',
+):
     """
     对评论进行区间分级，计算每个区间月销前五的平均值，运营难度，并保存结果。
+    marketplace=US|UK 决定评论分段与输出文件名 *_review_interval_analysis_{US|UK}.xlsx
     返回: dict {'区间': list, '平均销量': list, '运营难度': list}
     """
+    mp = str(marketplace or 'US').strip().upper()
+    if mp not in ('US', 'UK'):
+        mp = 'US'
+
     # 1. 确保评论列为数值，并去除缺失值
     df['reviews'] = pd.to_numeric(df['reviews'], errors='coerce')
     df = df.dropna(subset=['reviews', 'totalUnits']).copy()
 
-    # 2. 定义评论区间
-    bins = [0, 30, 50, 100, 200, np.inf]
-    labels = ['0-30', '31-50', '51-100', '101-200', '200以上']
+    # 2. 定义评论区间（英美不同）
+    if mp == 'UK':
+        bins = [0, 10, 30, 50, 100, 150, np.inf]
+        labels = ['0-10', '11-30', '31-50', '51-100', '101-150', '150以上']
+    else:
+        bins = [0, 30, 50, 100, 200, np.inf]
+        labels = ['0-30', '31-50', '51-100', '101-200', '200以上']
     df['评论区间'] = pd.cut(df['reviews'], bins=bins, labels=labels, right=True, include_lowest=True)
 
     # 3. 计算全量数据月销量前五的平均值（作为分母）
@@ -521,7 +622,7 @@ async def save_review_interval_analysis_to_excel(df: pd.DataFrame, keyword: str,
     def difficulty_label(percent_str):
         try:
             percent = float(percent_str.replace('%', ''))
-        except:
+        except Exception:
             return '-'
         if percent < 10:
             return '困难'
@@ -561,10 +662,10 @@ async def save_review_interval_analysis_to_excel(df: pd.DataFrame, keyword: str,
     # 确保最终列顺序
     final_df = final_df[['区间', '平均销量', '运营难度', '注释1', '注释2', '参照']]
 
-    # 保存 Excel
+    # 保存 Excel（新写一律带站点后缀；US 可读旧无后缀文件）
     output_dir = await verify_path(asin=asin, keyword=keyword)
     os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, f'{keyword}_review_interval_analysis.xlsx')
+    output_path = os.path.join(output_dir, f'{keyword}_review_interval_analysis_{mp}.xlsx')
     final_df.to_excel(output_path, index=False)
     print(f"评论区间前五分析已保存至: {output_path}")
 
@@ -579,12 +680,172 @@ async def save_review_interval_analysis_to_excel(df: pd.DataFrame, keyword: str,
     }
 
 
+def _ad_asin_delay_sec() -> float:
+    try:
+        return max(0.0, float(os.environ.get('AD_DIFFICULTY_ASIN_DELAY_SEC', '3')))
+    except (TypeError, ValueError):
+        return 3.0
+
+
+AD_EFFICIENCY_FAILED = -1
+AD_EFFICIENCY_ZERO_AD_WORDS = -2
+AD_KEYWORD_ERROR_ZERO_AD_WORDS = '广告词数量为0'
+
+
+def _ad_word_count_from_ads_data(data: dict | None) -> int:
+    if not isinstance(data, dict):
+        return 0
+    total = 0
+    for key in ('ads', 'highly_rated', 'sponsor_video', 'sponsor_brand'):
+        try:
+            total += int(data.get(key, 0) or 0)
+        except (TypeError, ValueError):
+            pass
+    return total
+
+
+def _ads_row_has_counter_fields(data: dict | None) -> bool:
+    if not isinstance(data, dict):
+        return False
+    return any(key in data for key in ('ads', 'highly_rated', 'sponsor_video', 'sponsor_brand'))
+
+
+def _ad_keyword_failure_message(reason: str) -> str:
+    mapping = {
+        'zero_ad_words': AD_KEYWORD_ERROR_ZERO_AD_WORDS,
+        'empty_products': '关键词无有效产品数据',
+        'invalid_ranking': '广告效率排名无效',
+        'no_ad_efficiency_table': '未能生成广告效率表',
+    }
+    return mapping.get(reason, reason or '广告难度未成功计算')
+
+
+async def _fetch_target_ad_word_count(
+    target_asin: str,
+    *,
+    ads_cache: dict | None = None,
+    price_info: dict | None = None,
+    max_concurrent: int | None = None,
+    ads_fetch_rounds: int = 3,
+) -> int | None:
+    """
+    拉取目标 ASIN 广告词数量。
+    返回 None 表示未能确认；返回 0 表示已确认广告词数量为 0。
+    """
+    asin_key = str(target_asin or '').strip().upper()
+    if not asin_key:
+        return None
+
+    for src in (
+        price_info,
+        ads_cache_get(ads_cache, asin_key) if ads_cache else None,
+    ):
+        if _ads_row_has_counter_fields(src):
+            return _ad_word_count_from_ads_data(src)
+
+    max_ss = max_concurrent if max_concurrent is not None else env_max_concurrent('sellersprite', 6)
+    row: dict | None = None
+    if ads_cache is not None:
+        await ensure_ads_cached_robust(
+            ads_cache,
+            [asin_key],
+            max_concurrent=max_ss,
+            max_rounds=max(1, ads_fetch_rounds),
+            pause_sec=2.0,
+        )
+        row = ads_cache_get(ads_cache, asin_key)
+    else:
+        result = await advertisement_main([asin_key], max_concurrent=max_ss)
+        row = (result or {}).get(asin_key) or (result or {}).get(target_asin)
+        if not isinstance(row, dict):
+            row = None
+
+    if _ads_row_has_counter_fields(row):
+        return _ad_word_count_from_ads_data(row)
+    return None
+
+
+def _zero_ad_words_skip_payload(asin_key: str) -> dict:
+    return {
+        'ranking_percent': None,
+        'computed_ad': False,
+        'keywords': {},
+        'error': AD_KEYWORD_ERROR_ZERO_AD_WORDS,
+        'skip_reason': 'zero_ad_words',
+    }
+
+
+async def _prefilter_zero_ad_word_asins(
+    nested_result: dict,
+    *,
+    ads_cache: dict,
+    max_concurrent: int,
+    ads_fetch_rounds: int = 3,
+) -> tuple[dict, dict]:
+    """登录后、批量预取竞品广告数据前，先剔除目标 ASIN 广告词数量为 0 的项。"""
+    filtered: dict = {}
+    early_out: dict = {}
+    for asin, kw_map in (nested_result or {}).items():
+        asin_key = str(asin).strip().upper()
+        ad_words = await _fetch_target_ad_word_count(
+            asin_key,
+            ads_cache=ads_cache,
+            max_concurrent=max_concurrent,
+            ads_fetch_rounds=ads_fetch_rounds,
+        )
+        if ad_words == 0:
+            emit_progress(f'{asin_key} 目标 ASIN 广告词数量为 0，跳过广告难度计算')
+            early_out[asin_key] = _zero_ad_words_skip_payload(asin_key)
+            continue
+        filtered[asin] = kw_map
+    return filtered, early_out
+
+
+async def _enrich_total_units_from_api(
+    total_units_by_asin: dict,
+    asin_list: list,
+    *,
+    max_concurrent: int = 1,
+) -> None:
+    """为 clean_data 中缺失或为 0 的 ASIN 批量补拉父体销量。"""
+    need: list[str] = []
+    seen: set[str] = set()
+    for raw in asin_list:
+        key = str(raw or '').strip().upper()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        val = total_units_by_asin.get(key)
+        try:
+            missing = val is None or pd.isna(val) or float(val) <= 0
+        except (TypeError, ValueError):
+            missing = True
+        if missing:
+            need.append(key)
+    if not need:
+        return
+    try:
+        fetched = await fetch_multiple_asins_totalUnits(need, max_concurrent=max_concurrent)
+    except Exception as e:
+        if is_seller_account_banned_error(e):
+            raise
+        print(f'警告：批量补拉父体销量失败: {e}')
+        return
+    for asin, data in (fetched or {}).items():
+        key = str(asin).strip().upper()
+        tu = pd.to_numeric((data or {}).get('totalUnits'), errors='coerce')
+        if not pd.isna(tu):
+            total_units_by_asin[key] = float(tu)
+
+
 async def save_ad_efficiency_table(
         clean_data: pd.DataFrame,
         keyword: str,
         target_asin: str,
         *,
         ads_cache: dict | None = None,
+        ads_max_concurrent: int | None = None,
+        ads_fetch_rounds: int = 3,
 ):
     """
     保存广告效率表：
@@ -604,27 +865,41 @@ async def save_ad_efficiency_table(
         asin_list.append(current_asin)
 
     # ==================== 3. 获取广告词数据（不含 totalUnits） ====================
-    max_ss = env_max_concurrent('sellersprite', 6)
+    max_ss = ads_max_concurrent if ads_max_concurrent is not None else env_max_concurrent('sellersprite', 6)
     try:
         if ads_cache is not None:
-            missing = [
-                str(a).strip().upper()
-                for a in asin_list
-                if not ads_cache_get(ads_cache, a)
-            ]
-            if missing:
-                await ensure_ads_cached(ads_cache, missing, max_concurrent=max_ss)
+            await ensure_ads_cached_robust(
+                ads_cache,
+                [str(a).strip().upper() for a in asin_list],
+                max_concurrent=max_ss,
+                max_rounds=max(1, ads_fetch_rounds),
+                pause_sec=2.0,
+            )
             ads_result = {}
             for a in asin_list:
                 row = ads_cache_get(ads_cache, a)
                 if row:
+                    ads_result[str(a).strip().upper()] = row
                     ads_result[a] = row
         else:
             ads_result = await advertisement_main(asin_list, max_concurrent=max_ss)
         print("广告词数据示例：", list(ads_result.items())[:3])
     except Exception as e:
+        if is_seller_account_banned_error(e):
+            raise
         print(f"获取广告词数据失败：{e}")
         ads_result = {}
+
+    if current_asin:
+        target_row = (
+            ads_result.get(current_asin)
+            or ads_result.get(str(current_asin).upper())
+            or (ads_cache_get(ads_cache, current_asin) if ads_cache else None)
+        )
+        if _ads_row_has_counter_fields(target_row):
+            if _ad_word_count_from_ads_data(target_row) == 0:
+                print(f'目标 ASIN {current_asin} 广告词数量为 0，跳过广告效率表')
+                return AD_EFFICIENCY_ZERO_AD_WORDS
 
     # ==================== 4. 从 clean_data 构建 asin -> totalUnits 映射 ====================
     total_units_by_asin = {}
@@ -640,28 +915,34 @@ async def save_ad_efficiency_table(
             .to_dict()
         )
 
-    # target_asin 在 clean_data 无销量时，回退到接口获取
+    await _enrich_total_units_from_api(
+        total_units_by_asin,
+        asin_list,
+        max_concurrent=1 if max_ss <= 1 else min(max_ss, 3),
+    )
+
+    # 兼容旧逻辑：目标 ASIN 仍单独尝试一次（上面批量已覆盖）
     need_fetch_target_units = False
     if current_asin:
-        if current_asin not in total_units_by_asin:
+        v = total_units_by_asin.get(current_asin)
+        try:
+            need_fetch_target_units = v is None or pd.isna(v) or float(v) <= 0
+        except (TypeError, ValueError):
             need_fetch_target_units = True
-        else:
-            v = total_units_by_asin.get(current_asin)
-            if pd.isna(v):
-                need_fetch_target_units = True
 
     if need_fetch_target_units:
         try:
             target_asin_total_units = await fetch_multiple_asins_totalUnits([current_asin], 1)
-            # 期望结构：{'B0FWJ8HNCB': {'totalUnits': 2242, 'salesTrend': '...'}}
             fetched = (target_asin_total_units or {}).get(current_asin, {}).get("totalUnits")
             fetched = pd.to_numeric(fetched, errors="coerce")
-            if not pd.isna(fetched):
+            if not pd.isna(fetched) and float(fetched) > 0:
                 total_units_by_asin[current_asin] = float(fetched)
                 print(f"target_asin={current_asin} 的 totalUnits 回退获取成功: {fetched}")
             else:
                 print(f"警告：target_asin={current_asin} 回退接口未返回有效 totalUnits")
         except Exception as e:
+            if is_seller_account_banned_error(e):
+                raise
             print(f"警告：回退获取 target_asin totalUnits 失败: {e}")
 
     # ==================== 5. 构建 DataFrame（广告字段来自 ads_result） ====================
@@ -838,9 +1119,17 @@ async def _ad_difficulty_for_one_asin(
     ads_cache: dict | None = None,
     progress_state: dict | None = None,
     keyword_sequential: bool = False,
+    ads_max_concurrent: int | None = None,
+    ads_fetch_rounds: int = 3,
+    ad_rotation_state: dict | None = None,
+    keyword_ban_retry: bool = False,
+    marketplace: str = 'US',
 ) -> tuple[str, dict]:
-    """单 ASIN 广告难度；默认关键词并发，定时任务可改为顺序执行。"""
+    """单 ASIN 广告难度；定时顺序模式下支持关键词级断点续算。"""
     asin_key = str(asin).strip().upper()
+    mp = str(marketplace or 'US').strip().upper()
+    if mp not in ('US', 'UK'):
+        mp = 'US'
     price_info = (
         asin_price_dict.get(asin_key)
         or asin_price_dict.get(asin)
@@ -849,15 +1138,60 @@ async def _ad_difficulty_for_one_asin(
     )
     rp_candidates: list[float] = []
     details: dict = {}
+    max_ss = ads_max_concurrent if ads_max_concurrent is not None else (
+        1 if keyword_sequential else env_max_concurrent('sellersprite', 6)
+    )
+
+    target_ad_words = await _fetch_target_ad_word_count(
+        asin_key,
+        ads_cache=ads_cache,
+        price_info=price_info if price_info else None,
+        max_concurrent=max_ss,
+        ads_fetch_rounds=ads_fetch_rounds,
+    )
+    if target_ad_words == 0:
+        emit_progress(f'{asin_key} 目标 ASIN 广告词数量为 0，跳过广告难度计算')
+        if progress_state is not None:
+            n_kw = len(kw_map or {})
+            if n_kw:
+                async with progress_state['lock']:
+                    progress_state['done'] += n_kw
+        return asin_key, _zero_ad_words_skip_payload(asin_key)
 
     async def _one_keyword(keyword: str, products: list) -> tuple[str, dict]:
+        output_dir = await verify_path(asin=asin_key, keyword=keyword)
+        paths = _keyword_artifact_paths(output_dir, keyword)
+
+        existing_rp = _read_ranking_from_ad_efficiency_xlsx(
+            paths['ad_efficiency'], asin_key
+        )
+        if existing_rp is not None and existing_rp >= 0:
+            emit_progress(
+                f'跳过已完成关键词「{keyword}」({asin_key})，广告难度 {existing_rp}%'
+            )
+            return keyword, {
+                'computed': True,
+                'matched': True,
+                'ranking_percent': float(existing_rp),
+                'resumed': True,
+            }
+
         df = pd.DataFrame(products)
         if df.empty:
-            return keyword, {'matched': False, 'ranking_percent': 0}
+            return keyword, {
+                'computed': False,
+                'matched': False,
+                'ranking_percent': None,
+                'reason': 'empty_products',
+            }
         source_kind = (source_map.get(asin_key, {}) or source_map.get(asin, {}) or {}).get(
             keyword, 'search'
         )
-        if source_kind == 'data_origin':
+        existing_clean = _load_existing_data_origin(paths['data_origin'])
+        if existing_clean is not None and not existing_clean.empty:
+            clean_data = existing_clean
+            emit_progress(f'续算关键词「{keyword}」({asin_key})：复用已有 data_origin')
+        elif source_kind == 'data_origin':
             clean_data = df
         else:
             clean_data = await save_cleaned_data_orign_to_excel(
@@ -867,32 +1201,76 @@ async def _ad_difficulty_for_one_asin(
                 price_info,
                 ads_cache=ads_cache,
             )
-        review_interval = await save_review_interval_analysis_to_excel(
-            clean_data, keyword, asin_key
-        )
-        matched = _ops_gt10_ignore_200(review_interval)
-        if not matched:
-            print(f"ASIN {asin_key} 关键词 {keyword} 运营难度<=10%(前4段)，跳过广告效率表。")
-            return keyword, {'matched': False, 'ranking_percent': 0}
+
+        if _review_interval_file_exists(paths):
+            emit_progress(
+                f'续算关键词「{keyword}」({asin_key})：复用已有 review_interval_analysis'
+            )
+        else:
+            await save_review_interval_analysis_to_excel(
+                clean_data, keyword, asin_key, marketplace=mp
+            )
+
         rp = await save_ad_efficiency_table(
             clean_data,
             keyword,
             asin_key,
             ads_cache=ads_cache,
+            ads_max_concurrent=max_ss,
+            ads_fetch_rounds=ads_fetch_rounds,
         )
         rp_num = pd.to_numeric(rp, errors='coerce')
         if not pd.isna(rp_num) and float(rp_num) >= 0:
-            return keyword, {'matched': True, 'ranking_percent': float(rp_num)}
-        return keyword, {'matched': True, 'ranking_percent': 0}
+            return keyword, {
+                'computed': True,
+                'matched': True,
+                'ranking_percent': float(rp_num),
+            }
+        if not pd.isna(rp_num) and float(rp_num) == AD_EFFICIENCY_ZERO_AD_WORDS:
+            return keyword, {
+                'computed': False,
+                'matched': False,
+                'ranking_percent': None,
+                'reason': 'zero_ad_words',
+            }
+        reason = 'invalid_ranking'
+        if pd.isna(rp_num) or float(rp_num) == AD_EFFICIENCY_FAILED:
+            reason = 'no_ad_efficiency_table'
+        return keyword, {
+            'computed': False,
+            'matched': False,
+            'ranking_percent': None,
+            'reason': reason,
+        }
+
+    async def _one_keyword_resilient(keyword: str, products: list) -> tuple[str, dict]:
+        if not (keyword_ban_retry and ad_rotation_state is not None):
+            return await _one_keyword(keyword, products)
+        max_rot = int(ad_rotation_state.get('max') or 16)
+        attempts = 0
+        while True:
+            try:
+                return await _one_keyword(keyword, products)
+            except Exception as e:
+                if not is_seller_account_banned_error(e):
+                    raise
+                attempts += 1
+                if attempts > max_rot:
+                    raise
+                await _rotate_ad_account_for_keyword_resume(
+                    asin_key,
+                    keyword,
+                    rotation_state=ad_rotation_state,
+                )
 
     kw_items = list((kw_map or {}).items())
     if not kw_items:
-        return asin_key, {'ranking_percent': 0.0, 'keywords': {}}
+        return asin_key, {'ranking_percent': None, 'computed_ad': False, 'keywords': {}}
 
     if keyword_sequential:
         kw_results = []
         for kw, prods in kw_items:
-            kw_results.append(await _one_keyword(kw, prods))
+            kw_results.append(await _one_keyword_resilient(kw, prods))
     else:
         kw_results = await asyncio.gather(
             *[_one_keyword(kw, prods) for kw, prods in kw_items],
@@ -904,7 +1282,7 @@ async def _ad_difficulty_for_one_asin(
             raise item
         keyword, detail = item
         details[keyword] = detail
-        if detail.get('matched') and detail.get('ranking_percent', 0) > 0:
+        if detail.get('computed') and detail.get('ranking_percent') is not None:
             rp_candidates.append(float(detail['ranking_percent']))
         if progress_state is not None:
             async with progress_state['lock']:
@@ -916,16 +1294,67 @@ async def _ad_difficulty_for_one_asin(
                 emit_progress(f'广告难度计算进度 {done_n}/{total_n}：{asin_key}')
 
     payload = {
-        'ranking_percent': round(min(rp_candidates), 3) if rp_candidates else 0.0,
+        'ranking_percent': round(min(rp_candidates), 3) if rp_candidates else None,
+        'computed_ad': bool(rp_candidates),
         'keywords': details,
     }
+    if not rp_candidates:
+        reasons = [
+            str(d.get('reason') or 'failed')
+            for d in details.values()
+            if isinstance(d, dict)
+        ]
+        if reasons and all(r == 'zero_ad_words' for r in reasons):
+            payload['error'] = AD_KEYWORD_ERROR_ZERO_AD_WORDS
+            payload['skip_reason'] = 'zero_ad_words'
+        else:
+            messages = [_ad_keyword_failure_message(r) for r in reasons[:3]]
+            payload['error'] = '; '.join(messages) if messages else 'no_valid_keyword_ranking'
     return asin_key, payload
+
+
+def _ad_difficulty_partial_or_raise(
+    out: dict,
+    ban_pending: list[str],
+    message: str,
+) -> dict:
+    """
+    禁号且无法轮换时：未完成 ASIN 写入续算队列。
+    若 out 中已有成功结果则返回带 __ban__ 的 dict（不抛异常），否则抛出 SellerAccountBannedError。
+    """
+    from bulk_account_pool import record_ban_pending_asins
+    from seller_account_guard import SellerAccountBannedError
+
+    pending = sorted(
+        {str(a).strip().upper() for a in ban_pending if str(a).strip()}
+    )
+    if pending:
+        record_ban_pending_asins(pending, task='ad')
+    clean_out = {
+        k: v for k, v in out.items() if not str(k).startswith('__')
+    }
+    has_success = any(
+        isinstance(v, dict)
+        and v.get('computed_ad')
+        and v.get('ranking_percent') is not None
+        for v in clean_out.values()
+    )
+    if has_success:
+        result = dict(clean_out)
+        result['__ban__'] = {'pending': pending, 'message': message}
+        return result
+    raise SellerAccountBannedError(
+        message,
+        partial_results=clean_out,
+        ban_pending=pending,
+    )
 
 
 async def calculate_ad_difficulty_for_asins(
     target_asins: list[str] | None = None,
     *,
     sequential: bool = False,
+    marketplace: str = 'US',
 ) -> dict:
     """
     从本地 file/{ASIN}/{关键词} 数据重算广告难度（使用批量账号池）：
@@ -934,14 +1363,40 @@ async def calculate_ad_difficulty_for_asins(
     - ASIN 级 ranking_percent 取有效关键词最小值；若都不命中则为 0
     - sequential=True：定时任务顺序模式（逐个 ASIN、逐个请求卖家精灵，无并发）
     - 默认多 ASIN 并发；遇禁号自动切换最久未用批量账号并续算未完成 ASIN
+    - marketplace=US|UK：卖家精灵 market / marketId 与本地 Search 文件站点
     """
+    from sellersprite_market import (
+        normalize_sellersprite_marketplace,
+        reset_sellersprite_marketplace,
+        set_sellersprite_marketplace,
+    )
+
+    mp = normalize_sellersprite_marketplace(marketplace)
+    _ss_token = set_sellersprite_marketplace(mp)
+
+    try:
+        return await _calculate_ad_difficulty_for_asins_body(
+            target_asins,
+            sequential=sequential,
+            marketplace=mp,
+        )
+    finally:
+        reset_sellersprite_marketplace(_ss_token)
+
+
+async def _calculate_ad_difficulty_for_asins_body(
+    target_asins: list[str] | None = None,
+    *,
+    sequential: bool = False,
+    marketplace: str = 'US',
+) -> dict:
     from seller_account_guard import (
-        SellerAccountBannedError,
         bulk_rotate_if_available,
         clear_seller_login_cache,
         ensure_seller_login,
     )
 
+    mp = marketplace
     try:
         from bulk_account_pool import pop_ban_pending_asins
 
@@ -958,17 +1413,13 @@ async def calculate_ad_difficulty_for_asins(
     except ImportError:
         pass
 
+    emit_progress(f'广告难度站点：{mp}')
     nested_result, _keyword_dict, source_map = await asyncio.to_thread(
-        load_products_from_local_files, None, target_asins
+        load_products_from_local_files, None, target_asins, marketplace=mp
     )
     if not nested_result:
         return {}
 
-    n_asin = len(nested_result)
-    n_kw = sum(len(km or {}) for km in nested_result.values())
-    emit_progress(f'广告难度：共 {n_asin} 个 ASIN、{n_kw} 个关键词待分析')
-
-    all_fetch_asins = _collect_ad_fetch_asins_from_nested(nested_result)
     rotation_state: dict = {'count': 0, 'max': 16}
     max_ss = 1 if sequential else env_max_concurrent('sellersprite', 6)
     ads_cache: dict = {}
@@ -984,29 +1435,73 @@ async def calculate_ad_difficulty_for_asins(
     emit_progress(f'正在登录卖家精灵（批量账号）…')
     await ensure_seller_login()
 
-    async def _prefetch_ads(batch_fetch: list[str], *, rotated: bool = False):
+    nested_result, zero_ad_out = await _prefilter_zero_ad_word_asins(
+        nested_result,
+        ads_cache=ads_cache,
+        max_concurrent=max_ss,
+    )
+    out: dict = dict(zero_ad_out)
+    if not nested_result:
+        if zero_ad_out:
+            emit_progress(
+                f'广告难度：{len(zero_ad_out)} 个 ASIN 因广告词数量为 0 已全部跳过'
+            )
+        return out
+
+    n_asin = len(nested_result)
+    n_kw = sum(len(km or {}) for km in nested_result.values())
+    all_fetch_asins = _collect_ad_fetch_asins_from_nested(nested_result)
+    skipped_zero = len(zero_ad_out)
+    if skipped_zero:
+        emit_progress(
+            f'广告难度：已跳过 {skipped_zero} 个广告词为 0 的 ASIN，'
+            f'继续计算 {n_asin} 个 ASIN、{n_kw} 个关键词'
+        )
+    else:
+        emit_progress(f'广告难度：共 {n_asin} 个 ASIN、{n_kw} 个关键词待分析')
+
+    async def _prefetch_ads(
+        batch_fetch: list[str],
+        *,
+        rotated: bool = False,
+        ban_pending_asins: list[str] | None = None,
+    ) -> dict | None:
         try:
             async with async_api_slot('sellersprite'):
-                await ensure_ads_cached(
+                await ensure_ads_cached_robust(
                     ads_cache,
                     batch_fetch,
                     max_concurrent=max_ss,
+                    max_rounds=3,
+                    pause_sec=2.0,
                     on_progress=_on_ad_fetch_progress,
+                    marketplace=mp,
                 )
         except Exception as e:
             if is_seller_account_banned_error(e) and not rotated:
                 emit_progress('广告难度：卖家精灵被禁，正在切换批量账号…')
                 clear_seller_login_cache()
                 if await bulk_rotate_if_available(
-                    batch_fetch,
+                    ban_pending_asins or batch_fetch,
                     rotation_state=rotation_state,
                     pending_task='ad',
                 ):
                     await ensure_seller_login()
-                    return await _prefetch_ads(batch_fetch, rotated=True)
+                    return await _prefetch_ads(
+                        batch_fetch,
+                        rotated=True,
+                        ban_pending_asins=ban_pending_asins,
+                    )
             if is_seller_account_banned_error(e):
-                raise SellerAccountBannedError(str(e)) from e
+                return _ad_difficulty_partial_or_raise(
+                    out,
+                    ban_pending_asins or batch_fetch,
+                    str(e),
+                )
             raise RuntimeError(f'广告数据批量获取失败: {e}') from e
+        return None
+
+    remaining = list(nested_result.keys())
 
     if sequential:
         emit_progress(
@@ -1018,15 +1513,18 @@ async def calculate_ad_difficulty_for_asins(
         emit_progress(
             f'正在向卖家精灵请求 {len(all_fetch_asins)} 个 ASIN 的广告数据（并发 {max_ss}）…'
         )
-        await _prefetch_ads(all_fetch_asins)
+        partial = await _prefetch_ads(
+            all_fetch_asins,
+            ban_pending_asins=list(nested_result.keys()),
+        )
+        if partial is not None:
+            return partial
         emit_progress(f'广告数据请求完成（{len(all_fetch_asins)} 个 ASIN）')
         asin_price_dict = {
             a: ads_cache_get(ads_cache, a)
             for a in nested_result.keys()
             if ads_cache_get(ads_cache, a)
         }
-    remaining = list(nested_result.keys())
-    out: dict = {}
     calc_total = n_kw
     progress_state = {
         'done': 0,
@@ -1045,7 +1543,12 @@ async def calculate_ad_difficulty_for_asins(
             emit_progress(
                 f'顺序模式：{work_batch[0]} 请求广告数据（{len(per_fetch)} 个 ASIN）…'
             )
-            await _prefetch_ads(per_fetch)
+            partial = await _prefetch_ads(
+                per_fetch,
+                ban_pending_asins=list(remaining),
+            )
+            if partial is not None:
+                return partial
             batch_price = {
                 work_batch[0]: ads_cache_get(ads_cache, work_batch[0]) or {}
             }
@@ -1066,6 +1569,11 @@ async def calculate_ad_difficulty_for_asins(
                     ads_cache=ads_cache,
                     progress_state=progress_state,
                     keyword_sequential=sequential,
+                    ads_max_concurrent=max_ss,
+                    ads_fetch_rounds=3,
+                    ad_rotation_state=rotation_state,
+                    keyword_ban_retry=sequential,
+                    marketplace=mp,
                 )
 
         raw_results = await asyncio.gather(
@@ -1090,7 +1598,12 @@ async def calculate_ad_difficulty_for_asins(
                 if is_seller_account_banned_error(item):
                     continue
                 print(f"警告: ASIN {asin} 广告难度计算失败: {item}")
-                out[asin] = {'ranking_percent': 0.0, 'keywords': {}, 'error': str(item)}
+                out[asin] = {
+                    'ranking_percent': None,
+                    'computed_ad': False,
+                    'keywords': {},
+                    'error': str(item),
+                }
                 continue
             asin_key, payload = item
             out[asin_key] = payload
@@ -1103,20 +1616,26 @@ async def calculate_ad_difficulty_for_asins(
                 rotation_state=rotation_state,
                 pending_task='ad',
             ):
-                from bulk_account_pool import record_ban_pending_asins
-
-                record_ban_pending_asins(ban_pending, task='ad')
-                raise SellerAccountBannedError('批量账号被禁且无法轮换（广告难度）')
+                return _ad_difficulty_partial_or_raise(
+                    out,
+                    ban_pending,
+                    '批量账号被禁且无法轮换（广告难度）',
+                )
             await ensure_seller_login()
             refetch = _collect_ad_fetch_asins_from_nested(
                 {a: nested_result[a] for a in ban_pending if a in nested_result}
             )
-            await _prefetch_ads(refetch)
+            partial = await _prefetch_ads(refetch, ban_pending_asins=ban_pending)
+            if partial is not None:
+                return partial
             remaining = ban_pending
             continue
 
         if sequential:
             remaining = remaining[len(work_batch):]
+            delay = _ad_asin_delay_sec()
+            if remaining and delay > 0:
+                await asyncio.sleep(delay)
         else:
             break
 
@@ -1347,14 +1866,18 @@ def build_local_product_hints(nested_result: dict, asin: str) -> dict:
 def _resolve_image_url_for_roi(
     asin: str,
     info: dict | None,
+    *,
+    marketplace: str | None = None,
 ) -> str:
+    from sellersprite_market import sellersprite_amazon_dp_url
+
     url = str((info or {}).get('imageUrl') or '').strip()
     if url and url.upper() not in ('N/A', 'NA', 'NAN'):
         return url
     cached = read_image_url_from_roi_pack(asin)
     if cached and str(cached).strip().upper() not in ('N/A', 'NA', 'NAN', ''):
         return str(cached).strip()
-    return f'https://www.amazon.com/dp/{str(asin).strip().upper()}'
+    return sellersprite_amazon_dp_url(asin, marketplace)
 
 
 async def _resolve_refund_rate(
@@ -1394,10 +1917,13 @@ async def prefetch_refund_rates(
     paths: list[str],
     *,
     max_concurrent: int | None = None,
+    marketplace: str | None = None,
 ) -> dict[str, float]:
     """按类目路径批量预取退款率（同一路径只请求一次；失败类目不中断整批）。"""
     limit = max_concurrent or env_max_concurrent('sellersprite', 6)
-    out, failures = await prefetch_refund_rates_batch(paths, max_concurrent=limit)
+    out, failures = await prefetch_refund_rates_batch(
+        paths, max_concurrent=limit, marketplace=marketplace
+    )
     if failures:
         emit_progress(
             f'退款率：{len(out)} 个类目成功，{len(failures)} 个类目无数据（相关 ASIN 将单独失败）'
@@ -1413,6 +1939,7 @@ async def _resolve_fba_and_head(
     asin: str,
     fba_info_dict: dict,
     head_distance_override: float | None,
+    default_fba_fee: float | None = None,
 ) -> tuple[float, float]:
     info = fba_info_dict.get(asin) or {}
     if not isinstance(info, dict):
@@ -1426,12 +1953,13 @@ async def _resolve_fba_and_head(
         except (TypeError, ValueError):
             head_distance = None
 
+    fba_fallback = float(default_fba_fee) if default_fba_fee is not None else ROI_DEFAULT_FBA_FEE
     if fba_fee is None or fba_fee <= 0:
         print(
             f'警告: ASIN {asin} 无法获取 FBA 配送费，'
-            f'使用默认值 ${ROI_DEFAULT_FBA_FEE}'
+            f'使用默认值 ${fba_fallback}'
         )
-        fba_fee = ROI_DEFAULT_FBA_FEE
+        fba_fee = fba_fallback
 
     if head_distance_override is not None:
         head_distance = head_distance_override
@@ -1456,13 +1984,22 @@ async def ensure_asin_image_path(
     info: dict | None,
     current_path: str = "",
 ) -> str | None:
-    """确保 ASIN 主图存在；仅使用卖家精灵广告接口返回的 imageUrl。"""
+    """确保 ASIN 主图存在；优先卖家精灵 imageUrl，其次旧 ROI 表图片链接。"""
     p = Path(current_path) if current_path else asin_image_file(asin)
     if p.is_file():
         return str(p.resolve())
+    local = asin_image_file(asin)
+    if local.is_file():
+        return str(local.resolve())
 
     url = str((info or {}).get('imageUrl') or '').strip()
     if not url or url.upper() in ('N/A', 'NA', 'NAN'):
+        cached = read_image_url_from_roi_pack(asin)
+        url = str(cached or '').strip()
+    if not url or url.upper() in ('N/A', 'NA', 'NAN'):
+        return None
+    # 商品页 URL 无法当主图下载
+    if 'amazon.' in url.lower() and '/dp/' in url.lower() and 'images-' not in url.lower():
         return None
 
     got = await download_one(asin, {'imageUrl': url})
@@ -1496,20 +2033,37 @@ async def save_roi_us_pack(nodeLabelPath: str,
                            unit_purchase_override: float | None = None,
                            head_distance_override: float | None = None,
                            local_hints: dict | None = None,
-                           refund_cache: dict[str, float] | None = None):
+                           refund_cache: dict[str, float] | None = None,
+                           marketplace: str = 'US',
+                           roi_defaults: dict | None = None):
     """
     生成 ROI-US-pack 表，输出三组并排数据：左侧基础成本、中间广告相关、右侧流量与利润指标，
     每组包含字段、值、单位三列。
+    marketplace=US|UK；roi_defaults 可覆盖平台佣金与默认采购/FBA/退款率。
     """
     product_asin = asin
     hints = local_hints or {}
     node_label_path = (nodeLabelPath or '').strip() or str(hints.get('nodeLabelPath') or '').strip()
+    mp = str(marketplace or 'US').strip().upper()
+    if mp not in ('US', 'UK'):
+        mp = 'US'
+    rd = roi_defaults if isinstance(roi_defaults, dict) else {}
+    default_unit_purchase = float(rd.get('default_unit_purchase') or ROI_DEFAULT_UNIT_PURCHASE)
+    default_fba_fee = float(rd.get('default_fba_fee') or ROI_DEFAULT_FBA_FEE)
+    default_refund_rate = float(rd.get('default_refund_rate') or ROI_DEFAULT_REFUND_RATE)
+    try:
+        platform_commission = float(rd['platform_commission']) if 'platform_commission' in rd else (
+            25 if mp == 'UK' else 15
+        )
+    except (TypeError, ValueError):
+        platform_commission = 25 if mp == 'UK' else 15
 
     # ==================== 1. 获取基础数据 ====================
     fba_fee, head_distance = await _resolve_fba_and_head(
         product_asin,
         fba_info_dict,
         head_distance_override,
+        default_fba_fee=default_fba_fee,
     )
 
     if unit_purchase_override is not None:
@@ -1527,13 +2081,11 @@ async def save_roi_us_pack(nodeLabelPath: str,
         if unit_purchase is None:
             unit_purchase = read_unit_purchase_from_roi_pack(product_asin)
         if unit_purchase is None:
-            unit_purchase = ROI_DEFAULT_UNIT_PURCHASE
+            unit_purchase = default_unit_purchase
             print(
                 f'警告: ASIN {asin} 无法获取单件采购价，'
-                f'使用默认值 ￥{ROI_DEFAULT_UNIT_PURCHASE}'
+                f'使用默认值 ￥{default_unit_purchase}'
             )
-
-    platform_commission = 15
 
     refund_rate = await _resolve_refund_rate(
         product_asin, node_label_path, hints, refund_cache=refund_cache
@@ -1549,7 +2101,7 @@ async def save_roi_us_pack(nodeLabelPath: str,
         denominator = 1 - (platform_commission + refund_rate) / 100
         if denominator <= 0:
             print(f'警告: ASIN {asin} 佣金+退款率过高，退款率改用默认值')
-            refund_rate = ROI_DEFAULT_REFUND_RATE
+            refund_rate = default_refund_rate
             denominator = 1 - (platform_commission + refund_rate) / 100
         lowest_price = total_cost / denominator if denominator > 0 else None
     else:
@@ -1593,11 +2145,11 @@ async def save_roi_us_pack(nodeLabelPath: str,
             product_price = ROI_DEFAULT_PRODUCT_PRICE
         discounted_price = product_price * (1 - discount / 100)
         if unit_purchase is None:
-            unit_purchase = ROI_DEFAULT_UNIT_PURCHASE
+            unit_purchase = default_unit_purchase
         if head_distance is None:
             head_distance = 0.0
         if fba_fee is None or fba_fee <= 0:
-            fba_fee = ROI_DEFAULT_FBA_FEE
+            fba_fee = default_fba_fee
         cost_usd = (float(unit_purchase) + float(head_distance)) / exchange_rate
         commission_amount = discounted_price * (platform_commission / 100)
         refund_amount = product_price * (refund_rate / 100)
@@ -1695,9 +2247,13 @@ async def save_roi_us_pack(nodeLabelPath: str,
         if unit_purchase is not None and head_distance is not None
         else None
     )
-    target_asin_url = f'https://www.amazon.com/DP/{asin}'
+    from sellersprite_market import sellersprite_amazon_dp_url
+
+    target_asin_url = sellersprite_amazon_dp_url(product_asin, mp)
     link1688 = 'https://aibuy.1688.com/landingpage/home/inventory/products.html?bizType=selectionTool&customerId=sellerspriteLP&lang=zh&currency=CNY'
-    imageUrl = _resolve_image_url_for_roi(product_asin, asin_info_dict)
+    imageUrl = _resolve_image_url_for_roi(
+        product_asin, asin_info_dict, marketplace=mp
+    )
 
     # ==================== 4. 构建三组带单位的 DataFrame ====================
     # 左侧：基础成本与售价
@@ -1933,13 +2489,25 @@ async def save_roi_us_pack(nodeLabelPath: str,
 async def force_write_minimal_roi_us_pack(
     asin: str,
     exchange_rate: float = 7.2,
+    marketplace: str = 'US',
+    roi_defaults: dict | None = None,
 ) -> dict:
     """极端兜底：用默认值写出 ROI-US-pack（确保计算 ROI 页能识别为已计算）。"""
     product_asin = str(asin).strip().upper()
-    unit_purchase = ROI_DEFAULT_UNIT_PURCHASE
+    mp = str(marketplace or 'US').strip().upper()
+    if mp not in ('US', 'UK'):
+        mp = 'US'
+    rd = roi_defaults if isinstance(roi_defaults, dict) else {}
+    try:
+        platform_commission = float(rd['platform_commission']) if 'platform_commission' in rd else (
+            25 if mp == 'UK' else 15
+        )
+    except (TypeError, ValueError):
+        platform_commission = 25 if mp == 'UK' else 15
+    unit_purchase = float(rd.get('default_unit_purchase') or ROI_DEFAULT_UNIT_PURCHASE)
     head_distance = 0.0
-    fba_fee = ROI_DEFAULT_FBA_FEE
-    refund_rate = ROI_DEFAULT_REFUND_RATE
+    fba_fee = float(rd.get('default_fba_fee') or ROI_DEFAULT_FBA_FEE)
+    refund_rate = float(rd.get('default_refund_rate') or ROI_DEFAULT_REFUND_RATE)
     product_price = ROI_DEFAULT_PRODUCT_PRICE
     discounted_price = product_price
     actual_profit = max(discounted_price * 0.15, 0.01)
@@ -1952,16 +2520,19 @@ async def force_write_minimal_roi_us_pack(
 
     left_fields = ['单件采购', '单件头程', '平台佣金', '退款率', 'FBA配送', '折后价格', '实际利润']
     left_values = [
-        f'{unit_purchase:.2f}', f'{head_distance:.2f}', '15', f'{refund_rate:.2f}',
+        f'{unit_purchase:.2f}', f'{head_distance:.2f}', f'{platform_commission}', f'{refund_rate:.2f}',
         f'{fba_fee:.2f}', f'{discounted_price:.2f}', f'{actual_profit:.2f}',
     ]
     left_units = ['￥', '￥', '%', '%', '$', '$', '$']
+    from sellersprite_market import sellersprite_amazon_dp_url
+
+    _dp = sellersprite_amazon_dp_url(product_asin, mp)
     middle_fields = ['广告预算', '广告cpc', '广告点击', '转化率', '图片链接', 'asin链接']
     middle_values = [
         f'{ad_budget:.2f}', f'{ad_cpc:.2f}', f'{ad_clicks:.2f}',
         f'{conversion_rate * 100:.2f}',
-        f'https://www.amazon.com/dp/{product_asin}',
-        f'https://www.amazon.com/dp/{product_asin}',
+        _dp,
+        _dp,
     ]
     middle_units = ['$', '$', '次', '%', 'a', 'a']
     extra_fields = ['利润率', '去广告毛利率']
@@ -2014,44 +2585,196 @@ async def get_month_number(asin_list: list, data_nested: dict, key_list: dict):
 
 
 # 并发下载图片到本地（绝对路径：scripts/asin_find_project/images/<ASIN>.jpg）
-async def download_one(asin, info):
+async def download_one(asin, info, *, retries: int = 2):
     IMAGES_DIR.mkdir(parents=True, exist_ok=True)
     local_path = asin_image_file(asin)
     if local_path.is_file():
         print(f"图片已存在: {local_path}")
         return str(local_path)
 
-    image_url = info.get('imageUrl')
+    image_url = (info or {}).get('imageUrl') if isinstance(info, dict) else None
     if not image_url:
         print(f"警告: ASIN {asin} 无图片 URL，无法下载主图到 {local_path}")
         return None
 
-    try:
-        async with aiohttp.ClientSession(
-            headers={
-                'User-Agent': (
-                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-                    '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                ),
-                'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
-                'Referer': 'https://www.amazon.com/',
-            }
-        ) as session:
-            timeout = aiohttp.ClientTimeout(total=90)
-            async with session.get(image_url, timeout=timeout) as resp:
-                if resp.status == 200:
-                    content = await resp.read()
-                    if len(content) < 256:
-                        print(f"下载 {asin} 主图过小({len(content)} bytes)，可能不是有效图片")
-                        return None
-                    local_path.write_bytes(content)
-                    print(f"图片已下载: {local_path} ({len(content)} bytes)")
-                    return str(local_path)
-                else:
-                    print(f"下载失败 {asin}: HTTP {resp.status} url={image_url[:120]}")
-    except Exception as e:
-        print(f"下载异常 {asin}: {e}")
+    from sellersprite_market import (
+        get_sellersprite_marketplace,
+        sellersprite_amazon_host,
+    )
+
+    host = sellersprite_amazon_host(get_sellersprite_marketplace())
+    last_err = ''
+    for attempt in range(max(1, retries)):
+        try:
+            async with aiohttp.ClientSession(
+                headers={
+                    'User-Agent': (
+                        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                        '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    ),
+                    'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+                    'Referer': f'https://{host}/',
+                }
+            ) as session:
+                timeout = aiohttp.ClientTimeout(total=90)
+                async with session.get(image_url, timeout=timeout) as resp:
+                    if resp.status == 200:
+                        content = await resp.read()
+                        if len(content) < 256:
+                            last_err = f'主图过小({len(content)} bytes)'
+                            print(f"下载 {asin} {last_err}，可能不是有效图片")
+                        else:
+                            local_path.write_bytes(content)
+                            print(f"图片已下载: {local_path} ({len(content)} bytes)")
+                            return str(local_path)
+                    else:
+                        last_err = f'HTTP {resp.status}'
+                        print(f"下载失败 {asin}: {last_err} url={str(image_url)[:120]}")
+        except Exception as e:
+            last_err = str(e)
+            print(f"下载异常 {asin} (attempt {attempt + 1}): {e}")
+        if attempt + 1 < retries:
+            await asyncio.sleep(0.6 * (attempt + 1))
+    if last_err:
+        print(f"警告: ASIN {asin} 主图下载最终失败: {last_err}")
     return None
+
+
+async def _download_asin_images(
+    asin_info_dict: dict,
+    asin_to_image_path: dict | None = None,
+) -> dict[str, str]:
+    """为有广告数据的 ASIN 下载主图；已有本地文件则跳过。"""
+    out = dict(asin_to_image_path or {})
+    need: list[tuple[str, dict]] = []
+    for asin, info in (asin_info_dict or {}).items():
+        key = str(asin).strip().upper()
+        if not key or not isinstance(info, dict):
+            continue
+        existing = out.get(key) or ''
+        if existing and Path(existing).is_file():
+            continue
+        local = asin_image_file(key)
+        if local.is_file():
+            out[key] = str(local.resolve())
+            continue
+        need.append((key, info))
+    if not need:
+        return out
+    paths = await asyncio.gather(*[download_one(a, info) for a, info in need])
+    for (asin, _), path in zip(need, paths):
+        if path:
+            out[asin] = path
+    return out
+
+
+async def _refill_missing_sellersprite(
+    target_asins: list[str],
+    fba_info_dict: dict,
+    asin_info_dict: dict,
+    *,
+    max_concurrent: int = 6,
+    max_rounds: int = 3,
+    rotation_state: dict | None = None,
+    pending_task: str = 'roi',
+    marketplace: str | None = None,
+) -> tuple[dict, dict]:
+    """
+    对首次批量拉取后缺失的广告/FBA 做多轮补拉（复用广告难度路径的 robust 逻辑）。
+    遇禁号时尝试 bulk 换号后重试一次；仍失败则上抛，避免吞掉禁号继续写残缺包。
+    """
+    from async_advertisement_api import ensure_ads_cached_robust
+    from async_fba_api import async_fba_batch
+    from seller_account_guard import (
+        SellerAccountBannedError,
+        bulk_rotate_if_available,
+        clear_seller_login_cache,
+        is_seller_account_banned_error,
+    )
+    from sellersprite_market import normalize_sellersprite_marketplace
+
+    mp = normalize_sellersprite_marketplace(marketplace)
+    targets = [str(a).strip().upper() for a in (target_asins or []) if str(a).strip()]
+    ads = dict(asin_info_dict or {})
+    fba = dict(fba_info_dict or {})
+    rot_state = rotation_state if rotation_state is not None else {'count': 0, 'max': 16}
+
+    async def _with_ban_retry(label: str, coro_factory):
+        try:
+            return await coro_factory()
+        except Exception as e:
+            if not is_seller_account_banned_error(e):
+                raise
+            emit_progress(f'{label}遇禁号，尝试解禁换号后重试…')
+            clear_seller_login_cache()
+            if not await bulk_rotate_if_available(
+                targets,
+                rotation_state=rot_state,
+                pending_task=pending_task,
+            ):
+                raise SellerAccountBannedError(f'{label}禁号且无法轮换: {e}') from e
+            return await coro_factory()
+
+    missing_ads = [a for a in targets if not isinstance(ads.get(a), dict)]
+    if missing_ads:
+        emit_progress(
+            f'广告数据缺失 {len(missing_ads)}/{len(targets)}，开始补拉（最多 {max_rounds} 轮）…'
+        )
+
+        async def _pull_ads():
+            return await ensure_ads_cached_robust(
+                ads,
+                missing_ads,
+                max_concurrent=max_concurrent,
+                max_rounds=max_rounds,
+                pause_sec=2.0,
+                marketplace=mp,
+            )
+
+        ads = await _with_ban_retry('广告补拉', _pull_ads)
+        ads = {
+            str(k).strip().upper(): v
+            for k, v in (ads or {}).items()
+            if isinstance(v, dict)
+        }
+        still_ads = [a for a in targets if a not in ads]
+        if still_ads:
+            emit_progress(f'警告：补拉后仍缺广告数据 {len(still_ads)} 个（将影响主图/采购价）')
+            for a in still_ads[:12]:
+                emit_progress(f'  缺广告: {a}')
+            if len(still_ads) > 12:
+                emit_progress(f'  … 另有 {len(still_ads) - 12} 个')
+        else:
+            emit_progress(f'广告补拉完成：{len(ads)}/{len(targets)}')
+
+    def _fba_ok(val) -> bool:
+        return isinstance(val, dict) and (
+            val.get('FBA') is not None or val.get('head_distance') is not None
+        )
+
+    missing_fba = [a for a in targets if not _fba_ok(fba.get(a))]
+    if missing_fba:
+        emit_progress(f'FBA 数据缺失 {len(missing_fba)}/{len(targets)}，开始补拉…')
+
+        async def _pull_fba():
+            return await async_fba_batch(
+                missing_fba, max_concurrent=max_concurrent, marketplace=mp
+            )
+
+        try:
+            extra = await _with_ban_retry('FBA 补拉', _pull_fba)
+            if isinstance(extra, dict):
+                for k, v in extra.items():
+                    key = str(k).strip().upper()
+                    if _fba_ok(v):
+                        fba[key] = v
+        except Exception as e:
+            if is_seller_account_banned_error(e):
+                raise
+            emit_progress(f'警告：FBA 补拉失败：{e}')
+            print(f'FBA 补拉失败: {e}')
+
+    return fba, ads
 
 
 async def async_return_info(asin_dict: dict, info_list: list):
@@ -2167,18 +2890,25 @@ def normalize_excel_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 def load_products_from_local_files(
     base_dir: Optional[Path] = None,
     asins: list[str] | None = None,
+    *,
+    marketplace: str = 'US',
 ) -> tuple:
     """
-    自动扫描本地目录：file/{ASIN}/{关键词文件夹}/Search(*)-*-US-*.xlsx
+    自动扫描本地目录：file/{ASIN}/{关键词文件夹}/Search(*)-*-{US|UK}-*.xlsx
     不依赖外部传入的关键词列表；ASIN 与关键词均来自文件夹名。
 
     :param base_dir: 数据根目录，默认 FILE_DATA_ROOT（即 ./file）
     :param asins: 若指定则只扫描这些 ASIN 目录（避免 media 下数百个 ASIN 全量读 Excel）
+    :param marketplace: US|UK，优先匹配对应站点的 Search 导出文件
     :return: (nested_result, keyword_dict, source_map)
         nested_result: {asin: {keyword_folder_name: [product_dict, ...]}}
         keyword_dict: {asin: [keyword_folder_name, ...]}，供后续加权月销等逻辑使用
         source_map: {asin: {keyword_folder_name: 'data_origin'|'search'|'xlsx'}}
     """
+    mp = str(marketplace or 'US').strip().upper()
+    if mp not in ('US', 'UK'):
+        mp = 'US'
+    search_glob = f'Search(*)-*-{mp}-*.xlsx'
     root = Path(base_dir) if base_dir is not None else FILE_DATA_ROOT
     nested: Dict[str, Dict[str, list]] = {}
     keyword_dict: Dict[str, list] = {}
@@ -2235,10 +2965,15 @@ def load_products_from_local_files(
                 if excel_files:
                     source_kind = "data_origin"
                 else:
-                    excel_files = sorted(kw_dir.glob("Search(*)-*-US-*.xlsx"))
+                    excel_files = sorted(kw_dir.glob(search_glob))
                     source_kind = "search"
             else:
-                excel_files = sorted(kw_dir.glob("Search(*)-*-US-*.xlsx"))
+                excel_files = sorted(kw_dir.glob(search_glob))
+            if not excel_files:
+                # 回落：另一站点 Search，再任意 xlsx
+                alt = 'UK' if mp == 'US' else 'US'
+                excel_files = sorted(kw_dir.glob(f'Search(*)-*-{alt}-*.xlsx'))
+                source_kind = "search"
             if not excel_files:
                 excel_files = sorted(kw_dir.glob("*.xlsx"))
                 source_kind = "xlsx"
@@ -2268,8 +3003,61 @@ async def seller_wizard_main(
         parity: float,
         asins: list[str] | None = None,
         cost_overrides: dict | None = None,
+        marketplace: str = 'US',
+        roi_defaults: dict | None = None,
 ):
     emit_progress('seller_wizard_main 已开始…')
+    mp = str(marketplace or 'US').strip().upper()
+    if mp not in ('US', 'UK'):
+        mp = 'US'
+    from sellersprite_market import (
+        reset_sellersprite_marketplace,
+        sellersprite_market_com,
+        sellersprite_market_id,
+        set_sellersprite_marketplace,
+    )
+
+    _ss_token = set_sellersprite_marketplace(mp)
+    rd = roi_defaults if isinstance(roi_defaults, dict) else {}
+    try:
+        _pc = float(rd['platform_commission']) if 'platform_commission' in rd else (
+            25 if mp == 'UK' else 15
+        )
+    except (TypeError, ValueError):
+        _pc = 25 if mp == 'UK' else 15
+    emit_progress(
+        f'当前站点：{mp}（平台佣金 {_pc:g}%；'
+        f'SellerSprite marketId={sellersprite_market_id(mp)} / market={sellersprite_market_com(mp)}）'
+    )
+
+    try:
+        return await _seller_wizard_main_body(
+            parity,
+            asins=asins,
+            cost_overrides=cost_overrides,
+            marketplace=mp,
+            roi_defaults=rd,
+        )
+    finally:
+        reset_sellersprite_marketplace(_ss_token)
+
+
+async def _seller_wizard_main_body(
+        parity: float,
+        asins: list[str] | None = None,
+        cost_overrides: dict | None = None,
+        marketplace: str = 'US',
+        roi_defaults: dict | None = None,
+):
+    mp = str(marketplace or 'US').strip().upper()
+    if mp not in ('US', 'UK'):
+        mp = 'US'
+    rd = roi_defaults if isinstance(roi_defaults, dict) else {}
+    from sellersprite_market import sellersprite_amazon_dp_url
+
+    def _finish(payload):
+        return payload
+
     FILE_DATA_ROOT.mkdir(parents=True, exist_ok=True)
     print(f"本地 Excel 根目录: {FILE_DATA_ROOT.resolve()}")
     try:
@@ -2298,7 +3086,7 @@ async def seller_wizard_main(
     else:
         emit_progress('正在扫描本地 Excel（未指定 ASIN，全库扫盘）…')
     nested_result, keyword_dict, source_map = await asyncio.to_thread(
-        load_products_from_local_files, None, asins
+        load_products_from_local_files, None, asins, marketplace=mp
     )
     target_asins = [str(a).strip().upper() for a in nested_result.keys()]
     emit_progress(f'已扫描本地数据：共 {len(target_asins)} 个 ASIN（读盘完成）')
@@ -2306,7 +3094,7 @@ async def seller_wizard_main(
     if not target_asins:
         emit_progress(f'未在 {FILE_DATA_ROOT} 下发现 ASIN 数据')
         print(f"未在 {FILE_DATA_ROOT} 下发现符合 B0XXXXXXXXX 结构的 ASIN 数据，结束。")
-        return {}
+        return _finish({})
 
     from seller_account_guard import (
         SellerAccountBannedError,
@@ -2322,26 +3110,47 @@ async def seller_wizard_main(
     await ensure_seller_login()
     max_ss = env_max_concurrent('sellersprite', 6)
 
-    async def _fetch_fba_and_ad(batch_asins: list[str], *, rotated: bool = False):
-        try:
-            async with async_api_slot('sellersprite'):
-                return await asyncio.gather(
-                    async_fba_batch(batch_asins, max_concurrent=max_ss),
-                    advertisement_main(batch_asins, max_concurrent=max_ss),
-                )
-        except Exception as e:
-            if is_seller_account_banned_error(e) and not rotated:
+    async def _fetch_fba_and_ad(batch_asins: list[str]):
+        while True:
+            try:
+                async with async_api_slot('sellersprite'):
+                    return await asyncio.gather(
+                        async_fba_batch(
+                            batch_asins, max_concurrent=max_ss, marketplace=mp
+                        ),
+                        advertisement_main(
+                            batch_asins, max_concurrent=max_ss, marketplace=mp
+                        ),
+                    )
+            except Exception as e:
+                if not is_seller_account_banned_error(e):
+                    raise RuntimeError(f'卖家精灵 FBA/广告批量获取失败: {e}') from e
                 emit_progress('卖家精灵会话失效或子账号被禁，正在解禁并切换批量账号…')
                 clear_seller_login_cache()
-                if await bulk_rotate_if_available(
+                if not await bulk_rotate_if_available(
                     batch_asins,
                     rotation_state=rotation_state,
                     pending_task='roi',
                 ):
-                    return await _fetch_fba_and_ad(batch_asins, rotated=True)
-            if is_seller_account_banned_error(e):
-                raise SellerAccountBannedError(str(e)) from e
-            raise RuntimeError(f'卖家精灵 FBA/广告批量获取失败: {e}') from e
+                    # single 或池不足：至少解禁当前号再试一次
+                    try:
+                        from unlock_seller_info import activate_children
+
+                        activate_children()
+                        clear_seller_login_cache()
+                        await ensure_seller_login(force_refresh=True)
+                        async with async_api_slot('sellersprite'):
+                            return await asyncio.gather(
+                                async_fba_batch(
+                                    batch_asins, max_concurrent=max_ss, marketplace=mp
+                                ),
+                                advertisement_main(
+                                    batch_asins, max_concurrent=max_ss, marketplace=mp
+                                ),
+                            )
+                    except Exception as e2:
+                        raise SellerAccountBannedError(str(e2 or e)) from e
+                continue
 
     fba_info_dict, asin_info_dict = await _fetch_fba_and_ad(target_asins)
     print(fba_info_dict, '666666')
@@ -2357,24 +3166,40 @@ async def seller_wizard_main(
             str(k).strip().upper(): v
             for k, v in fba_info_dict.items()
         }
+    else:
+        fba_info_dict = {}
     emit_progress(
-        f'卖家精灵数据就绪：FBA {len(fba_info_dict)}/{len(target_asins)}，'
+        f'卖家精灵首轮：FBA {sum(1 for v in fba_info_dict.values() if isinstance(v, dict))}/{len(target_asins)}，'
+        f'广告 {len(asin_info_dict)}/{len(target_asins)}'
+    )
+    fba_info_dict, asin_info_dict = await _refill_missing_sellersprite(
+        target_asins,
+        fba_info_dict,
+        asin_info_dict,
+        max_concurrent=max_ss,
+        max_rounds=3,
+        rotation_state=rotation_state,
+        pending_task='roi',
+        marketplace=mp,
+    )
+    emit_progress(
+        f'卖家精灵数据就绪：FBA {sum(1 for v in fba_info_dict.values() if isinstance(v, dict))}/{len(target_asins)}，'
         f'广告 {len(asin_info_dict)}/{len(target_asins)}'
     )
 
-    download_tasks = [download_one(asin, info) for asin, info in asin_info_dict.items()]
-    local_paths = await asyncio.gather(*download_tasks)
-    # 顺序须与 download_tasks（asin_info_dict.items）一致，勿与 target_asins 盲 zip
-    asin_to_image_path = {
-        asin: path
-        for (asin, _), path in zip(asin_info_dict.items(), local_paths)
-        if path
-    }
+    asin_to_image_path = await _download_asin_images(asin_info_dict)
+    missing_img = [
+        a for a in target_asins
+        if a in asin_info_dict and a not in asin_to_image_path
+    ]
+    if missing_img:
+        emit_progress(f'主图下载缺口 {len(missing_img)}，重试一次…')
+        asin_to_image_path = await _download_asin_images(asin_info_dict, asin_to_image_path)
 
-    # 2. SIF：CPC 等（关键词以本地扫描为准）
+    # 2. SIF：CPC 等（关键词以本地扫描为准；英国站 country=UK）
     try:
         async with async_api_slot('sif'):
-            asin_cpc, _ = await async_sif_api.sif_main(target_asins)
+            asin_cpc, _ = await async_sif_api.sif_main(target_asins, country=mp)
     except Exception as e:
         print(f"警告: SIF CPC 获取失败，广告 CPC 将使用默认值: {e}")
         asin_cpc = []
@@ -2387,6 +3212,7 @@ async def seller_wizard_main(
     refund_cache = await prefetch_refund_rates(
         list(asin_path_dict.values()),
         max_concurrent=max_ss,
+        marketplace=mp,
     )
     emit_progress(f'退款率预取完成：{len(refund_cache)} 个类目')
 
@@ -2412,7 +3238,9 @@ async def seller_wizard_main(
                     df, keyword, asin, price_info if isinstance(price_info, dict) else None
                 )
             target_monthly = await save_top5_market_capacity_to_excel(clean_data, keyword, asin)
-            review_interval = await save_review_interval_analysis_to_excel(clean_data, keyword, asin)
+            review_interval = await save_review_interval_analysis_to_excel(
+                clean_data, keyword, asin, marketplace=mp
+            )
             ranking_percent = 0
 
             print(f"<UNK> review_interval={review_interval}")
@@ -2486,6 +3314,8 @@ async def seller_wizard_main(
                 head_distance_override=hd_val,
                 local_hints=hints,
                 refund_cache=refund_cache,
+                marketplace=mp,
+                roi_defaults=rd,
             )
             return result
         except Exception as e:
@@ -2494,7 +3324,9 @@ async def seller_wizard_main(
             err = f'{type(e).__name__}: {e}'
             print(f"警告: ASIN {asin} ROI-US-pack 生成失败: {e}，尝试强制写入默认值…")
             try:
-                return await force_write_minimal_roi_us_pack(asin, exchange_rate=parity)
+                return await force_write_minimal_roi_us_pack(
+                    asin, exchange_rate=parity, marketplace=mp, roi_defaults=rd
+                )
             except Exception as e2:
                 roi_failures.append({'asin': asin, 'error': f'{err}; 兜底失败: {e2}'})
                 emit_progress(f'失败 {asin}：{e2}')
@@ -2509,7 +3341,9 @@ async def seller_wizard_main(
             info = dict(asin_info_dict.get(asin_key) or {})
             if not info:
                 print(f"警告: ASIN {asin_key} 无卖家精灵 advertisement 数据，将用默认值生成 ROI-US-pack")
-                emit_progress(f'提示 {asin_key}：无广告接口数据，使用默认值生成 ROI 表')
+                emit_progress(f'提示 {asin_key}：无广告接口数据，主图/采购价可能为默认值')
+            elif not str(info.get('imageUrl') or '').strip():
+                emit_progress(f'提示 {asin_key}：广告数据无 imageUrl，尝试本地/旧表主图')
             path = asin_to_image_path.get(asin_key, "")
             co = (cost_overrides or {}).get(asin) or (cost_overrides or {}).get(asin_key) or {}
             up = pd.to_numeric(co.get('unit_purchase'), errors='coerce') if isinstance(co, dict) else np.nan
@@ -2570,8 +3404,43 @@ async def seller_wizard_main(
                 from bulk_account_pool import record_ban_pending_asins
 
                 record_ban_pending_asins(ban_pending, task='roi')
-                raise SellerAccountBannedError('批量账号被禁且无法轮换')
+                for a in ban_pending:
+                    if not any(f.get('asin') == a for f in roi_failures):
+                        roi_failures.append(
+                            {'asin': a, 'error': '账号被禁且无法轮换，已记入续算队列'}
+                        )
+                merging_data = await async_merging_data(info_result, info_dict)
+                if not isinstance(merging_data, dict):
+                    merging_data = {}
+                merging_data['__roi_failures__'] = roi_failures
+                merging_data['__ban__'] = {
+                    'pending': ban_pending,
+                    'message': '账号被禁且无法轮换',
+                }
+                if info_result:
+                    emit_progress(
+                        f'无法换号：已保留成功 {len(info_result)} 个，'
+                        f'待续算 {len(ban_pending)} 个'
+                    )
+                    return _finish(merging_data)
+                raise SellerAccountBannedError(
+                    '账号被禁且无法轮换',
+                    partial_results=merging_data,
+                    ban_pending=ban_pending,
+                )
             await ensure_seller_login()
+            # 换号后补拉缺失的卖家精灵数据与主图，避免续算仍用空广告字典
+            fba_info_dict, asin_info_dict = await _refill_missing_sellersprite(
+                ban_pending,
+                fba_info_dict,
+                asin_info_dict,
+                max_concurrent=max_ss,
+                max_rounds=3,
+                rotation_state=rotation_state,
+                pending_task='roi',
+                marketplace=mp,
+            )
+            asin_to_image_path = await _download_asin_images(asin_info_dict, asin_to_image_path)
             remaining_roi = ban_pending
             continue
         break
@@ -2592,7 +3461,7 @@ async def seller_wizard_main(
             emit_progress(f'  … 另有 {len(roi_failures) - 15} 个失败 ASIN')
     print(merging_data, 'www')
     print("所有表创建完成！")
-    return merging_data
+    return _finish(merging_data)
 
 
 if __name__ == "__main__":

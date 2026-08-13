@@ -1,0 +1,164 @@
+{% extends 'base.html' %}
+{% load static %}
+{% block title %}ASIN去重 — Amazon 自动化{% endblock %}
+{% block main_class %}main--asin-upload{% endblock %}
+{% block extra_head %}
+<link rel="stylesheet" href="{% static 'css/asin_upload.css' %}">
+{% endblock %}
+{% block content %}
+<div class="asin-upload-page">
+    <header class="asin-upload-hero">
+        <div class="asin-upload-hero__inner">
+            <span class="asin-upload-hero__eyebrow">ASIN Dedupe</span>
+            <h1 class="asin-upload-hero__title">ASIN 去重</h1>
+            <p class="asin-upload-hero__desc">
+                上传 <strong>asins.txt</strong>，系统自动对比 <strong>数据审核</strong> 中已存在的 ASIN 目录
+               （<code>media/file/B0XXXXXXXX/</code>），剔除已在系统中的 ASIN，并下载去重后的 txt 文件。
+            </p>
+        </div>
+    </header>
+
+    {% if messages %}
+    <ul class="asin-upload-messages">
+        {% for message in messages %}
+        <li class="{{ message.tags }}">{{ message }}</li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+
+    <div class="asin-upload-stats">
+        <div class="asin-upload-stat asin-upload-stat--accent">
+            <p class="asin-upload-stat__label">系统中已有 ASIN</p>
+            <p class="asin-upload-stat__value">{{ media_asin_count|default:0 }}</p>
+            <p class="asin-upload-stat__sub">media/file 目录下的 ASIN 文件夹</p>
+        </div>
+        {% if result %}
+        <div class="asin-upload-stat">
+            <p class="asin-upload-stat__label">文件内 ASIN</p>
+            <p class="asin-upload-stat__value">{{ result.total_unique }}</p>
+            <p class="asin-upload-stat__sub">去重后（原始 {{ result.total_raw }} 行）</p>
+        </div>
+        <div class="asin-upload-stat">
+            <p class="asin-upload-stat__label">保留（新 ASIN）</p>
+            <p class="asin-upload-stat__value">{{ result.keep_count }}</p>
+            <p class="asin-upload-stat__sub">已剔除系统中存在的 {{ result.existing_count }} 个</p>
+        </div>
+        {% endif %}
+    </div>
+
+    <section class="asin-upload-card">
+        <div class="asin-upload-card__head">
+            <div class="asin-upload-card__title-wrap">
+                <span class="asin-upload-card__icon asin-upload-card__icon--upload" aria-hidden="true">↑</span>
+                <div>
+                    <h2 class="asin-upload-card__title">上传 asins.txt</h2>
+                    <p class="asin-upload-card__hint">每行一个 ASIN，也支持逗号或空格分隔；以 # 开头的行为注释</p>
+                </div>
+            </div>
+        </div>
+        <div class="asin-upload-card__body">
+            <form method="post" enctype="multipart/form-data" id="asin-dedupe-form">
+                {% csrf_token %}
+                <label class="asin-upload-drop" id="asin-dedupe-drop" for="id_asin_file">
+                    <span class="asin-upload-drop__icon" aria-hidden="true">📄</span>
+                    <p class="asin-upload-drop__title">点击或拖拽 txt 文件到此处</p>
+                    <p class="asin-upload-drop__sub">仅支持 .txt，最大 5MB</p>
+                    <p class="asin-upload-drop__file" id="asin-dedupe-filename" hidden></p>
+                    <input type="file" id="id_asin_file" name="asin_file" accept=".txt,text/plain" required
+                           class="asin-upload-drop__input">
+                </label>
+                {% if user.is_superuser %}
+                <p class="asin-upload-card__hint" style="margin-top:1rem;">
+                    <label>
+                        <input type="checkbox" name="include_dashboard" value="1">
+                        同时剔除看板中已有记录的 ASIN（默认仅对比 media/file 目录）
+                    </label>
+                </p>
+                {% endif %}
+                <div class="asin-upload-form-actions">
+                    <button type="submit" class="asin-upload-btn asin-upload-btn--primary" id="asin-dedupe-submit" disabled>
+                        上传并去重
+                    </button>
+                </div>
+            </form>
+        </div>
+    </section>
+
+    {% if result %}
+    <section class="asin-upload-card">
+        <div class="asin-upload-card__head">
+            <div class="asin-upload-card__title-wrap">
+                <span class="asin-upload-card__icon asin-upload-card__icon--list" aria-hidden="true">↓</span>
+                <div>
+                    <h2 class="asin-upload-card__title">去重结果</h2>
+                    <p class="asin-upload-card__hint">
+                        文件内 {{ result.total_unique }} 个 ASIN，
+                        系统中已存在 {{ result.existing_count }} 个，
+                        保留 {{ result.keep_count }} 个
+                        {% if result.duplicate_lines %}（文件内重复行 {{ result.duplicate_lines }} 个已忽略）{% endif %}
+                    </p>
+                </div>
+            </div>
+        </div>
+        <div class="asin-upload-card__body">
+            <div class="asin-upload-form-actions">
+                {% if result.keep_count %}
+                <a href="{% url 'asin_dedupe_download' %}?kind=keep" class="asin-upload-btn asin-upload-btn--primary">
+                    下载 asins_new.txt（{{ result.keep_count }} 个）
+                </a>
+                {% else %}
+                <p class="asin-upload-card__hint">去重后无剩余 ASIN，所有条目均已在系统中存在。</p>
+                {% endif %}
+                {% if result.existing_count %}
+                <a href="{% url 'asin_dedupe_download' %}?kind=removed" class="asin-upload-btn">
+                    下载 asins_existing.txt（{{ result.existing_count }} 个）
+                </a>
+                {% endif %}
+            </div>
+        </div>
+    </section>
+    {% endif %}
+</div>
+<script>
+(function () {
+    var input = document.getElementById('id_asin_file');
+    var label = document.getElementById('asin-dedupe-filename');
+    var submit = document.getElementById('asin-dedupe-submit');
+    var drop = document.getElementById('asin-dedupe-drop');
+    if (!input || !submit) return;
+
+    function onFile() {
+        var f = input.files && input.files[0];
+        if (f) {
+            if (label) {
+                label.hidden = false;
+                label.textContent = f.name;
+            }
+            submit.disabled = false;
+        } else {
+            if (label) label.hidden = true;
+            submit.disabled = true;
+        }
+    }
+    input.addEventListener('change', onFile);
+
+    if (drop) {
+        drop.addEventListener('dragover', function (e) {
+            e.preventDefault();
+            drop.classList.add('asin-upload-drop--hover');
+        });
+        drop.addEventListener('dragleave', function () {
+            drop.classList.remove('asin-upload-drop--hover');
+        });
+        drop.addEventListener('drop', function (e) {
+            e.preventDefault();
+            drop.classList.remove('asin-upload-drop--hover');
+            if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+                input.files = e.dataTransfer.files;
+                onFile();
+            }
+        });
+    }
+})();
+</script>
+{% endblock %}

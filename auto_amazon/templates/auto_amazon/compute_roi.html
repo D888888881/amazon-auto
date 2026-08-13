@@ -4,8 +4,8 @@
 {% block content %}
 <div class="upload-page">
     <header class="upload-hero">
-        <h1 class="upload-hero__title">计算ROI</h1>
-        <p class="upload-hero__desc">默认仅展示未计算 ASIN；勾选“计算已计算过数据”后会同时展示已计算与未计算 ASIN。</p>
+        <h1 class="upload-hero__title">计算ROI · {{ current_site_label|default:"当前站点" }}</h1>
+        <p class="upload-hero__desc">仅列出当前站点已导入的 ASIN。默认仅展示未计算项；勾选“计算已计算过数据”后同时展示已计算与未计算。</p>
     </header>
 
     {% include 'auto_amazon/_wizard_active_banner.html' %}
@@ -80,7 +80,7 @@
                 {% endfor %}
             </div>
             <div class="upload-actions">
-                <button type="submit" class="upload-submit">执行计算ROI</button>
+                <button type="submit" class="upload-submit" id="btn-compute-roi">执行计算ROI</button>
             </div>
         </form>
     </section>
@@ -127,7 +127,7 @@
   var logEl = document.getElementById('upload-progress-log');
   var spinner = document.getElementById('upload-progress-spinner');
   var closeBtn = document.getElementById('upload-progress-close');
-  var submitBtn = form.querySelector('.upload-submit');
+  var submitBtn = document.getElementById('btn-compute-roi') || form.querySelector('.upload-submit');
   var startUrl = form.getAttribute('data-upload-start');
   var statusTpl = form.getAttribute('data-status-url-template');
   var timer = null;

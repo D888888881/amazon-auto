@@ -1,10 +1,11 @@
-"""ASIN 批量上传：解析、去重、入库。"""
+"""ASIN 批量上传：解析、按站点去重、入库。"""
 from __future__ import annotations
 
 from django.contrib.auth.models import User
 from django.db import transaction
 
 from .asin_access import normalize_asin
+from .marketplace import MARKETPLACE_US, normalize_marketplace
 from .models import AsinCatalogItem, AsinUploadBatch
 from .utils import extract_asins_from_upload
 
@@ -21,25 +22,37 @@ def _normalize_ext(filename: str) -> str:
 
 
 @transaction.atomic
-def ingest_asin_upload(user: User, filename: str, raw: bytes) -> tuple[AsinUploadBatch, str | None]:
+def ingest_asin_upload(
+    user: User,
+    filename: str,
+    raw: bytes,
+    *,
+    marketplace: str | None = None,
+) -> tuple[AsinUploadBatch, str | None]:
     """
-    解析上传文件，与全局 ASIN 库去重后写入。
+    解析上传文件，与指定站点 ASIN 库去重后写入。
     返回 (批次, 错误信息)；错误时批次为 None。
     """
     ext = _normalize_ext(filename)
     if not ext:
         return None, '仅支持 .txt、.csv、.xlsx、.xls 格式'
 
+    mp = normalize_marketplace(marketplace) or MARKETPLACE_US
     parsed = extract_asins_from_upload(ext, raw)
     if not parsed:
         return None, '文件中未识别到有效 ASIN（每行一个或表格单元格均可）'
 
-    existing = set(AsinCatalogItem.objects.filter(asin__in=parsed).values_list('asin', flat=True))
+    existing = set(
+        AsinCatalogItem.objects.filter(asin__in=parsed, marketplace=mp).values_list(
+            'asin', flat=True
+        )
+    )
     new_asins = [a for a in parsed if a not in existing]
     skipped = len(parsed) - len(new_asins)
 
     batch = AsinUploadBatch.objects.create(
         user=user,
+        marketplace=mp,
         source_filename=(filename or '')[:255],
         total_in_file=len(parsed),
         new_count=len(new_asins),
@@ -51,6 +64,7 @@ def ingest_asin_upload(user: User, filename: str, raw: bytes) -> tuple[AsinUploa
             [
                 AsinCatalogItem(
                     asin=normalize_asin(a) or a,
+                    marketplace=mp,
                     batch=batch,
                     uploaded_by=user,
                 )

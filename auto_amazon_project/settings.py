@@ -50,6 +50,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'auto_amazon.marketplace_middleware.MarketplaceRequiredMiddleware',
 ]
 
 ROOT_URLCONF = 'auto_amazon_project.urls'
@@ -68,6 +69,7 @@ TEMPLATES = [
                 'django.contrib.auth.context_processors.auth',
                 'django.contrib.messages.context_processors.messages',
                 'auto_amazon.context_processors.wizard_job_context',
+                'auto_amazon.context_processors.marketplace_context',
             ],
         },
     },
@@ -148,7 +150,7 @@ FILE_UPLOAD_MAX_MEMORY_SIZE = 64 * 1024 * 1024
 EXCEL_IMPORT_MAX_BYTES = 2048 * 1024 * 1024
 
 LOGIN_URL = 'login'
-LOGIN_REDIRECT_URL = 'index'
+LOGIN_REDIRECT_URL = 'select_site'
 LOGOUT_REDIRECT_URL = 'login'
 
 # Default primary key field type

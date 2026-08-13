@@ -1,0 +1,325 @@
+/* 站点选择页 — 对齐系统 slate / blue 主题（与登录页一致） */
+.site-pick {
+  margin: 0;
+  min-height: 100vh;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  color: #0f172a;
+  background:
+    radial-gradient(ellipse 80% 50% at 50% -20%, rgba(37, 99, 235, 0.12), transparent),
+    linear-gradient(180deg, #f1f5f9 0%, #f8fafc 45%, #eef2f7 100%);
+  position: relative;
+}
+
+.site-pick__bg {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(15, 23, 42, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(15, 23, 42, 0.035) 1px, transparent 1px);
+  background-size: 40px 40px;
+  mask-image: radial-gradient(ellipse 75% 55% at 50% 30%, #000 15%, transparent 72%);
+}
+
+.site-pick__top {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1.1rem 1.75rem;
+}
+
+.site-pick__brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-size: 1rem;
+  font-weight: 650;
+  color: #0f172a;
+  text-decoration: none;
+  letter-spacing: -0.01em;
+}
+
+.site-pick__brand:hover {
+  color: #1e40af;
+}
+
+.site-pick__brand-mark {
+  width: 0.65rem;
+  height: 0.65rem;
+  border-radius: 3px;
+  background: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.16);
+}
+
+.site-pick__top-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.85rem;
+}
+
+.site-pick__user {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  max-width: 14rem;
+  padding: 0.18rem 0.55rem 0.18rem 0.18rem;
+  border-radius: 999px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+.site-pick__user--admin {
+  border-color: rgba(217, 119, 6, 0.28);
+  background: linear-gradient(135deg, #fffbeb, #fff);
+}
+
+.site-pick__user-avatar {
+  flex: 0 0 auto;
+  width: 1.65rem;
+  height: 1.65rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #eff6ff;
+  background: linear-gradient(145deg, #3b82f6, #1d4ed8);
+}
+
+.site-pick__user--admin .site-pick__user-avatar {
+  color: #422006;
+  background: linear-gradient(145deg, #fbbf24, #d97706);
+}
+
+.site-pick__user-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.15;
+}
+
+.site-pick__user-name {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #0f172a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.site-pick__user-badge {
+  margin-top: 0.08rem;
+  width: fit-content;
+  padding: 0.04rem 0.32rem;
+  border-radius: 999px;
+  font-size: 0.6rem;
+  font-weight: 650;
+  letter-spacing: 0.03em;
+  color: #78350f;
+  background: rgba(251, 191, 36, 0.9);
+}
+
+.site-pick__back {
+  font-size: 0.82rem;
+  font-weight: 550;
+  color: #2563eb;
+  text-decoration: none;
+  padding: 0.35rem 0.7rem;
+  border-radius: 8px;
+  background: rgba(37, 99, 235, 0.08);
+}
+
+.site-pick__back:hover {
+  background: rgba(37, 99, 235, 0.14);
+}
+
+.site-pick__main {
+  position: relative;
+  z-index: 2;
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 3.5vh 1.35rem 3.5rem;
+  animation: sitePickIn 0.45s ease both;
+}
+
+@keyframes sitePickIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.site-pick__eyebrow {
+  margin: 0 0 0.45rem;
+  font-size: 0.72rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: #64748b;
+}
+
+.site-pick__title {
+  margin: 0 0 0.65rem;
+  font-size: clamp(1.75rem, 4vw, 2.25rem);
+  font-weight: 650;
+  letter-spacing: -0.03em;
+  color: #0f172a;
+  line-height: 1.2;
+}
+
+.site-pick__lead {
+  margin: 0 0 2rem;
+  max-width: 34rem;
+  font-size: 0.98rem;
+  line-height: 1.55;
+  color: #64748b;
+}
+
+.site-pick__messages {
+  list-style: none;
+  margin: 0 0 1.25rem;
+  padding: 0;
+}
+
+.site-pick__messages li {
+  padding: 0.65rem 0.85rem;
+  border-radius: 8px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  margin-bottom: 0.45rem;
+  font-size: 0.88rem;
+  color: #334155;
+}
+
+.site-pick__panels {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+
+@media (max-width: 720px) {
+  .site-pick__panels {
+    grid-template-columns: 1fr;
+  }
+}
+
+.site-pick__panel {
+  margin: 0;
+  padding: 1.4rem 1.35rem 1.25rem;
+  border: 1px solid rgba(226, 232, 240, 0.95);
+  background: #fff;
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  min-height: 260px;
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.05),
+    0 10px 28px rgba(15, 23, 42, 0.06);
+  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.site-pick__panel:hover {
+  transform: translateY(-3px);
+  border-color: #bfdbfe;
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.05),
+    0 14px 32px rgba(37, 99, 235, 0.1);
+}
+
+.site-pick__panel--active {
+  border-color: #93c5fd;
+  box-shadow:
+    0 0 0 3px rgba(37, 99, 235, 0.12),
+    0 12px 28px rgba(15, 23, 42, 0.07);
+}
+
+.site-pick__panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.85rem;
+}
+
+.site-pick__code {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.1rem;
+  height: 1.45rem;
+  padding: 0 0.45rem;
+  border-radius: 6px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: #1e40af;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+}
+
+.site-pick__market-tag {
+  font-size: 0.75rem;
+  color: #94a3b8;
+}
+
+.site-pick__panel-title {
+  margin: 0 0 0.35rem;
+  font-size: 1.35rem;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  color: #0f172a;
+}
+
+.site-pick__panel-desc {
+  margin: 0 0 1.1rem;
+  font-size: 0.9rem;
+  color: #64748b;
+  line-height: 1.5;
+  flex: 1;
+}
+
+.site-pick__bins {
+  list-style: none;
+  margin: 0 0 1.15rem;
+  padding: 0.7rem 0 0;
+  border-top: 1px solid #e2e8f0;
+  font-size: 0.8rem;
+  color: #475569;
+}
+
+.site-pick__bins li:first-child {
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  margin-bottom: 0.2rem;
+  color: #94a3b8;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+}
+
+.site-pick__cta {
+  appearance: none;
+  border: none;
+  cursor: pointer;
+  width: 100%;
+  padding: 0.78rem 1rem;
+  font: inherit;
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: #fff;
+  background: #2563eb;
+  border-radius: 8px;
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.site-pick__cta:hover {
+  background: #1d4ed8;
+  box-shadow: 0 6px 16px rgba(37, 99, 235, 0.28);
+}

@@ -47,8 +47,7 @@ from .excel_search_restore import build_origin_row_from_search, search_row_to_ap
 from .forms import RegisterForm
 from .media_paths import media_root, parent_rel, safe_media_path_global
 from .excel_browse_index import (
-    apply_root_filters,
-    build_root_index_items,
+    build_root_page,
     bust_excel_browse_cache,
     enrich_root_page_delete_flags,
 )
@@ -96,6 +95,7 @@ from .models import (
     UserProfile,
 )
 from .asin_upload import batch_asin_lines, ingest_asin_upload
+from .asin_dedupe import filter_new_asins, parse_asin_text, scan_media_asin_dirs
 from .roi_us_pack_recalc import (
     extract_dashboard_metrics_from_roi_us_pack,
     is_roi_us_pack_filename,
@@ -187,6 +187,48 @@ def _touch_asin_updates(asins: list[str] | set[str]) -> None:
         AsinDataUpdateStamp.objects.update_or_create(asin=a, defaults={})
 
 
+def _cached_filter_usernames(kind: str) -> list[str]:
+    """首页筛选项短缓存，避免每次全表 distinct。"""
+    from django.core.cache import cache as dj_cache
+
+    key = f'dash:filter_users:{kind}'
+    hit = dj_cache.get(key)
+    if hit is not None:
+        return list(hit)
+    if kind == 'uploader':
+        uploader_user_ids = ImportedMediaPath.objects.values_list('user_id', flat=True).distinct()
+        names = list(
+            User.objects.filter(id__in=uploader_user_ids, is_active=True)
+            .order_by('username')
+            .values_list('username', flat=True)
+        )
+    else:
+        names = list(
+            User.objects.filter(is_active=True).order_by('username').values_list('username', flat=True)
+        )
+    dj_cache.set(key, names, 60)
+    return names
+
+
+def _warm_shared_page_caches(request, *, warm_excel_index: bool = False) -> None:
+    """预热三页共用的站点 ASIN / FS 缓存；审核页可异步预热根索引。"""
+    from .asin_access import asins_for_marketplace
+    from .excel_browse_index import cached_fs_asin_dirs, warm_excel_root_index_async
+    from .marketplace import MARKETPLACE_US, get_marketplace, normalize_marketplace
+
+    mp = normalize_marketplace(get_marketplace(request)) or MARKETPLACE_US
+    try:
+        asins_for_marketplace(mp)
+        cached_fs_asin_dirs()
+    except Exception:
+        pass
+    if warm_excel_index:
+        warm_excel_root_index_async(
+            request.user.id,
+            is_super=bool(request.user.is_superuser),
+            marketplace=mp,
+        )
+
 def _parse_dt_local(raw: str | None, end_of_day: bool = False):
     s = (raw or '').strip()
     if not s:
@@ -222,7 +264,7 @@ def _attach_row_assignee_labels(
         r.uploader_display = upl_map.get(key) or '—'
         can_operate = viewer_is_superuser or r.user_id == viewer_id or key in viewer_assigned_asins
         r.ops_readonly = not can_operate
-        r.can_delete_row = user_can_delete_dashboard_row(viewer, r)
+        r.can_delete_row = can_operate  # 与可操作范围一致，避免逐行 exists()
         r.can_open_dir = can_operate
         r.roi_pack_verified = key in verified
 
@@ -407,7 +449,11 @@ def register(request):
 
 def login_view(request):
     if request.user.is_authenticated:
-        return redirect(settings.LOGIN_REDIRECT_URL)
+        from .marketplace import get_marketplace
+
+        if get_marketplace(request):
+            return redirect('index')
+        return redirect('select_site')
     next_url = request.GET.get('next') or ''
     if request.method == 'POST':
         username = (request.POST.get('username') or '').strip()
@@ -432,8 +478,53 @@ def login_view(request):
                 messages.warning(request, '您的账号尚未通过管理员审核，请耐心等待。')
             return render(request, 'registration/login.html', {'next': next_url})
         auth_login(request, user, backend='django.contrib.auth.backends.ModelBackend')
-        return redirect(next_url or settings.LOGIN_REDIRECT_URL)
+        # 登录后先选站；若 next 是选站页以外且已有站点，中间件会放行
+        from .marketplace import get_marketplace
+
+        if get_marketplace(request):
+            return redirect(next_url or 'index')
+        return redirect('select_site')
     return render(request, 'registration/login.html', {'next': next_url})
+
+
+@login_required
+def select_site_page(request):
+    """登录后选择美国站 / 英国站；已选站也可再次打开重选。"""
+    from .marketplace import get_marketplace, set_marketplace
+
+    if request.method == 'POST':
+        code = request.POST.get('marketplace') or ''
+        try:
+            set_marketplace(request, code)
+        except ValueError:
+            messages.error(request, '请选择有效站点。')
+            return redirect('select_site')
+        return redirect('index')
+
+    return render(
+        request,
+        'auto_amazon/select_site.html',
+        {'current': get_marketplace(request)},
+    )
+
+
+@login_required
+@require_POST
+def select_site_switch(request):
+    """导航栏切换站点。"""
+    from .marketplace import set_marketplace
+
+    code = request.POST.get('marketplace') or ''
+    next_url = (request.POST.get('next') or '').strip() or reverse('index')
+    try:
+        set_marketplace(request, code)
+    except ValueError:
+        messages.error(request, '无效站点。')
+        return redirect('select_site')
+    # 避免死循环：next 若是 select_site 则回首页
+    if '/select-site' in next_url:
+        return redirect('index')
+    return redirect(next_url)
 
 
 @login_required
@@ -632,8 +723,12 @@ def _delete_asin_folder_if_allowed(user, asin: str) -> tuple[bool, str]:
 
 @login_required
 def index(request):
+    from .dashboard_index import ops_review_interval_options
+    from .marketplace import MARKETPLACE_UK, MARKETPLACE_US, get_marketplace
+
     if request.method == 'POST':
         action = request.POST.get('action')
+        mp_rows = get_marketplace(request) or MARKETPLACE_US
         if action == 'delete_batch':
             ids = request.POST.getlist('row_ids')
             if ids:
@@ -643,7 +738,7 @@ def index(request):
                     'on',
                     'yes',
                 )
-                accessible = user_dashboard_rows_qs(request.user)
+                accessible = user_dashboard_rows_qs(request.user, marketplace=mp_rows)
                 rows = [
                     r
                     for r in accessible.filter(pk__in=ids).only('pk', 'asin')
@@ -685,7 +780,7 @@ def index(request):
             if err:
                 messages.error(request, err)
                 return redirect('index')
-            accessible = user_dashboard_rows_qs(request.user)
+            accessible = user_dashboard_rows_qs(request.user, marketplace=mp_rows)
             rows_sel = list(
                 accessible.filter(pk__in=ids).only(
                     'pk', 'asin', 'unit_purchase', 'head_distance'
@@ -730,12 +825,14 @@ def index(request):
                         '看板 ROI 计算任务已创建…',
                         f'当前汇率：{parity}。',
                         f'本次勾选 ASIN：{len(asins)} 个。',
+                        f'站点：{mp_rows}。',
                     ],
                     task_type='wizard',
                     parity=parity,
                     asins=asins,
                     cost_overrides=cost_overrides,
                     target_row_ids=target_row_ids,
+                    marketplace=mp_rows,
                 ),
                 WIZARD_JOB_TTL,
             )
@@ -763,7 +860,7 @@ def index(request):
                     f'已有任务进行中（{active["status_label"]}）。已跳转到进度页。',
                 )
                 return redirect(f"{reverse('compute_roi')}?job_id={active['job_id']}")
-            accessible = user_dashboard_rows_qs(request.user)
+            accessible = user_dashboard_rows_qs(request.user, marketplace=mp_rows)
             rows_sel = list(accessible.filter(pk__in=ids).only('pk', 'asin'))
             rows_sel = [r for r in rows_sel if user_can_operate_dashboard_row(request.user, r)]
             asins = sorted({r.asin for r in rows_sel if r.asin})
@@ -781,10 +878,12 @@ def index(request):
                     [
                         '广告难度计算任务已创建…',
                         f'本次勾选 ASIN：{len(asins)} 个。',
+                        f'站点：{mp_rows}。',
                     ],
                     task_type='ad_difficulty',
                     asins=asins,
                     target_row_pks=target_row_pks,
+                    marketplace=mp_rows,
                 ),
                 WIZARD_JOB_TTL,
             )
@@ -804,7 +903,7 @@ def index(request):
                     'on',
                     'yes',
                 )
-                row = user_dashboard_rows_qs(request.user).filter(pk=rid).only('asin').first()
+                row = user_dashboard_rows_qs(request.user, marketplace=mp_rows).filter(pk=rid).only('asin').first()
                 if not row or not user_can_delete_dashboard_row(request.user, row):
                     messages.error(request, '无权删除该记录。')
                     return redirect('index')
@@ -824,7 +923,7 @@ def index(request):
                 AsinDashboardRow.FollowStatus.NORMAL,
                 AsinDashboardRow.FollowStatus.PRIORITY,
             ):
-                row = user_dashboard_rows_qs(request.user).filter(pk=int(rid)).first()
+                row = user_dashboard_rows_qs(request.user, marketplace=mp_rows).filter(pk=int(rid)).first()
                 if row and user_can_operate_dashboard_row(request.user, row):
                     AsinDashboardRow.objects.filter(pk=row.pk).update(follow_status=status)
             nxt = (request.POST.get('next') or '').strip()
@@ -836,6 +935,8 @@ def index(request):
     assigned_codes = user_assigned_asin_codes(request.user)
     assigned_set = {normalize_asin(a) for a in assigned_codes}
     viewer_is_superuser = bool(request.user.is_superuser)
+
+    _warm_shared_page_caches(request)
 
     page_result = build_dashboard_page(
         request.user,
@@ -872,15 +973,8 @@ def index(request):
     kept.pop('page', None)
     kept.pop('_rv', None)
     filter_qs = kept.urlencode()
-    assignee_choices = list(
-        User.objects.filter(is_active=True).order_by('username').values_list('username', flat=True)
-    )
-    uploader_user_ids = ImportedMediaPath.objects.values_list('user_id', flat=True).distinct()
-    uploader_choices = list(
-        User.objects.filter(id__in=uploader_user_ids, is_active=True)
-        .order_by('username')
-        .values_list('username', flat=True)
-    )
+    assignee_choices = _cached_filter_usernames('assignee')
+    uploader_choices = _cached_filter_usernames('uploader')
     return render(
         request,
         'auto_amazon/asin_dashboard.html',
@@ -913,6 +1007,7 @@ def index(request):
                 'updated_from': filter_meta['updated_from'],
                 'updated_to': filter_meta['updated_to'],
             },
+            'ops_review_interval_choices': ops_review_interval_options(get_marketplace(request)),
             'default_exchange_rate': _default_exchange_rate_for_form(),
         },
     )
@@ -1059,21 +1154,32 @@ def _ops_difficulty_three_fields(data: dict, asin: str) -> tuple[str, str, str]:
     return out[0], out[1], out[2]
 
 
-def _sync_dashboard_from_roi_us_pack(user: User, asin: str, rows: list) -> None:
-    """Excel ROI-US-pack 保存/重算后，将去广告毛利率、去广告投产比等同步到看板行。"""
+def _sync_dashboard_from_roi_us_pack(
+    user: User,
+    asin: str,
+    rows: list,
+    *,
+    marketplace: str | None = None,
+) -> None:
+    """Excel ROI-US-pack 保存/重算后，将去广告毛利率、去广告投产比等同步到当前站点看板行。"""
+    from .marketplace import MARKETPLACE_US, normalize_marketplace
+
+    mp = normalize_marketplace(marketplace) or MARKETPLACE_US
     metrics = extract_dashboard_metrics_from_roi_us_pack(rows)
     if not metrics:
         return
-    row = resolve_dashboard_row_for_persist(user, asin)
+    row = resolve_dashboard_row_for_persist(user, asin, marketplace=mp)
     if row is None:
         return
     updates = {k: v for k, v in metrics.items() if v is not None}
     if not updates:
         return
     AsinDashboardRow.objects.filter(pk=row.pk).update(**updates)
-    AsinDashboardRow.objects.filter(user_id=user.id, asin=normalize_asin(asin)).exclude(
-        pk=row.pk
-    ).delete()
+    AsinDashboardRow.objects.filter(
+        user_id=user.id,
+        asin=normalize_asin(asin),
+        marketplace=mp,
+    ).exclude(pk=row.pk).delete()
 
 
 def _persist_wizard_results(
@@ -1081,8 +1187,13 @@ def _persist_wizard_results(
     result: dict,
     parity: float,
     target_row_ids: dict[str, int] | None = None,
+    *,
+    marketplace: str | None = None,
 ) -> int:
-    """按指定看板行或 (user, asin) 覆盖写入：已存在则 update，不新增重复行。"""
+    """按指定看板行或 (user, asin, marketplace) 覆盖写入：已存在则 update，不新增重复行。"""
+    from .marketplace import MARKETPLACE_US, normalize_marketplace
+
+    mp = normalize_marketplace(marketplace) or MARKETPLACE_US
 
     def _to_float(v):
         if v is None:
@@ -1113,14 +1224,22 @@ def _persist_wizard_results(
         if ad_roi is not None:
             ad_roi = ad_roi * 100
 
-        existing = resolve_dashboard_row_for_persist(user, asin, row_id_map) if user else None
+        existing = (
+            resolve_dashboard_row_for_persist(user, asin, row_id_map, marketplace=mp)
+            if user
+            else None
+        )
         if existing is None:
-            existing = AsinDashboardRow.objects.filter(user_id=user_id, asin=asin).first()
+            existing = AsinDashboardRow.objects.filter(
+                user_id=user_id, asin=asin, marketplace=mp
+            ).first()
         if existing is None and user and user_is_assigned_to_asin(user, asin):
-            importer_ids = asin_importer_user_ids(asin)
+            importer_ids = asin_importer_user_ids(asin, marketplace=mp)
             if importer_ids:
                 existing = AsinDashboardRow.objects.filter(
-                    user_id=importer_ids[0], asin=asin
+                    user_id=importer_ids[0],
+                    asin=asin,
+                    marketplace=mp,
                 ).first()
         ranking_to_store = rp
         if existing is not None and existing.ranking_percent is not None:
@@ -1164,20 +1283,26 @@ def _persist_wizard_results(
             'product_grade': product_grade_from_monthly_profit1(mp1),
             'sales_trend_json': '',
             'exchange_rate': parity,
+            'marketplace': mp,
         }
         if existing is not None:
             AsinDashboardRow.objects.filter(pk=existing.pk).update(**defaults)
-            AsinDashboardRow.objects.filter(user_id=user_id, asin=asin).exclude(pk=existing.pk).delete()
+            AsinDashboardRow.objects.filter(
+                user_id=user_id, asin=asin, marketplace=mp
+            ).exclude(pk=existing.pk).delete()
         else:
             owner_id = user_id
             if user and user_is_assigned_to_asin(user, asin):
-                importer_ids = asin_importer_user_ids(asin)
+                importer_ids = asin_importer_user_ids(asin, marketplace=mp)
                 if importer_ids:
                     owner_id = importer_ids[0]
             AsinDashboardRow.objects.create(user_id=owner_id, asin=asin, **defaults)
         n += 1
         touched_asins.add(asin)
     _touch_asin_updates(touched_asins)
+    from .asin_access import invalidate_calculated_roi_asins
+
+    invalidate_calculated_roi_asins(mp)
     return n
 
 
@@ -1234,6 +1359,9 @@ def _run_wizard_job(
             asin_list = ordered_unique_asins(asins)
             cost_overrides = _merge_cost_overrides_from_db(asin_list or asins, cost_overrides)
             written = 0
+            job_mp = (cache.get(key) or {}).get('marketplace') or 'US'
+            from .roi_site_defaults import roi_defaults_dict
+            job_roi_defaults = roi_defaults_dict(job_mp)
 
             if asin_list:
                 if use_sequential_roi():
@@ -1243,7 +1371,7 @@ def _run_wizard_job(
                         if target_row_ids and asin in target_row_ids:
                             row_ids = {asin: target_row_ids[asin]}
                         written += _persist_wizard_results(
-                            user_id, part, parity, target_row_ids=row_ids
+                            user_id, part, parity, target_row_ids=row_ids, marketplace=job_mp
                         )
 
                     def _on_asin_failed(failure: AsinFailure) -> None:
@@ -1273,6 +1401,8 @@ def _run_wizard_job(
                         on_progress=on_progress,
                         on_asin_done=_persist_one,
                         on_asin_failed=_on_asin_failed,
+                        marketplace=job_mp,
+                        roi_defaults=job_roi_defaults,
                     )
                 else:
                     on_progress(
@@ -1287,6 +1417,8 @@ def _run_wizard_job(
                         parity,
                         cost_overrides=cost_overrides,
                         on_stderr_line=on_line,
+                        marketplace=job_mp,
+                        roi_defaults=job_roi_defaults,
                     )
                     failure_details = None
                     if isinstance(merged, dict):
@@ -1296,6 +1428,7 @@ def _run_wizard_job(
                         merged,
                         parity,
                         target_row_ids=target_row_ids,
+                        marketplace=job_mp,
                     )
                     batch = batch_result_from_wizard_output(
                         asin_list, merged, failure_details
@@ -1313,10 +1446,15 @@ def _run_wizard_job(
                 )
             else:
                 result = run_seller_wizard(
-                    asins, parity, cost_overrides=cost_overrides, on_stderr_line=on_line
+                    asins,
+                    parity,
+                    cost_overrides=cost_overrides,
+                    on_stderr_line=on_line,
+                    marketplace=job_mp,
+                    roi_defaults=job_roi_defaults,
                 )
                 written = _persist_wizard_results(
-                    user_id, result, parity, target_row_ids=target_row_ids
+                    user_id, result, parity, target_row_ids=target_row_ids, marketplace=job_mp
                 )
                 ent = cache.get(key) or {}
                 ent['status'] = 'done'
@@ -1389,13 +1527,18 @@ def _run_ad_difficulty_job(
         def on_progress(msg: str) -> None:
             on_line(msg)
 
+        job_mp = (cache.get(key) or {}).get('marketplace') or AsinDashboardRow.Marketplace.US
         if target_row_pks:
             rows_sel = list(
                 AsinDashboardRow.objects.filter(pk__in=target_row_pks).only('pk', 'asin')
             )
         else:
             rows_sel = list(
-                AsinDashboardRow.objects.filter(user_id=user_id, asin__in=asins).only('pk', 'asin')
+                AsinDashboardRow.objects.filter(
+                    user_id=user_id,
+                    asin__in=asins,
+                    marketplace=job_mp,
+                ).only('pk', 'asin')
             )
         asin_to_pk = {normalize_asin(r.asin): r.pk for r in rows_sel if normalize_asin(r.asin)}
         asin_list = ordered_unique_asins(asins)
@@ -1409,11 +1552,15 @@ def _run_ad_difficulty_job(
             if not pk:
                 return
             payload = part.get(asin) or {}
+            if not payload.get('computed_ad'):
+                return
             rp = payload.get('ranking_percent')
+            if rp is None:
+                return
             try:
                 rp_num = float(rp)
             except (TypeError, ValueError):
-                rp_num = 0.0
+                return
             AsinDashboardRow.objects.filter(pk=pk).update(ranking_percent=rp_num)
             updated += 1
 
@@ -1441,6 +1588,7 @@ def _run_ad_difficulty_job(
             on_progress=on_progress,
             on_asin_done=_persist_ad,
             on_asin_failed=_on_ad_failed,
+            marketplace=job_mp,
         )
         _touch_asin_updates(batch.succeeded)
 
@@ -1450,6 +1598,92 @@ def _run_ad_difficulty_job(
             batch=batch,
             rows_written=updated,
         )
+    except Exception as e:
+        import traceback
+
+        tb = traceback.format_exc()
+        ent = cache.get(key) or {}
+        ent['status'] = 'error'
+        ent['error'] = f'{type(e).__name__}: {e}'
+        ent['error_detail'] = tb[-6000:] if len(tb) > 6000 else tb
+        ent['user_id'] = user_id
+        cache.set(key, ent, 3600)
+    finally:
+        lock.release_all()
+        _clear_user_active_job(user_id, job_id)
+        close_old_connections()
+
+
+def _run_ops_difficulty_job(
+    job_id: str,
+    user_id: int,
+    asins: list[str],
+    marketplace: str = 'UK',
+) -> None:
+    """从 data_origin 生成站点运营难度表并回写看板（主要用于英国站）。"""
+    from .ops_difficulty_compute import compute_ops_difficulty_for_asins
+
+    key = _wizard_job_key(job_id)
+    close_old_connections()
+    lock = AsinComputeLock(asins, f'user:{user_id}:{job_id}:ops')
+    blocked = lock.acquire()
+    if blocked:
+        ent = cache.get(key) or {}
+        ent['status'] = 'error'
+        ent['error'] = f'ASIN {blocked} 正在被其他任务计算，请稍后重试。'
+        ent['user_id'] = user_id
+        cache.set(key, ent, 3600)
+        _clear_user_active_job(user_id, job_id)
+        close_old_connections()
+        return
+    try:
+        ent = cache.get(key) or {}
+        if ent.get('status') == 'queued':
+            ent['status'] = 'running'
+            prog = ent.get('progress', [])
+            prog.append('Worker 已开始执行运营难度计算…')
+            ent['progress'] = prog
+            cache.set(key, ent, WIZARD_JOB_TTL)
+
+        def on_progress(msg: str) -> None:
+            ent = cache.get(key) or {}
+            prog = ent.get('progress', [])
+            short = msg[:500] if len(msg) > 500 else msg
+            prog.append(short)
+            if len(prog) > 160:
+                prog = prog[-160:]
+            ent['progress'] = prog
+            ent['status'] = 'running'
+            ent['user_id'] = user_id
+            cache.set(key, ent, WIZARD_JOB_TTL)
+
+        asin_list = ordered_unique_asins(asins)
+        succeeded, failures = compute_ops_difficulty_for_asins(
+            user_id,
+            asin_list,
+            marketplace,
+            on_progress=on_progress,
+        )
+        _touch_asin_updates(succeeded)
+        ent = cache.get(key) or {}
+        ent['user_id'] = user_id
+        ent['success_count'] = len(succeeded)
+        ent['fail_count'] = len(failures)
+        ent['failed_asins'] = [f.get('asin') for f in failures if f.get('asin')]
+        ent['failures'] = failures[-200:]
+        if failures and succeeded:
+            ent['status'] = 'done_with_errors'
+        elif failures and not succeeded:
+            ent['status'] = 'error'
+            ent['error'] = failures[0].get('error') or '运营难度计算失败'
+        else:
+            ent['status'] = 'done'
+        prog = list(ent.get('progress') or [])
+        prog.append(
+            f'运营难度完成：成功 {len(succeeded)}，失败 {len(failures)}（站点 {marketplace}）'
+        )
+        ent['progress'] = prog
+        cache.set(key, ent, WIZARD_JOB_TTL)
     except Exception as e:
         import traceback
 
@@ -1479,42 +1713,47 @@ def _parse_compute_local_form(request):
     return parity, None
 
 
-def _discover_local_asins(force_recompute: bool) -> tuple[list[str], list[str]]:
+def _discover_local_asins(
+    force_recompute: bool,
+    *,
+    marketplace: str | None = None,
+) -> tuple[list[str], list[str]]:
     """
-    扫描 media/file 下 ASIN 目录。
-    - force_recompute=False: 跳过目录根下已有 *ROI-US-pack*.xlsx 的 ASIN
+    按站点导入记录发现可计算 ASIN（复用缓存，避免每次扫 media/file）。
+    - force_recompute=False: 跳过当前站点看板已有 ROI 的 ASIN
     - force_recompute=True: 全部纳入
     返回 (待计算 asins, 被跳过 asins)。
     """
-    root = media_root()
-    pending: list[str] = []
-    skipped: list[str] = []
-    for p in root.iterdir():
-        if not p.is_dir():
-            continue
-        asin = p.name.strip().upper()
-        if not re.match(r'^B0[A-Z0-9]{8}$', asin):
-            continue
-        has_roi = any(
-            c.is_file() and 'ROI-US-pack' in c.name and c.suffix.lower() in ('.xlsx', '.xlsm')
-            for c in p.iterdir()
-        )
-        if has_roi and not force_recompute:
-            skipped.append(asin)
-            continue
-        pending.append(asin)
-    return sorted(pending), sorted(skipped)
+    from .asin_access import asins_for_marketplace, calculated_roi_asins_for_marketplace
+    from .excel_browse_index import cached_fs_asin_dirs
+    from .marketplace import MARKETPLACE_US, normalize_marketplace
+
+    mp = normalize_marketplace(marketplace) or MARKETPLACE_US
+    allowed_roots = asins_for_marketplace(mp)
+    if not allowed_roots:
+        return [], []
+
+    # 与磁盘顶层目录求交（FS 结果有缓存；冷启动只扫一次）
+    fs_asins = cached_fs_asin_dirs()
+    candidates = allowed_roots & fs_asins if fs_asins else set(allowed_roots)
+
+    calculated = calculated_roi_asins_for_marketplace(mp) & candidates
+    if force_recompute:
+        return sorted(candidates), []
+    pending = sorted(candidates - calculated)
+    skipped = sorted(calculated)
+    return pending, skipped
 
 
-def _compute_allowed_asins_for_user(user) -> set[str] | None:
+def _compute_allowed_asins_for_user(user, *, marketplace: str | None = None) -> set[str] | None:
     """
     计算当前用户可参与 ROI 计算的 ASIN 集合。
-    - 超管：None（不限制）
-    - 普通用户：本人导入 + 被分配
+    - 超管：None（不限制，仍受站点导入集合约束）
+    - 普通用户：本人导入(该站) + 被分配
     """
     if getattr(user, 'is_superuser', False):
         return None
-    imported = user_imported_asin_codes(user)
+    imported = user_imported_asin_codes(user, marketplace=marketplace)
     assigned = {normalize_asin(a) for a in user_assigned_asin_codes(user)}
     return {a for a in (imported | assigned) if a}
 
@@ -1536,6 +1775,22 @@ def upload_start(request):
             },
             status=409,
         )
+    from .marketplace import MARKETPLACE_US, get_marketplace, normalize_marketplace
+    from .models import RoiAutoRun
+
+    mp_chk = normalize_marketplace(get_marketplace(request)) or MARKETPLACE_US
+    if RoiAutoRun.objects.filter(
+        user=request.user,
+        marketplace=mp_chk,
+        status=RoiAutoRun.Status.RUNNING,
+    ).exists():
+        return JsonResponse(
+            {
+                'ok': False,
+                'error': '本站自动 ROI 正在运行，请先暂停/停止后再手动计算。',
+            },
+            status=409,
+        )
     parity, err = _parse_compute_local_form(request)
     if err:
         return JsonResponse({'ok': False, 'error': err}, status=400)
@@ -1543,8 +1798,9 @@ def upload_start(request):
     if not selected:
         return JsonResponse({'ok': False, 'error': '请先勾选至少一个待计算 ASIN。'}, status=400)
     include_recomputed = str(request.POST.get('recompute_existing') or '').lower() in ('1', 'true', 'on', 'yes')
-    pending, skipped = _discover_local_asins(force_recompute=include_recomputed)
-    allowed_asins = _compute_allowed_asins_for_user(request.user)
+    mp = mp_chk
+    pending, skipped = _discover_local_asins(force_recompute=include_recomputed, marketplace=mp)
+    allowed_asins = _compute_allowed_asins_for_user(request.user, marketplace=mp)
     if allowed_asins is not None:
         pending = [a for a in pending if a in allowed_asins]
         skipped = [a for a in skipped if a in allowed_asins]
@@ -1569,7 +1825,7 @@ def upload_start(request):
         f'本次待计算 ASIN：{len(asins)} 个。',
     ]
     if skipped and not include_recomputed:
-        prog.append(f'当前未计算列表之外（已存在 ROI-US-pack）：{len(skipped)} 个。')
+        prog.append(f'当前未计算列表之外（本站已有 ROI）：{len(skipped)} 个。')
     cache.set(
         key,
         new_job_entry(
@@ -1579,6 +1835,7 @@ def upload_start(request):
             parity=parity,
             asins=asins,
             cost_overrides=cost_overrides,
+            marketplace=mp,
         ),
         WIZARD_JOB_TTL,
     )
@@ -1622,15 +1879,26 @@ def dismiss_active_wizard_job(request):
 
 
 @login_required
+@require_POST
+def ops_difficulty_start(request):
+    """已停用：运营难度随 ROI / 站点导入流程处理，不再单独入口。"""
+    return JsonResponse({'ok': False, 'error': '计算运营难度入口已关闭'}, status=410)
+
+
+@login_required
 def upload_page(request):
     return redirect('compute_roi')
 
 
 @login_required
 def compute_roi_page(request):
+    from .marketplace import MARKETPLACE_US, get_marketplace, marketplace_label, normalize_marketplace
+
+    _warm_shared_page_caches(request)
+    mp = normalize_marketplace(get_marketplace(request)) or MARKETPLACE_US
     include_recomputed = str(request.GET.get('recompute_existing') or '').lower() in ('1', 'true', 'on', 'yes')
-    pending_asins, skipped_asins = _discover_local_asins(force_recompute=False)
-    allowed_asins = _compute_allowed_asins_for_user(request.user)
+    pending_asins, skipped_asins = _discover_local_asins(force_recompute=False, marketplace=mp)
+    allowed_asins = _compute_allowed_asins_for_user(request.user, marketplace=mp)
     if allowed_asins is not None:
         pending_asins = [a for a in pending_asins if a in allowed_asins]
         skipped_asins = [a for a in skipped_asins if a in allowed_asins]
@@ -1657,6 +1925,7 @@ def compute_roi_page(request):
             'total_pending': len(pending_asins),
             'total_all': len(all_asins),
             'include_recomputed': include_recomputed,
+            'current_site_label': marketplace_label(mp),
             'default_exchange_rate': _default_exchange_rate_for_form(),
             'active_job': active_job,
         },
@@ -1940,7 +2209,9 @@ def sif_config_page(request):
 
 @login_required
 def asin_upload_page(request):
-    """上传 ASIN 页面：所有登录用户可见。"""
+    """上传 ASIN 页面：所有登录用户可见；按站点去重。"""
+    from .marketplace import MARKETPLACE_US, get_marketplace, normalize_marketplace
+
     if request.method == 'POST':
         up = request.FILES.get('asin_file')
         if up is None:
@@ -1950,18 +2221,21 @@ def asin_upload_page(request):
         if not raw:
             messages.error(request, '文件为空。')
             return redirect('asin_upload')
-        batch, err = ingest_asin_upload(request.user, getattr(up, 'name', '') or '', raw)
+        mp = normalize_marketplace(request.POST.get('marketplace') or get_marketplace(request)) or MARKETPLACE_US
+        batch, err = ingest_asin_upload(
+            request.user, getattr(up, 'name', '') or '', raw, marketplace=mp
+        )
         if err:
             messages.error(request, err)
             return redirect('asin_upload')
         if batch.new_count == 0:
             messages.warning(
                 request,
-                f'文件共识别 {batch.total_in_file} 个 ASIN，均已存在于库中，未新增。',
+                f'[{mp}] 文件共识别 {batch.total_in_file} 个 ASIN，均已存在于该站库中，未新增。',
             )
         else:
             msg = (
-                f'上传成功：文件内 {batch.total_in_file} 个 ASIN，'
+                f'[{mp}] 上传成功：文件内 {batch.total_in_file} 个 ASIN，'
                 f'新增 {batch.new_count} 个'
             )
             if batch.skipped_count:
@@ -1970,7 +2244,8 @@ def asin_upload_page(request):
             messages.success(request, msg)
         return redirect('asin_upload')
 
-    qs = AsinUploadBatch.objects.select_related('user', 'downloaded_by').all()
+    mp = normalize_marketplace(get_marketplace(request)) or MARKETPLACE_US
+    qs = AsinUploadBatch.objects.select_related('user', 'downloaded_by').filter(marketplace=mp)
 
     uploader = (request.GET.get('uploader') or '').strip()
     if uploader:
@@ -1991,7 +2266,7 @@ def asin_upload_page(request):
         .order_by('username')
         .values_list('username', flat=True)
     )
-    total_catalog = AsinCatalogItem.objects.count()
+    total_catalog = AsinCatalogItem.objects.filter(marketplace=mp).count()
 
     kept = request.GET.copy()
     kept.pop('page', None)
@@ -2010,7 +2285,8 @@ def asin_upload_page(request):
                 'download_status': dl_status,
             },
             'total_catalog': total_catalog,
-            'total_batches': AsinUploadBatch.objects.count(),
+            'total_batches': AsinUploadBatch.objects.filter(marketplace=mp).count(),
+            'upload_marketplace': mp,
         },
     )
 
@@ -2047,6 +2323,93 @@ def asin_upload_export(request, batch_id: int):
     return resp
 
 
+_ASIN_DEDUPE_SESSION_KEY = 'asin_dedupe_result'
+
+
+@login_required
+def asin_dedupe_page(request):
+    """上传 asins.txt，剔除系统中已存在的 ASIN，下载去重后的文件。"""
+    result_ctx = request.session.get(_ASIN_DEDUPE_SESSION_KEY)
+
+    if request.method == 'POST':
+        up = request.FILES.get('asin_file')
+        if up is None:
+            messages.error(request, '请选择要上传的 txt 文件。')
+            return redirect('asin_dedupe')
+        raw = up.read()
+        if not raw:
+            messages.error(request, '文件为空。')
+            return redirect('asin_dedupe')
+        if len(raw) > 5 * 1024 * 1024:
+            messages.error(request, '文件过大（上限 5MB）。')
+            return redirect('asin_dedupe')
+
+        asins = parse_asin_text(raw)
+        if not asins:
+            messages.error(request, '文件中未识别到有效 ASIN。')
+            return redirect('asin_dedupe')
+
+        include_dashboard = bool(request.POST.get('include_dashboard'))
+        if include_dashboard and not request.user.is_superuser:
+            include_dashboard = False
+
+        dedupe = filter_new_asins(asins, include_dashboard=include_dashboard)
+        request.session[_ASIN_DEDUPE_SESSION_KEY] = {
+            'keep': dedupe.keep,
+            'removed': dedupe.removed,
+            'total_raw': dedupe.total_raw,
+            'total_unique': dedupe.total_unique,
+            'duplicate_lines': dedupe.duplicate_lines,
+            'existing_count': dedupe.existing_count,
+            'keep_count': dedupe.keep_count,
+            'existing_source_count': dedupe.existing_source_count,
+            'include_dashboard': include_dashboard,
+        }
+        request.session.modified = True
+        return redirect('asin_dedupe')
+
+    return render(
+        request,
+        'auto_amazon/asin_dedupe.html',
+        {
+            'result': result_ctx,
+            'media_asin_count': len(scan_media_asin_dirs()),
+        },
+    )
+
+
+@login_required
+@require_GET
+def asin_dedupe_download(request):
+    """下载去重结果 txt（keep=新 ASIN，removed=系统中已存在）。"""
+    kind = (request.GET.get('kind') or 'keep').strip().lower()
+    if kind not in ('keep', 'removed'):
+        raise Http404('无效下载类型')
+
+    data = request.session.get(_ASIN_DEDUPE_SESSION_KEY)
+    if not data:
+        messages.warning(request, '没有可下载的去重结果，请先上传文件。')
+        return redirect('asin_dedupe')
+
+    lines = data.get('keep') if kind == 'keep' else data.get('removed')
+    if not isinstance(lines, list):
+        lines = []
+
+    if kind == 'keep' and not lines:
+        messages.warning(request, '去重后没有剩余 ASIN 可下载。')
+        return redirect('asin_dedupe')
+
+    content = '\n'.join(str(x) for x in lines) + ('\n' if lines else '')
+    if kind == 'keep':
+        filename = 'asins_new.txt'
+    else:
+        filename = 'asins_existing.txt'
+
+    resp = HttpResponse(content, content_type='text/plain; charset=utf-8')
+    resp['Content-Disposition'] = f'attachment; filename="{filename}"'
+    return resp
+
+
 @login_required
 @user_passes_test(lambda u: bool(getattr(u, 'is_superuser', False)))
 def fetch_data_page(request):
@@ -2055,6 +2418,7 @@ def fetch_data_page(request):
 
 @login_required
 def excel_page(request):
+    _warm_shared_page_caches(request, warm_excel_index=True)
     assignable_users = list(
         User.objects.filter(is_active=True).order_by('username').values('id', 'username')
     )
@@ -2118,8 +2482,6 @@ _EXCEL_BROWSE_MAX_LIMIT = 2000
 
 
 def _excel_browse_pagination(request, rel: str) -> tuple[int, int]:
-    if rel:
-        return 0, 0
     try:
         limit = int(request.GET.get('limit', str(_EXCEL_BROWSE_DEFAULT_LIMIT)))
     except (TypeError, ValueError):
@@ -2166,12 +2528,21 @@ def excel_browse(request):
     if rel == '':
         try:
             fp = _excel_browse_filter_params(request)
-            all_items = build_root_index_items(request.user, is_super=is_super)
-            filtered = apply_root_filters(all_items, fp)
-            total = len(filtered)
+            from .marketplace import MARKETPLACE_US, get_marketplace, normalize_marketplace
+
+            mp = normalize_marketplace(get_marketplace(request)) or MARKETPLACE_US
             limit, offset = _excel_browse_pagination(request, rel)
-            page_items = [dict(it) for it in filtered[offset : offset + limit]]
-            enrich_root_page_delete_flags(request.user, is_super=is_super, items=page_items)
+            page_items, total = build_root_page(
+                request.user,
+                is_super=is_super,
+                marketplace=mp,
+                fp=fp,
+                limit=limit,
+                offset=offset,
+            )
+            enrich_root_page_delete_flags(
+                request.user, is_super=is_super, items=page_items, marketplace=mp
+            )
             has_more = offset + len(page_items) < total
         except DatabaseError as e:
             return JsonResponse(
@@ -2253,7 +2624,27 @@ def excel_browse(request):
                     {u.username for u in obj.assignees.all()}
                 )
         assigned_set = set(user_assigned_asin_codes(request.user)) if not is_super else set()
-        import_roots = user_imported_asin_codes(request.user) if not is_super else set()
+        from .marketplace import MARKETPLACE_US, get_marketplace, normalize_marketplace
+
+        mp_browse = normalize_marketplace(get_marketplace(request)) or MARKETPLACE_US
+        import_roots = (
+            user_imported_asin_codes(request.user, marketplace=mp_browse) if not is_super else set()
+        )
+        # 进入某 ASIN 子目录时，根权限只判定一次
+        folder_root = asin_root_from_rel_path(rel) if rel else None
+        root_access_ok = True
+        if not is_super and folder_root:
+            from .asin_access import user_can_access_asin_root
+
+            root_access_ok = user_can_access_asin_root(
+                request.user,
+                folder_root,
+                assigned_set=assigned_set,
+                import_roots=import_roots,
+            )
+            if not root_access_ok:
+                # 兜底：看板归属等特殊情况仍走完整权限
+                root_access_ok = user_can_access_excel_media_path(request.user, folder_root)
         owned_paths = set()
         if not is_super:
             oq = ImportedMediaPath.objects.filter(user=request.user)
@@ -2287,6 +2678,8 @@ def excel_browse(request):
             },
             status=503,
         )
+    if not is_super and folder_root and not root_access_ok:
+        return JsonResponse({'ok': False, 'error': '无权限访问该目录'}, status=403)
     items = []
     path_batch: list[str] = []
     for p in entries:
@@ -2317,7 +2710,7 @@ def excel_browse(request):
                         continue
                     if nm not in assigned_set and nm not in import_roots:
                         continue
-                elif not user_can_access_excel_media_path(request.user, child_rel):
+                elif not root_access_ok:
                     continue
             uploaders_list = sorted(uploaders_by_asin.get(nm, [])) if is_asin_dir else []
             assignees = assign_map.get(nm, []) if is_asin_dir else []
@@ -2345,7 +2738,7 @@ def excel_browse(request):
                 }
             )
         else:
-            if not is_super and not user_can_access_excel_media_path(request.user, child_rel):
+            if not is_super and not root_access_ok:
                 continue
             try:
                 st = p.stat()
@@ -2368,15 +2761,16 @@ def excel_browse(request):
                 'uploaders': [fu_file] if fu_file else [],
                 'can_delete': can_delete_item,
             })
-    limit, offset = 0, 0
+    limit, offset = _excel_browse_pagination(request, rel)
     total = len(items)
-    has_more = False
+    page_items = items[offset : offset + limit] if limit else items
+    has_more = offset + len(page_items) < total
     parent = parent_rel(rel) if rel else None
     return JsonResponse({
         'ok': True,
         'path': rel,
         'parent': parent,
-        'items': items,
+        'items': page_items,
         'total': total,
         'limit': limit,
         'offset': offset,
@@ -2547,6 +2941,13 @@ def excel_delete(request):
                 path.unlink()
         except OSError as e:
             return JsonResponse({'ok': False, 'error': str(e)}, status=400)
+        root_asin = asin_root_from_rel_path(rel)
+        if root_asin:
+            from .marketplace import MARKETPLACE_US, get_marketplace, normalize_marketplace
+            from .marketplace_asin_root import prune_marketplace_asin_roots
+
+            mp_del = normalize_marketplace(get_marketplace(request)) or MARKETPLACE_US
+            prune_marketplace_asin_roots([root_asin], mp_del)
     bust_excel_browse_cache()
     return JsonResponse({'ok': True})
 
@@ -2606,6 +3007,8 @@ def excel_import_commit(request):
     staging_id = (payload.get('staging_id') or '').strip()
     overwrite = bool(payload.get('overwrite'))
     skip_existing = bool(payload.get('skip_existing'))
+    from .marketplace import MARKETPLACE_US, get_marketplace, normalize_marketplace
+    mp = normalize_marketplace(payload.get('marketplace') or get_marketplace(request)) or MARKETPLACE_US
     if not staging_id:
         return JsonResponse({'ok': False, 'error': '缺少 staging_id'}, status=400)
     if overwrite and skip_existing:
@@ -2650,8 +3053,17 @@ def excel_import_commit(request):
         return JsonResponse({'ok': False, 'error': f'解压失败：{e}'}, status=400)
     try:
         for rp in ensure_dir_nodes_registered(written):
-            ImportedMediaPath.objects.update_or_create(rel_path=rp, defaults={'user': request.user})
+            ImportedMediaPath.objects.update_or_create(
+                rel_path=rp,
+                marketplace=mp,
+                defaults={'user': request.user},
+            )
         asins = {normalize_asin(x.split('/')[0]) for x in written if x}
+        asins = {a for a in asins if a}
+        if asins:
+            from .marketplace_asin_root import ensure_marketplace_asin_roots
+
+            ensure_marketplace_asin_roots(asins, mp)
         _touch_asin_updates(asins)
     except DatabaseError as e:
         cleanup_staging_dir(sdir)
@@ -2769,7 +3181,12 @@ def excel_save_media(request):
     if re.match(r'^B0[A-Z0-9]{8}$', parent_asin):
         _touch_asin_updates({parent_asin})
         if is_roi_us_pack_filename(path.name):
-            _sync_dashboard_from_roi_us_pack(request.user, parent_asin, rows)
+            from .marketplace import MARKETPLACE_US, get_marketplace, normalize_marketplace
+
+            mp = normalize_marketplace(get_marketplace(request)) or MARKETPLACE_US
+            _sync_dashboard_from_roi_us_pack(
+                request.user, parent_asin, rows, marketplace=mp
+            )
     return JsonResponse({
         'ok': True,
         'path': rel,
@@ -2995,7 +3412,12 @@ def excel_recalc_roi_media(request):
     parent_asin = normalize_asin(path.parent.name)
     if re.match(r'^B0[A-Z0-9]{8}$', parent_asin):
         _touch_asin_updates({parent_asin})
-        _sync_dashboard_from_roi_us_pack(request.user, parent_asin, rows)
+        from .marketplace import MARKETPLACE_US, get_marketplace, normalize_marketplace
+
+        mp = normalize_marketplace(get_marketplace(request)) or MARKETPLACE_US
+        _sync_dashboard_from_roi_us_pack(
+            request.user, parent_asin, rows, marketplace=mp
+        )
     return JsonResponse({'ok': True, 'path': rel})
 
 
@@ -3067,13 +3489,15 @@ def excel_assign_folders(request):
 @require_POST
 def dashboard_export_excel(request):
     """导出勾选看板行为 Excel（本人数据 + 已分配共享行）。"""
+    from .marketplace import MARKETPLACE_US, get_marketplace, normalize_marketplace
+
     ids = [int(x) for x in request.POST.getlist('row_ids') if str(x).isdigit()]
     if not ids:
         messages.error(request, '请先勾选要导出的记录。')
         return redirect('index')
-    assigned = user_assigned_asin_codes(request.user)
+    mp = normalize_marketplace(get_marketplace(request)) or MARKETPLACE_US
     rows = list(
-        user_dashboard_rows_qs(request.user)
+        user_dashboard_rows_qs(request.user, marketplace=mp)
         .filter(pk__in=ids)
         .select_related('user')
         .order_by('asin')

@@ -1,0 +1,206 @@
+{% extends 'base.html' %}
+{% block title %}自动ROI — Amazon 自动化{% endblock %}
+{% block main_class %}main--upload{% endblock %}
+{% block content %}
+<div class="upload-page" id="auto-roi-page"
+     data-status-url="{% url 'auto_roi_status' %}"
+     data-start-url="{% url 'auto_roi_start' %}"
+     data-pause-url="{% url 'auto_roi_pause' %}"
+     data-stop-url="{% url 'auto_roi_stop' %}"
+     data-config-url="{% url 'auto_roi_save_config' %}">
+    <header class="upload-hero">
+        <h1 class="upload-hero__title">自动ROI · {{ current_site_label|default:"当前站点" }}</h1>
+        <p class="upload-hero__desc">单线程稳态批跑：按站点吃完待算池；禁号自动解禁换号并重试同一 ASIN。默认 ASIN 间隔 1–3 秒、批间隔 4–8 秒。</p>
+    </header>
+
+    <section class="upload-panel upload-panel--accent">
+        <div class="upload-live-hint" id="auto-roi-summary">
+            待计算：{{ pending_count }}；
+            {% if active_run %}
+            状态：{{ active_run.status_label }}；成功 {{ active_run.succeeded }} / 失败 {{ active_run.failed }}；
+            当前：{{ active_run.current_asin|default:"—" }}；账号：{{ active_run.last_account|default:"—" }}
+            {% else %}
+            尚未开启自动任务
+            {% endif %}
+            {% if wizard_busy %} · 注意：手动 ROI 任务进行中{% endif %}
+        </div>
+        <form id="auto-roi-control" class="upload-form" style="margin-top:.8rem;">
+            {% csrf_token %}
+            <div class="upload-field">
+                <label class="upload-field__label" for="id_parity">汇率</label>
+                <input type="text" name="parity" id="id_parity" class="upload-textarea"
+                       style="min-height:auto;height:2.75rem;resize:none;"
+                       inputmode="decimal" value="{{ default_parity }}" required>
+            </div>
+            <div class="upload-actions">
+                <button type="button" class="upload-submit" id="btn-auto-start">开启 / 继续</button>
+                <button type="button" class="upload-submit" id="btn-auto-pause" style="background:#6b7280;">暂停</button>
+                <button type="button" class="upload-submit" id="btn-auto-stop" style="background:#b45309;">停止</button>
+            </div>
+            <p class="upload-live-hint" id="auto-roi-msg" style="margin-top:.5rem;"></p>
+        </form>
+    </section>
+
+    <section class="upload-panel" style="margin-top:1rem;">
+        <h2 style="font-size:1.05rem;margin:0 0 .6rem;">站点定值（{{ current_marketplace }}）</h2>
+        <form id="auto-roi-config" class="upload-form">
+            {% csrf_token %}
+            <input type="hidden" name="marketplace" value="{{ current_marketplace }}">
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:.6rem;">
+                <label>平台佣金%<input name="platform_commission" value="{{ config.platform_commission }}"></label>
+                <label>默认退款率%<input name="default_refund_rate" value="{{ config.default_refund_rate }}"></label>
+                <label>默认FBA$<input name="default_fba_fee" value="{{ config.default_fba_fee }}"></label>
+                <label>默认采购￥<input name="default_unit_purchase" value="{{ config.default_unit_purchase }}"></label>
+                <label>批大小<input name="batch_size" value="{{ config.batch_size }}"></label>
+                <label>ASIN间隔min<input name="asin_delay_min_sec" value="{{ config.asin_delay_min_sec }}"></label>
+                <label>ASIN间隔max<input name="asin_delay_max_sec" value="{{ config.asin_delay_max_sec }}"></label>
+                <label>批间隔min<input name="batch_delay_min_sec" value="{{ config.batch_delay_min_sec }}"></label>
+                <label>批间隔max<input name="batch_delay_max_sec" value="{{ config.batch_delay_max_sec }}"></label>
+                <label>连续失败暂停<input name="consecutive_fail_pause" value="{{ config.consecutive_fail_pause }}"></label>
+                <label>单ASIN禁号重试<input name="max_ban_retries_per_asin" value="{{ config.max_ban_retries_per_asin }}"></label>
+                <label>最大换号次数<input name="max_ban_rotations_per_run" value="{{ config.max_ban_rotations_per_run }}"></label>
+                <label>汇率覆盖<input name="exchange_rate_override" value="{{ config.exchange_rate_override|default_if_none:'' }}" placeholder="空=自动"></label>
+            </div>
+            <div class="upload-actions" style="margin-top:.8rem;">
+                <button type="submit" class="upload-submit">保存定值</button>
+            </div>
+        </form>
+    </section>
+
+    <section class="upload-panel" style="margin-top:1rem;">
+        <h2 style="font-size:1.05rem;margin:0 0 .6rem;">执行日志</h2>
+        <div id="auto-roi-logs" style="max-height:420px;overflow:auto;border:1px solid #e6e8ee;border-radius:10px;padding:.6rem;font-size:.9rem;line-height:1.45;">
+            <p class="upload-live-hint">等待日志…</p>
+        </div>
+    </section>
+</div>
+<style>
+#auto-roi-config label { display:flex; flex-direction:column; gap:.25rem; font-size:.85rem; color:#374151; }
+#auto-roi-config input { height:2.2rem; border:1px solid #d1d5db; border-radius:8px; padding:0 .5rem; }
+.auto-log-row { padding:.35rem 0; border-bottom:1px solid #f0f1f4; }
+.auto-log-row--fail { color:#b91c1c; }
+.auto-log-row--ok { color:#047857; }
+.auto-log-row--ban { color:#b45309; }
+.auto-log-detail { white-space:pre-wrap; font-size:.8rem; color:#6b7280; margin:.25rem 0 0; display:none; }
+</style>
+<script>
+(function () {
+  const root = document.getElementById('auto-roi-page');
+  if (!root) return;
+  const csrf = document.querySelector('#auto-roi-control [name=csrfmiddlewaretoken]')?.value
+    || document.querySelector('#auto-roi-config [name=csrfmiddlewaretoken]')?.value || '';
+  let afterId = 0;
+  let runId = {{ active_run.id|default:'null' }};
+
+  function setMsg(t, isErr) {
+    const el = document.getElementById('auto-roi-msg');
+    el.textContent = t || '';
+    el.style.color = isErr ? '#b91c1c' : '#047857';
+  }
+
+  function renderSummary(data) {
+    const r = data.run;
+    const el = document.getElementById('auto-roi-summary');
+    if (!r) {
+      el.textContent = '待计算：' + data.pending_count + '；尚未开启自动任务';
+      return;
+    }
+    el.textContent = '待计算：' + data.pending_count
+      + '；状态：' + (r.status_label || r.status)
+      + '；成功 ' + r.succeeded + ' / 失败 ' + r.failed
+      + '；剩余约 ' + r.remaining
+      + '；当前：' + (r.current_asin || '—')
+      + '；账号：' + (r.last_account || '—')
+      + (r.error_message ? ('；' + r.error_message) : '');
+  }
+
+  function appendLogs(logs) {
+    if (!logs || !logs.length) return;
+    const box = document.getElementById('auto-roi-logs');
+    if (box.querySelector('.upload-live-hint')) box.innerHTML = '';
+    logs.forEach(function (log) {
+      afterId = Math.max(afterId, log.id);
+      const div = document.createElement('div');
+      let cls = 'auto-log-row';
+      if (log.status === 'success') cls += ' auto-log-row--ok';
+      else if (log.status === 'failed') cls += ' auto-log-row--fail';
+      else if (log.status === 'banned_rotated') cls += ' auto-log-row--ban';
+      div.className = cls;
+      const t = (log.created_at || '').replace('T', ' ').slice(0, 19);
+      const dur = log.duration_ms != null ? (log.duration_ms + 'ms') : '';
+      div.innerHTML = '<div><strong>' + log.asin + '</strong> · ' + log.status_label
+        + ' · attempt ' + log.attempt
+        + (log.account_username ? (' · ' + log.account_username) : '')
+        + (dur ? (' · ' + dur) : '')
+        + ' · ' + t
+        + (log.error_summary ? (' · ' + log.error_summary) : '')
+        + '</div>';
+      if (log.error_detail) {
+        const pre = document.createElement('pre');
+        pre.className = 'auto-log-detail';
+        pre.textContent = log.error_detail;
+        div.appendChild(pre);
+        div.style.cursor = 'pointer';
+        div.addEventListener('click', function () {
+          pre.style.display = pre.style.display === 'block' ? 'none' : 'block';
+        });
+      }
+      box.appendChild(div);
+      box.scrollTop = box.scrollHeight;
+    });
+  }
+
+  async function poll() {
+    const url = root.dataset.statusUrl + '?after_id=' + afterId
+      + (runId ? ('&run_id=' + runId) : '');
+    try {
+      const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
+      const data = await resp.json();
+      if (!data.ok) return;
+      if (data.run) runId = data.run.id;
+      renderSummary(data);
+      appendLogs(data.logs || []);
+    } catch (e) { /* ignore */ }
+  }
+
+  async function post(url, formEl) {
+    const fd = new FormData(formEl || document.getElementById('auto-roi-control'));
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json' },
+      body: fd,
+    });
+    const data = await resp.json().catch(function () { return { ok: false, error: '请求失败' }; });
+    if (!data.ok) {
+      setMsg(data.error || '失败', true);
+      return data;
+    }
+    if (data.run) {
+      runId = data.run.id;
+      renderSummary({ run: data.run, pending_count: data.pending_count != null ? data.pending_count : '{{ pending_count }}' });
+    }
+    setMsg('已提交', false);
+    poll();
+    return data;
+  }
+
+  document.getElementById('btn-auto-start').addEventListener('click', function () {
+    post(root.dataset.startUrl);
+  });
+  document.getElementById('btn-auto-pause').addEventListener('click', function () {
+    post(root.dataset.pauseUrl);
+  });
+  document.getElementById('btn-auto-stop').addEventListener('click', function () {
+    post(root.dataset.stopUrl);
+  });
+  document.getElementById('auto-roi-config').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    const data = await post(root.dataset.configUrl, e.target);
+    if (data && data.ok) setMsg('定值已保存', false);
+  });
+
+  poll();
+  setInterval(poll, 2500);
+})();
+</script>
+{% endblock %}

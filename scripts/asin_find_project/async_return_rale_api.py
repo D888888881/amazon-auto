@@ -7,6 +7,12 @@ from lxml import html
 from typing import Optional
 
 from seller_account_guard import apply_login_config, apply_login_headers, ensure_seller_login
+from sellersprite_market import (
+    apply_sellersprite_station_cookie,
+    get_sellersprite_marketplace,
+    normalize_sellersprite_marketplace,
+    sellersprite_market_id,
+)
 
 
 # ---------- 默认配置 ----------
@@ -183,7 +189,7 @@ def extract_table_value(html_content: str) -> str:
 
 async def fetch_market_research(
     session: Optional[aiohttp.ClientSession] = None,
-    market_id: str = "1",
+    market_id: str | None = None,
     department_keyword: str = "Health & Household:Health Care:Over-the-Counter Medication:Pain Relievers:Hot & Cold Therapies:Heating Pads",
     topn: str = "10",
     new_release_num: str = "6",
@@ -191,8 +197,13 @@ async def fetch_market_research(
     order_desc: str = "true",
     tab: str = "1",
     month_name: str | None = None,
+    *,
+    marketplace: str | None = None,
     **extra_data
 ) -> str:
+    mp = normalize_sellersprite_marketplace(marketplace or get_sellersprite_marketplace())
+    if market_id is None:
+        market_id = sellersprite_market_id(mp)
     month_name = month_name or DEFAULT_MONTH_NAME
     data = {
         "marketId": market_id,
@@ -284,11 +295,14 @@ async def fetch_market_research(
 async def fetch_refund_rate_for_path(
     department_keyword: str,
     session: aiohttp.ClientSession | None = None,
+    *,
+    marketplace: str | None = None,
 ) -> str:
     """
     拉取类目退款率；尝试路径变体、上级类目、多种 monthName。
     失败返回空字符串，不抛异常。
     """
+    mp = normalize_sellersprite_marketplace(marketplace or get_sellersprite_marketplace())
     keywords = _category_keyword_variants(department_keyword)
     if not keywords:
         return ''
@@ -297,6 +311,7 @@ async def fetch_refund_rate_for_path(
     if owns_session:
         config = await ensure_seller_login()
         apply_login_config(cookies, config)
+        apply_sellersprite_station_cookie(cookies, mp)
         req_headers = dict(headers)
         apply_login_headers(req_headers, config)
         session = aiohttp.ClientSession(headers=req_headers, cookies=cookies)
@@ -309,6 +324,7 @@ async def fetch_refund_rate_for_path(
                     session=session,
                     department_keyword=kw,
                     month_name=month_name,
+                    marketplace=mp,
                 )
                 target_value = extract_table_value(html_text)
                 if target_value:
@@ -324,19 +340,21 @@ async def fetch_refund_rate_for_path(
             await session.close()
 
 
-async def async_return_rale_main(department_keyword: str) -> str:
-    return await fetch_refund_rate_for_path(department_keyword)
+async def async_return_rale_main(department_keyword: str, *, marketplace: str | None = None) -> str:
+    return await fetch_refund_rate_for_path(department_keyword, marketplace=marketplace)
 
 
 async def prefetch_refund_rates_batch(
     paths: list[str],
     *,
     max_concurrent: int = 6,
+    marketplace: str | None = None,
 ) -> tuple[dict[str, float], list[dict[str, str]]]:
     """
     批量预取退款率；单类目失败不中断整批。
     返回 (path->rate, 失败列表)。
     """
+    mp = normalize_sellersprite_marketplace(marketplace or get_sellersprite_marketplace())
     unique: list[str] = []
     seen: set[str] = set()
     for raw in paths:
@@ -349,6 +367,7 @@ async def prefetch_refund_rates_batch(
 
     config = await ensure_seller_login()
     apply_login_config(cookies, config)
+    apply_sellersprite_station_cookie(cookies, mp)
     req_headers = dict(headers)
     apply_login_headers(req_headers, config)
 
@@ -359,7 +378,9 @@ async def prefetch_refund_rates_batch(
     async with aiohttp.ClientSession(headers=req_headers, cookies=cookies) as session:
         async def _one(path: str) -> None:
             async with sem:
-                text = await fetch_refund_rate_for_path(path, session=session)
+                text = await fetch_refund_rate_for_path(
+                    path, session=session, marketplace=mp
+                )
                 if not text:
                     failures.append({
                         'path': path,

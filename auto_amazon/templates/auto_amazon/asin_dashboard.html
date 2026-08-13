@@ -9,7 +9,7 @@
 {% block content %}
 <div class="dash-page">
     <header class="dash-hero">
-        <h1 class="dash-hero__title">ASIN 数据看板</h1>
+        <h1 class="dash-hero__title">ASIN 数据看板{% if current_marketplace_label %} · {{ current_marketplace_label }}{% endif %}</h1>
 {#        <p class="dash-hero__sub">广告难度为 <code>ranking_percent</code>。运营难度1/2/3 各对应<strong>一个关键词</strong>下整段 <code>review_interval</code>（区间、平均销量、运营难度为一组）；每列用<strong>柱状图</strong>整体展示该关键词数据，悬停可看各区间运营难度。</p>#}
     </header>
 
@@ -156,11 +156,9 @@
                 <span>评价数量：</span>
                 <select name="ops_review_interval">
                     <option value="all" {% if filters.ops_review_interval == 'all' %}selected{% endif %}>不限</option>
-                    <option value="0-30" {% if filters.ops_review_interval == '0-30' %}selected{% endif %}>0-30</option>
-                    <option value="31-50" {% if filters.ops_review_interval == '31-50' %}selected{% endif %}>31-50</option>
-                    <option value="51-100" {% if filters.ops_review_interval == '51-100' %}selected{% endif %}>51-100</option>
-                    <option value="101-200" {% if filters.ops_review_interval == '101-200' %}selected{% endif %}>101-200</option>
-                    <option value="200以上" {% if filters.ops_review_interval == '200以上' %}selected{% endif %}>200以上</option>
+                    {% for opt in ops_review_interval_choices %}
+                    <option value="{{ opt }}" {% if filters.ops_review_interval == opt %}selected{% endif %}>{{ opt }}</option>
+                    {% endfor %}
                 </select>
             </div>
             <div class="dash-filter-actions">
@@ -327,8 +325,8 @@
     {% endif %}
     {% else %}
     <div class="dash-table-wrap dash-empty">
-        <p class="dash-empty__title">暂无数据</p>
-        <p>请前往「上传与数据」执行本地计算。</p>
+        <p class="dash-empty__title">暂无数据{% if current_marketplace_label %}（{{ current_marketplace_label }}）{% endif %}</p>
+        <p>请先在本站点上传 ASIN 并导入 ZIP，再前往「计算 ROI」执行计算。</p>
     </div>
     {% endif %}
 </div>

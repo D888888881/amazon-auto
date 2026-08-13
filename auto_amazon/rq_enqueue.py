@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-
-
 import logging
 
 import threading
@@ -12,51 +10,27 @@ from datetime import datetime, timezone as dt_tz
 
 from typing import Any
 
-
-
 from django.conf import settings
 
-
-
 logger = logging.getLogger(__name__)
-
-
 
 RESCUE_QUEUED_AFTER_SEC = 15
 
 WORKER_HEARTBEAT_MAX_AGE_SEC = 120
 
-
-
-
-
 def roi_use_rq() -> bool:
 
     return getattr(settings, 'ROI_USE_RQ', True)
-
-
-
-
 
 def _job_timeout() -> int | str:
 
     return getattr(settings, 'RQ_JOB_TIMEOUT', 86400)
 
-
-
-
-
 def _queue(name: str):
 
     import django_rq
 
-
-
     return django_rq.get_queue(name)
-
-
-
-
 
 def _worker_is_alive(worker) -> bool:
 
@@ -82,10 +56,6 @@ def _worker_is_alive(worker) -> bool:
 
         return False
 
-
-
-
-
 def rq_workers_available(queue_name: str | None = None) -> bool:
 
     """当前是否有存活的 RQ Worker 在监听指定队列。"""
@@ -93,8 +63,6 @@ def rq_workers_available(queue_name: str | None = None) -> bool:
     try:
 
         from rq.worker import Worker
-
-
 
         qname = queue_name or settings.RQ_QUEUE_ROI_HIGH
 
@@ -124,27 +92,15 @@ def rq_workers_available(queue_name: str | None = None) -> bool:
 
         return False
 
-
-
-
-
 def should_use_rq_queue(queue_name: str | None = None) -> bool:
 
     return roi_use_rq() and rq_workers_available(queue_name)
-
-
-
-
 
 def _append_job_note(job_id: str, line: str, **extra: Any) -> None:
 
     from django.core.cache import cache
 
-
-
     from .wizard_jobs import WIZARD_JOB_TTL, wizard_job_key
-
-
 
     key = wizard_job_key(job_id)
 
@@ -162,10 +118,6 @@ def _append_job_note(job_id: str, line: str, **extra: Any) -> None:
 
     cache.set(key, ent, WIZARD_JOB_TTL)
 
-
-
-
-
 def _set_job_rq_job_id(job_id: str, rq_job_id: str | None) -> None:
 
     if not rq_job_id:
@@ -174,17 +126,11 @@ def _set_job_rq_job_id(job_id: str, rq_job_id: str | None) -> None:
 
     _append_job_note(job_id, '', rq_job_id=rq_job_id, exec_mode='rq')
 
-
-
-
-
 def _cancel_rq_job(rq_job_id: str, queue_name: str | None = None) -> None:
 
     try:
 
         from rq.job import Job
-
-
 
         qname = queue_name or settings.RQ_QUEUE_ROI_HIGH
 
@@ -204,21 +150,13 @@ def _cancel_rq_job(rq_job_id: str, queue_name: str | None = None) -> None:
 
         logger.warning('cancel rq job %s failed: %s', rq_job_id, exc)
 
-
-
-
-
 def cancel_rq_jobs_for_wizard_job(job_id: str) -> None:
 
     """解除占用时取消尚未执行的 RQ 任务。"""
 
     from django.core.cache import cache
 
-
-
     from .wizard_jobs import wizard_job_key
-
-
 
     ent = cache.get(wizard_job_key(job_id)) or {}
 
@@ -235,10 +173,6 @@ def cancel_rq_jobs_for_wizard_job(job_id: str) -> None:
     if inferred and inferred.get('rq_job_id'):
 
         _cancel_rq_job(inferred['rq_job_id'])
-
-
-
-
 
 def _start_wizard_thread(
 
@@ -257,8 +191,6 @@ def _start_wizard_thread(
 ) -> None:
 
     from .views import _run_wizard_job
-
-
 
     t = threading.Thread(
 
@@ -280,10 +212,6 @@ def _start_wizard_thread(
 
     t.start()
 
-
-
-
-
 def _start_ad_difficulty_thread(
 
     job_id: str,
@@ -297,8 +225,6 @@ def _start_ad_difficulty_thread(
 ) -> None:
 
     from .views import _run_ad_difficulty_job
-
-
 
     t = threading.Thread(
 
@@ -316,7 +242,33 @@ def _start_ad_difficulty_thread(
 
 
 
+def _start_ops_difficulty_thread(
 
+    job_id: str,
+
+    user_id: int,
+
+    asins: list[str],
+
+    marketplace: str = 'UK',
+
+) -> None:
+
+    from .views import _run_ops_difficulty_job
+
+    t = threading.Thread(
+
+        target=_run_ops_difficulty_job,
+
+        args=(job_id, user_id, asins),
+
+        kwargs={'marketplace': marketplace},
+
+        daemon=True,
+
+    )
+
+    t.start()
 
 def _enqueue(queue_name: str, func_path: str, *args, **kwargs) -> str | None:
 
@@ -340,17 +292,11 @@ def _enqueue(queue_name: str, func_path: str, *args, **kwargs) -> str | None:
 
     return job.id
 
-
-
-
-
 def _rq_job_still_queued(rq_job_id: str, queue_name: str | None = None) -> bool:
 
     try:
 
         from rq.job import Job
-
-
 
         qname = queue_name or settings.RQ_QUEUE_ROI_HIGH
 
@@ -364,10 +310,6 @@ def _rq_job_still_queued(rq_job_id: str, queue_name: str | None = None) -> bool:
 
         return False
 
-
-
-
-
 def _infer_dispatch_from_rq_queue(job_id: str) -> dict | None:
 
     """从 RQ 队列反查已入队但 cache 未存 dispatch 元数据的任务。"""
@@ -375,8 +317,6 @@ def _infer_dispatch_from_rq_queue(job_id: str) -> dict | None:
     try:
 
         from rq.job import Job
-
-
 
         q = _queue(settings.RQ_QUEUE_ROI_HIGH)
 
@@ -426,15 +366,29 @@ def _infer_dispatch_from_rq_queue(job_id: str) -> dict | None:
 
                 }
 
+
+
+            if func.endswith('run_ops_difficulty_job_task'):
+
+                return {
+
+                    'task_type': 'ops_difficulty',
+
+                    'rq_job_id': rq_id,
+
+                    'user_id': job.args[1],
+
+                    'asins': job.args[2],
+
+                    'marketplace': job.args[3] if len(job.args) > 3 else 'UK',
+
+                }
+
     except Exception as exc:
 
         logger.warning('infer dispatch from rq failed: %s', exc)
 
     return None
-
-
-
-
 
 def maybe_rescue_stuck_queued_job(job_id: str) -> None:
 
@@ -446,11 +400,7 @@ def maybe_rescue_stuck_queued_job(job_id: str) -> None:
 
     from django.core.cache import cache
 
-
-
     from .wizard_jobs import WIZARD_JOB_TTL, _queued_wait_seconds, wizard_job_key
-
-
 
     key = wizard_job_key(job_id)
 
@@ -464,15 +414,11 @@ def maybe_rescue_stuck_queued_job(job_id: str) -> None:
 
         return
 
-
-
     wait = _queued_wait_seconds(ent)
 
     if wait is None or wait < RESCUE_QUEUED_AFTER_SEC:
 
         return
-
-
 
     task_type = ent.get('task_type')
 
@@ -488,21 +434,15 @@ def maybe_rescue_stuck_queued_job(job_id: str) -> None:
 
             cache.set(key, ent, WIZARD_JOB_TTL)
 
-
-
     rq_job_id = ent.get('rq_job_id')
 
     if rq_job_id and not _rq_job_still_queued(rq_job_id):
 
         return
 
-
-
-    if task_type not in ('wizard', 'ad_difficulty'):
+    if task_type not in ('wizard', 'ad_difficulty', 'ops_difficulty'):
 
         return
-
-
 
     ent['rescue_dispatched'] = True
 
@@ -518,19 +458,13 @@ def maybe_rescue_stuck_queued_job(job_id: str) -> None:
 
     cache.set(key, ent, WIZARD_JOB_TTL)
 
-
-
     if rq_job_id:
 
         _cancel_rq_job(rq_job_id)
 
-
-
     user_id = int(ent['user_id'])
 
     asins = ent.get('asins')
-
-
 
     if task_type == 'wizard':
 
@@ -550,6 +484,20 @@ def maybe_rescue_stuck_queued_job(job_id: str) -> None:
 
         )
 
+    elif task_type == 'ops_difficulty':
+
+        _start_ops_difficulty_thread(
+
+            job_id,
+
+            user_id,
+
+            list(asins or []),
+
+            marketplace=ent.get('marketplace') or 'UK',
+
+        )
+
     else:
 
         _start_ad_difficulty_thread(
@@ -565,10 +513,6 @@ def maybe_rescue_stuck_queued_job(job_id: str) -> None:
         )
 
     logger.warning('rescued stuck queued job %s -> thread (%s)', job_id, task_type)
-
-
-
-
 
 def dispatch_wizard_job(
 
@@ -587,6 +531,7 @@ def dispatch_wizard_job(
 ) -> str | None:
 
     """入队 ROI 任务；无 Worker 或 ROI_USE_RQ=false 时在 Web 进程后台线程执行。"""
+
     from .roi_routing import wizard_queue_name, wizard_route_label
 
     queue_name = wizard_queue_name(asins)
@@ -623,8 +568,6 @@ def dispatch_wizard_job(
 
         return None
 
-
-
     rq_job_id = _enqueue(
 
         queue_name,
@@ -652,10 +595,6 @@ def dispatch_wizard_job(
     logger.info('enqueued wizard job %s -> %s rq:%s', job_id, queue_name, rq_job_id)
 
     return rq_job_id
-
-
-
-
 
 def dispatch_ad_difficulty_job(
 
@@ -691,8 +630,6 @@ def dispatch_ad_difficulty_job(
 
         return None
 
-
-
     rq_job_id = _enqueue(
 
         queue_name,
@@ -717,9 +654,69 @@ def dispatch_ad_difficulty_job(
 
     return rq_job_id
 
+def dispatch_ops_difficulty_job(
 
+    job_id: str,
 
+    user_id: int,
 
+    asins: list[str],
+
+    marketplace: str = 'UK',
+
+) -> str | None:
+
+    from .roi_routing import ad_difficulty_queue_name, count_wizard_asins
+
+    queue_name = ad_difficulty_queue_name()
+
+    if not should_use_rq_queue(queue_name):
+
+        _append_job_note(
+
+            job_id,
+
+            '已在 Web 后台线程执行（本地无需单独启动 Worker）。',
+
+            exec_mode='thread',
+
+            thread_dispatched=True,
+
+        )
+
+        _start_ops_difficulty_thread(job_id, user_id, asins, marketplace=marketplace)
+
+        return None
+
+    rq_job_id = _enqueue(
+
+        queue_name,
+
+        'auto_amazon.rq_tasks.run_ops_difficulty_job_task',
+
+        job_id,
+
+        user_id,
+
+        asins,
+
+        marketplace,
+
+    )
+
+    _set_job_rq_job_id(job_id, rq_job_id)
+
+    _append_job_note(
+
+        job_id,
+
+        f'已加入 Worker 队列（运营难度 {marketplace}，{count_wizard_asins(asins)} 个 ASIN），等待执行…',
+
+    )
+
+    logger.info('enqueued ops difficulty job %s -> rq:%s', job_id, rq_job_id)
+
+    return rq_job_id
 
 def dispatch_scheduled_asin(
 
@@ -747,8 +744,6 @@ def dispatch_scheduled_asin(
 
         from .scheduled_jobs import execute_scheduled_asin_worker
 
-
-
         try:
 
             execute_scheduled_asin_worker(
@@ -770,8 +765,6 @@ def dispatch_scheduled_asin(
             release(asin, lock_owner)
 
         return None
-
-
 
     rq_job_id = _enqueue(
 
@@ -799,29 +792,44 @@ def dispatch_scheduled_asin(
 
     return rq_job_id
 
-
 def dispatch_scheduled_batch(work_items: list[dict]) -> str | None:
+
     """将一批到期 ASIN 合并为单个 RQ 任务（批量并发计算）。"""
+
     if not work_items:
+
         return None
 
     if not should_use_rq_queue(settings.RQ_QUEUE_ROI_SCHEDULED):
+
         from .asin_job_lock import release
+
         from .scheduled_jobs import execute_scheduled_batch_worker
 
         try:
+
             execute_scheduled_batch_worker(work_items)
+
         finally:
+
             for w in work_items:
+
                 release(w['asin'], w['lock_owner'])
+
         return None
 
     rq_job_id = _enqueue(
-        settings.RQ_QUEUE_ROI_SCHEDULED,
-        'auto_amazon.rq_tasks.run_scheduled_batch_task',
-        work_items,
-    )
-    asins = [w.get('asin') for w in work_items]
-    logger.info('enqueued scheduled batch %s -> rq:%s', asins, rq_job_id)
-    return rq_job_id
 
+        settings.RQ_QUEUE_ROI_SCHEDULED,
+
+        'auto_amazon.rq_tasks.run_scheduled_batch_task',
+
+        work_items,
+
+    )
+
+    asins = [w.get('asin') for w in work_items]
+
+    logger.info('enqueued scheduled batch %s -> rq:%s', asins, rq_job_id)
+
+    return rq_job_id

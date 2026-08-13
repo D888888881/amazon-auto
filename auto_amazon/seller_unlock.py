@@ -146,7 +146,7 @@ def execute_with_seller_unlock_retry(
 
 ) -> T:
 
-    """执行 fn；若遇 rank-login-user 则解禁后重试（最多 max_unlock_attempts 次）。"""
+    """执行 fn；若遇禁号则解禁（bulk 时优先换号）后重试。"""
 
     unlocks = 0
 
@@ -166,17 +166,67 @@ def execute_with_seller_unlock_retry(
 
             if on_log:
 
-                on_log('检测到卖家精灵子账号被禁用（rank-login-user），正在自动解禁…')
+                on_log('检测到卖家精灵子账号被禁用，正在自动解禁/换号…')
 
-            ok, msg = unlock_seller_sub_account(on_log=on_log)
+            rotated = False
 
-            if not ok:
+            try:
 
-                raise RuntimeError(f'自动解禁失败：{msg}') from exc
+                _ensure_script_path()
+
+                from credentials_loader import credential_profile
+
+                if credential_profile() == 'bulk':
+
+                    from bulk_account_pool import list_bulk_accounts, rotate_bulk_account_after_ban
+
+                    if len(list_bulk_accounts()) >= 2:
+
+                        banned_user = ''
+
+                        try:
+
+                            from seller_account_guard import resolve_seller_username
+
+                            banned_user = resolve_seller_username() or ''
+
+                        except Exception:
+
+                            banned_user = ''
+
+                        ok_rot, msg_rot, _cfg = rotate_bulk_account_after_ban(
+
+                            banned_user or None,
+
+                            pending_asins=[],
+
+                            pending_task='roi',
+
+                        )
+
+                        rotated = bool(ok_rot)
+
+                        if on_log:
+
+                            on_log(f'批量账号轮换：{msg_rot or ("成功" if ok_rot else "失败")}')
+
+            except Exception as rot_exc:
+
+                if on_log:
+
+                    on_log(f'批量换号异常：{rot_exc}')
+
+            if not rotated:
+
+                ok, msg = unlock_seller_sub_account(on_log=on_log)
+
+                if not ok:
+
+                    raise RuntimeError(f'自动解禁失败：{msg}') from exc
 
             if on_log:
 
-                on_log('解禁成功，正在重试当前步骤…')
+                on_log('解禁/换号完成，正在重试当前步骤…')
 
             continue
 

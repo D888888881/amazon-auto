@@ -39,6 +39,12 @@ async def _main():
     payload = json.loads(raw)
     asins = payload.get('asins')
     cost_overrides = payload.get('cost_overrides')
+    marketplace = str(payload.get('marketplace') or 'US').strip().upper()
+    if marketplace not in ('US', 'UK'):
+        marketplace = 'US'
+    roi_defaults = payload.get('roi_defaults')
+    if roi_defaults is not None and not isinstance(roi_defaults, dict):
+        roi_defaults = None
     parity = float(payload.get('parity') or 0)
     if parity <= 0:
         raise ValueError('parity 必须大于 0')
@@ -52,6 +58,8 @@ async def _main():
         parity,
         asins=asins,
         cost_overrides=cost_overrides or None,
+        marketplace=marketplace,
+        roi_defaults=roi_defaults,
     )
     print('PROGRESS:分析完成，正在序列化结果…', file=sys.stderr, flush=True)
     return _to_jsonable(result)

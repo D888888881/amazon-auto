@@ -284,6 +284,7 @@ class AsyncSifAPI:
         page_size: int = 10,
         sort_by: str = "scoreInfo.scoreRatio",
         desc: bool = True,
+        country: str = "US",
     ) -> List[Dict[str, Any]]:
         """
         POST www.sif.com/api/search/asinKeywordList
@@ -293,9 +294,13 @@ class AsyncSifAPI:
         if not self._session:
             raise RuntimeError("请在异步上下文管理器中使用 AsyncSifAPI")
 
+        country_code = str(country or "US").strip().upper() or "US"
+        if country_code not in ("US", "UK"):
+            country_code = "US"
+
         effective_sort = (sort_by or "").strip() or "scoreInfo.scoreRatio"
         referer = (
-            f"https://www.sif.com/reverse?country=US&from=commonAsinTab&asin={asin}"
+            f"https://www.sif.com/reverse?country={country_code}&from=commonAsinTab&asin={asin}"
             f"&isListingSearch=false&trafficType="
         )
         payload: Dict[str, Any] = {
@@ -310,7 +315,9 @@ class AsyncSifAPI:
             "timePieceValue": time_piece_value,
             "sortBy": effective_sort,
         }
-        result = await self._post("search/asinKeywordList", payload, referer=referer)
+        result = await self._post(
+            "search/asinKeywordList", payload, country=country_code, referer=referer
+        )
         if result.get("code") != 1:
             raise Exception(f"API 错误: {result.get('msg', '未知错误')}")
         data_block = result.get("data") or {}
@@ -318,8 +325,13 @@ class AsyncSifAPI:
         list_data = data_block.get("list") or []
         if total == 0:
             payload_retry = {**payload, "conditions": ["totalPeriod.total"]}
-            print(f"[SIF] asin={asin} total=0，去掉 isMultiVariantKw 后重试")
-            result = await self._post("search/asinKeywordList", payload_retry, referer=referer)
+            print(f"[SIF] asin={asin} country={country_code} total=0，去掉 isMultiVariantKw 后重试")
+            result = await self._post(
+                "search/asinKeywordList",
+                payload_retry,
+                country=country_code,
+                referer=referer,
+            )
             if result.get("code") != 1:
                 raise Exception(f"API 错误(重试): {result.get('msg', '未知错误')}")
             data_block = result.get("data") or {}
@@ -337,6 +349,7 @@ class AsyncSifAPI:
         desc: bool = True,
         need_wf: bool = False,
         conditions: Optional[List[str]] = None,
+        country: str = "US",
     ) -> List[Dict[str, Any]]:
         """获取指定 ASIN 的关键词行列表（asinKeywordList）。"""
         return await self.fetch_asin_keyword_list(
@@ -347,6 +360,7 @@ class AsyncSifAPI:
             page_size=page_size,
             sort_by=sort_by,
             desc=desc,
+            country=country,
         )
 
 
@@ -362,7 +376,8 @@ class AsyncSifAPI:
         sort_by: str = "",
         desc: bool = True,
         need_wf: bool = False,
-        conditions: Optional[List[str]] = None
+        conditions: Optional[List[str]] = None,
+        country: str = "US",
     ) -> Dict[str, List[Dict[str, Any]]]:
         """
         并发查询多个 ASIN 的关键词数据
@@ -380,7 +395,8 @@ class AsyncSifAPI:
                     sort_by=sort_by,
                     desc=desc,
                     need_wf=need_wf,
-                    conditions=conditions
+                    conditions=conditions,
+                    country=country,
                 )
                 return asin, result
 
@@ -400,12 +416,16 @@ class AsyncSifAPI:
 
 
 # ==================== 使用示例 ====================
-async def sif_main(asins: list[str]):
+async def sif_main(asins: list[str], country: str = "US"):
     # 优先从环境变量读取 JWT，避免把 token 写死在仓库里
+    country_code = str(country or "US").strip().upper() or "US"
+    if country_code not in ("US", "UK"):
+        country_code = "US"
     with open("config_file/sif_token.txt", "r") as f:
         sif_token = f.read().strip()
     auth_token = sif_token
     print(auth_token)
+    print(f"[SIF] country={country_code}")
     cookies = {
         "Hm_lvt_8d71bef53342fdb284ff83594f3b97ff": "1773713262",
         "HMACCOUNT": "1B0FE40093B498DF",
@@ -417,7 +437,7 @@ async def sif_main(asins: list[str]):
         cookies=cookies,
         max_concurrent=5,
     ) as api:
-        multi_asin_results = await api.fetch_multiple_asins(asins)
+        multi_asin_results = await api.fetch_multiple_asins(asins, country=country_code)
         result: List[Dict[str, Any]] = []
         keyword_groups_dict: Dict[str, List[str]] = {}
         for asin in asins:
@@ -443,8 +463,8 @@ async def sif_main(asins: list[str]):
                 result.append({asin_key: aggregate_sif_keyword_rows([], top_n=10)})
         print("<准备关键词>", keyword_groups_dict)
         if result == [] and keyword_groups_dict == {}:
-            get_sif_cookie()
-            return await sif_main(asins)
+            get_sif_cookie(country=country_code)
+            return await sif_main(asins, country=country_code)
         return result, keyword_groups_dict
 
 

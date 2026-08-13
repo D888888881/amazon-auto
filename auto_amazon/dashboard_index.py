@@ -7,7 +7,19 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from django.core.paginator import Paginator
-from django.db.models import Exists, OuterRef, QuerySet, Subquery
+from django.db.models import (
+    Case,
+    Exists,
+    F,
+    IntegerField,
+    OuterRef,
+    QuerySet,
+    Subquery,
+    Value,
+    When,
+    Window,
+)
+from django.db.models.functions import RowNumber
 
 from .asin_access import (
     dedupe_dashboard_rows,
@@ -37,7 +49,18 @@ DASHBOARD_SORT_FIELDS = {
     'follow_status': 'follow_status',
 }
 
-OPS_REVIEW_INTERVAL_OPTIONS = ('0-30', '31-50', '51-100', '101-200', '200以上')
+OPS_REVIEW_INTERVAL_OPTIONS_US = ('0-30', '31-50', '51-100', '101-200', '200以上')
+OPS_REVIEW_INTERVAL_OPTIONS_UK = ('0-10', '11-30', '31-50', '51-100', '101-150', '150以上')
+OPS_REVIEW_INTERVAL_OPTIONS = OPS_REVIEW_INTERVAL_OPTIONS_US
+
+
+def ops_review_interval_options(marketplace: str | None = None) -> tuple[str, ...]:
+    from .marketplace import MARKETPLACE_UK, normalize_marketplace
+
+    if normalize_marketplace(marketplace) == MARKETPLACE_UK:
+        return OPS_REVIEW_INTERVAL_OPTIONS_UK
+    return OPS_REVIEW_INTERVAL_OPTIONS_US
+
 
 _DEDUPE_FIELDS = (
     'pk',
@@ -96,7 +119,11 @@ def dashboard_per_page(request: HttpRequest) -> int:
 
 def _is_200_plus_review_label(label: str) -> bool:
     t = str(label).strip()
-    return '200以上' in t or t.replace(' ', '') in ('200+', '200＋')
+    return (
+        '200以上' in t
+        or '150以上' in t
+        or t.replace(' ', '') in ('200+', '200＋', '150+', '150＋')
+    )
 
 
 def _review_labels_equivalent(selected: str, actual: str) -> bool:
@@ -108,7 +135,9 @@ def _review_labels_equivalent(selected: str, actual: str) -> bool:
         return True
     if sel == '101-200' and act in ('101-150', '151-200'):
         return True
-    if sel == '200以上' and _is_200_plus_review_label(act):
+    if sel == '150以上' and ('150以上' in act or act.replace(' ', '') in ('150+', '150＋')):
+        return True
+    if sel == '200以上' and _is_200_plus_review_label(act) and '200' in act:
         return True
     return False
 
@@ -185,11 +214,12 @@ def _ops_match(
     return False
 
 
-def _parse_ops_filter_params(request: HttpRequest) -> dict:
+def _parse_ops_filter_params(request: HttpRequest, *, marketplace: str | None = None) -> dict:
     ops_slot = (request.GET.get('ops_slot') or 'any').strip()
     ops_range = (request.GET.get('ops_range') or 'all').strip()
+    allowed = ops_review_interval_options(marketplace)
     ops_review_interval = (request.GET.get('ops_review_interval') or 'all').strip()
-    if ops_review_interval not in OPS_REVIEW_INTERVAL_OPTIONS:
+    if ops_review_interval not in allowed and ops_review_interval != 'all':
         ops_review_interval = 'all'
     ops_min = None
     ops_max = None
@@ -290,7 +320,10 @@ def _build_filtered_queryset(
     from .models import AsinCatalogItem, AsinDashboardRow, AsinFolderAssignment
 
     User = get_user_model()
-    rows_qs = user_dashboard_rows_qs(user)
+    from .marketplace import MARKETPLACE_US, get_marketplace
+
+    mp = get_marketplace(request) or MARKETPLACE_US
+    rows_qs = user_dashboard_rows_qs(user, marketplace=mp)
 
     asin_kw = (request.GET.get('asin_kw') or '').strip()
     if asin_kw:
@@ -309,12 +342,12 @@ def _build_filtered_queryset(
     if uploaded_by_username:
         upl = User.objects.filter(username__iexact=uploaded_by_username, is_active=True).first()
         if upl:
-            uploaded_asins = user_imported_asin_codes(upl)
+            uploaded_asins = user_imported_asin_codes(upl, marketplace=mp)
             catalog_asins = {
                 normalize_asin(a)
-                for a in AsinCatalogItem.objects.filter(uploaded_by=upl).values_list(
-                    'asin', flat=True
-                )
+                for a in AsinCatalogItem.objects.filter(
+                    uploaded_by=upl, **({'marketplace': mp} if mp else {})
+                ).values_list('asin', flat=True)
             }
             rows_qs = rows_qs.filter(asin__in=list(uploaded_asins | catalog_asins))
 
@@ -375,7 +408,36 @@ def _list_only_fields(ops_active: bool) -> tuple[str, ...]:
     return _LIST_ONLY_FIELDS
 
 
-def _ordered_deduped_pks(
+def _metric_score_annotation():
+    """与 _row_metric_rank 对齐：已写入 ROI 相关字段越多分越高。"""
+    score = Value(0, output_field=IntegerField())
+    for field in ('monthly_results', 'profit_margin', 'ad_removed_roi', 'monthly_profit1'):
+        score = score + Case(
+            When(**{f'{field}__isnull': False}, then=Value(1)),
+            default=Value(0),
+            output_field=IntegerField(),
+        )
+    return score
+
+
+def _owner_rank_annotation(viewer_id: int, assigned_set: set[str]):
+    """
+    去重偏好：
+    - 被分配 ASIN：优先他人行（共享源数据）
+    - 其他：优先本人行
+    """
+    assigned_list = [a for a in assigned_set if a]
+    whens = []
+    if assigned_list:
+        whens.append(
+            When(asin__in=assigned_list, user_id=viewer_id, then=Value(0))
+        )
+        whens.append(When(asin__in=assigned_list, then=Value(1)))
+    whens.append(When(user_id=viewer_id, then=Value(1)))
+    return Case(*whens, default=Value(0), output_field=IntegerField())
+
+
+def _ordered_deduped_pks_legacy(
     rows_qs: QuerySet,
     *,
     viewer_id: int,
@@ -384,7 +446,7 @@ def _ordered_deduped_pks(
     direction: str,
     ops: dict,
 ) -> list[int]:
-    """流式扫描轻量行，去重后返回有序 pk 列表（不加载 TextField 全文）。"""
+    """运营难度筛选用：需读 TextField，保留内存去重路径。"""
     only_fields = _list_only_fields(ops['active'])
     qs = rows_qs.only(*only_fields)
 
@@ -409,6 +471,78 @@ def _ordered_deduped_pks(
 
     deduped = dedupe_dashboard_rows(slim_rows, viewer_id, assigned_set)
     return [r.pk for r in deduped]
+
+
+def _preferred_pks_page(
+    rows_qs: QuerySet,
+    *,
+    viewer_id: int,
+    assigned_set: set[str],
+    sort_field: str,
+    direction: str,
+    offset: int,
+    limit: int,
+) -> tuple[list[int], int]:
+    """
+    SQL 窗口函数按 ASIN 去重后真正分页，只取当前页 pk。
+    返回 (page_pks, total_distinct_asins)。
+    """
+    from .models import AsinDataUpdateStamp
+
+    total = rows_qs.values('asin').distinct().count()
+    if total == 0 or limit <= 0:
+        return [], total
+
+    order_prefix = '-' if direction == 'desc' else ''
+    ranked = rows_qs.annotate(
+        _metric=_metric_score_annotation(),
+        _owner_rank=_owner_rank_annotation(viewer_id, assigned_set),
+        _rn=Window(
+            expression=RowNumber(),
+            partition_by=[F('asin')],
+            order_by=[
+                F('_metric').desc(),
+                F('_owner_rank').desc(),
+                F('created_at').desc(),
+                F('pk').desc(),
+            ],
+        ),
+    )
+    # Django 将 window + filter 编译为子查询，适配 MySQL 8
+    preferred = ranked.filter(_rn=1)
+    if sort_field == 'updated_at':
+        stamp_subq = AsinDataUpdateStamp.objects.filter(asin=OuterRef('asin')).values(
+            'updated_at'
+        )[:1]
+        preferred = preferred.annotate(_stamp_sort=Subquery(stamp_subq)).order_by(
+            f'{order_prefix}_stamp_sort', 'pk'
+        )
+    else:
+        preferred = preferred.order_by(f'{order_prefix}{sort_field}', 'pk')
+
+    page_pks = list(preferred.values_list('pk', flat=True)[offset : offset + limit])
+    return page_pks, total
+
+
+def _ordered_deduped_pks(
+    rows_qs: QuerySet,
+    *,
+    viewer_id: int,
+    assigned_set: set[str],
+    sort_field: str,
+    direction: str,
+    ops: dict,
+    marketplace: str | None = None,
+) -> list[int]:
+    """兼容旧调用：返回全部去重 pk（运营难度筛选或回落）。"""
+    return _ordered_deduped_pks_legacy(
+        rows_qs,
+        viewer_id=viewer_id,
+        assigned_set=assigned_set,
+        sort_field=sort_field,
+        direction=direction,
+        ops=ops,
+    )
 
 
 def _fetch_rows_by_pks(ordered_pks: list[int]) -> list:
@@ -445,21 +579,42 @@ def build_dashboard_page(
     sort_field = DASHBOARD_SORT_FIELDS.get(sort_key, 'updated_at')
 
     rows_qs, filter_meta = _build_filtered_queryset(user, request, parse_dt_local=parse_dt_local)
-    ops_params = _parse_ops_filter_params(request)
+    from .marketplace import MARKETPLACE_US, get_marketplace
 
-    ordered_pks = _ordered_deduped_pks(
-        rows_qs,
-        viewer_id=user.id,
-        assigned_set=assigned_set,
-        sort_field=sort_field,
-        direction=direction,
-        ops=ops_params,
-    )
-
+    mp = get_marketplace(request) or MARKETPLACE_US
+    ops_params = _parse_ops_filter_params(request, marketplace=mp)
     per_page = dashboard_per_page(request)
-    paginator = Paginator(ordered_pks, per_page)
-    page_obj = paginator.get_page(request.GET.get('page') or 1)
-    page_pks = list(page_obj.object_list)
+    page_num = _get_int(request.GET.get('page')) or 1
+    page_num = max(1, page_num)
+
+    if ops_params.get('active'):
+        ordered_pks = _ordered_deduped_pks_legacy(
+            rows_qs,
+            viewer_id=user.id,
+            assigned_set=assigned_set,
+            sort_field=sort_field,
+            direction=direction,
+            ops=ops_params,
+        )
+        paginator = Paginator(ordered_pks, per_page)
+        page_obj = paginator.get_page(page_num)
+        page_pks = list(page_obj.object_list)
+    else:
+        offset = (page_num - 1) * per_page
+        page_pks, total = _preferred_pks_page(
+            rows_qs,
+            viewer_id=user.id,
+            assigned_set=assigned_set,
+            sort_field=sort_field,
+            direction=direction,
+            offset=offset,
+            limit=per_page,
+        )
+        # 用占位序列构造分页器，避免把全量 pk 载入内存
+        paginator = Paginator(range(total), per_page)
+        page_obj = paginator.get_page(page_num)
+        page_obj.object_list = page_pks
+
     rows = _fetch_rows_by_pks(page_pks)
 
     page_start = page_obj.number

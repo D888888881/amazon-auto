@@ -19,8 +19,11 @@ def get_sif_authorization() -> str:
     return value
 
 
-def get_sif_cookie() -> str | None:
+def get_sif_cookie(country: str = 'US') -> str | None:
     authorization = get_sif_authorization()
+    country_code = str(country or 'US').strip().upper() or 'US'
+    if country_code not in ('US', 'UK'):
+        country_code = 'US'
     headers = {
         'Accept': 'application/json, text/plain, */*',
         'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6',
@@ -40,7 +43,7 @@ def get_sif_cookie() -> str | None:
     }
     url = 'https://www.sif.com/api/user/conch/info'
     params = {
-        'country': 'US',
+        'country': country_code,
     }
     response = requests.get(url, headers=headers, params=params, timeout=30)
     response.raise_for_status()

@@ -9,6 +9,13 @@ from seller_account_guard import (
     ensure_seller_login,
     parse_sellersprite_api_payload,
 )
+from sellersprite_market import (
+    apply_sellersprite_station_cookie,
+    get_sellersprite_marketplace,
+    normalize_sellersprite_marketplace,
+    response_matches_sellersprite_marketplace,
+    sellersprite_market_id,
+)
 
 
 """异步发起单个 ASIN 的 FBA 计算请求"""
@@ -52,26 +59,29 @@ cookies = {
         "_clck": "1mue9jd%5E2%5Eg4o%5E0%5E2263",
         "ed595165cfd1f6bc8683": "8762d661a83e7bba47b3d544b203a973",
         "_gaf_fp": "446d18f8171dc955925786036784aa71",
-        "rank-login-user": 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',              # 从配置读取
-        "rank-login-user-info": 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',   # 从配置读取
-        "Sprite-X-Token": "eyJhbGciOiJSUzI1NiIsImtpZCI6IjE2Nzk5NjI2YmZlMDQzZTBiYzI5NTEwMTE4ODA3YWExIn0.eyJqdGkiOiJObTNjYmpmVXRuVG1lX0hWRzdocFp3IiwiaWF0IjoxNzc0NTA5NTk1LCJleHAiOjE3NzQ1OTU5OTUsIm5iZiI6MTc3NDUwOTUzNSwic3ViIjoieXVueWEiLCJpc3MiOiJyYW5rIiwiYXVkIjoic2VsbGVyU3BhY2UiLCJpZCI6MTI5NDI1LCJwaSI6bnVsbCwibm4iOiLmt7HlnLPpmL_mlrnntKLnp5HmioDmnInpmZDlhazlj7giLCJzeXMiOiJTU19DTiIsImVkIjoiTiIsInBobiI6IjEzNzI0MzMzODAzIiwiZW0iOiJxdWlnZW5nbmFAMTI2LmNvbSIsIm1sIjoiViIsImVuZCI6MTc4MjU0NDc5NTg2OH0.WSErMY_l_7JOxDOFXM0uOaRAxHVxlcmebSa1rfsa3hdy1NX1ChTW-Wmt6h2WDjrLXqu_TVB1O-cKeY53Wnp7QvGh1Ex-MEZkoHpWnXQBI3tQrgBeDO70P6T8e0l-dMHWV-YOXerrQ8wZh7z7kGNTz4qkNCt6_idSPnyEbD2Zr4IIOOYaEBCt11Kdb_bSOmmHjl9Aix8POfe-e5t2jDcuUPdwOvbntcN2yEKdoEGC-h3BxW5WqcdXl_-zfwHyMDSLF0M9JYcOieQbMOatASBn4Vlqb6r116wcp-S2meH9UKDZwhJaDN3vXo2El18R8fD0oXvWOBOkEuSUtxTwM9tRrg",
-        "ao_lo_to_n": "\"5917654771sTlVc5v9oyTCeXLRrg0WdYpTS2iYglYvULffNNNMBcyHnQMKABbi8gc20FarG0A5qB1vaKgTD4Qow5Xanaje96PAVd71/f+h3p9Ry7rrE4U=\"",
+        "rank-login-user": 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+        "rank-login-user-info": 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+        "Sprite-X-Token": "",
+        "ao_lo_to_n": "",
         "_ga_CN0F80S6GL": "GS2.1.s1774509573$o29$g1$t1774509843$j60$l0$h0",
         "Hm_lpvt_e0dfc78949a2d7c553713cb5c573a486": "1774509844",
         "_clsk": "1tig1ea%5E1774509845396%5E7%5E1%5Ei.clarity.ms%2Fcollect",
-        "JSESSIONID": "2DA1183136557EA50651E0A7E3FEA475",
+        "JSESSIONID": "",
         "_ga_38NCVF2XST": "GS2.1.s1774509573$o39$g1$t1774509928$j60$l0$h1584007809"
     }
 
-async def fetch_fba_search(asin):
+async def fetch_fba_search(asin, *, marketplace: str | None = None):
 
     url = "https://www.sellersprite.com/v3/api/tools/fba-calculator"
+    mp = normalize_sellersprite_marketplace(marketplace or get_sellersprite_marketplace())
     params = {
-        "marketId": "1",
+        "marketId": sellersprite_market_id(mp),
         "asin": asin,
         "type": "fba"
     }
-    async with aiohttp.ClientSession(headers=headers, cookies=cookies) as session:
+    req_cookies = dict(cookies)
+    apply_sellersprite_station_cookie(req_cookies, mp)
+    async with aiohttp.ClientSession(headers=headers, cookies=req_cookies) as session:
         async with session.post(url, params=params) as resp:
             return await resp.json()
 
@@ -80,7 +90,7 @@ def _parse_fba_fee(raw) -> float | None:
     if raw is None:
         return None
     try:
-        s = str(raw).replace('$', '').replace(',', '').strip()
+        s = str(raw).replace('$', '').replace('£', '').replace(',', '').strip()
         if not s:
             return None
         n = float(s)
@@ -89,30 +99,38 @@ def _parse_fba_fee(raw) -> float | None:
         return None
 
 
-async def process_asin(asin):
+async def process_asin(asin, *, marketplace: str | None = None):
     """
     处理单个 ASIN，返回 (asin, result) 元组，result 包含 FBA 费用和头程费用
     若失败则返回 (asin, None)
     """
+    mp = normalize_sellersprite_marketplace(marketplace or get_sellersprite_marketplace())
     try:
-        response_json = await fetch_fba_search(asin)
+        response_json = await fetch_fba_search(asin, marketplace=mp)
         data = parse_sellersprite_api_payload(response_json, asin=asin, api='FBA')
+        if not response_matches_sellersprite_marketplace(data, mp):
+            print(
+                f"处理 ASIN {asin} 失败: FBA 返回站点与请求不符"
+                f"（期望 {mp}/marketId={sellersprite_market_id(mp)}），已丢弃"
+            )
+            return asin, None
         fba_val = _parse_fba_fee(data.get('fba'))
         if fba_val is None:
             raise ValueError(f"FBA 费用无效: {data.get('fba')!r}")
-        # 提取尺寸和重量
         pkgDimensions = data['pkgDimensions']
-        pkgWeight = float(data['pkgWeight'].replace('pounds', '').strip()) * 0.45359237  # 转为 kg
-        # 解析尺寸（英寸）
+        weight_raw = str(data.get('pkgWeight') or '')
+        if 'kg' in weight_raw.lower():
+            pkgWeight = float(
+                weight_raw.lower().replace('kg', '').replace(',', '').strip() or '0'
+            )
+        else:
+            pkgWeight = float(weight_raw.replace('pounds', '').replace(',', '').strip()) * 0.45359237
         dims = pkgDimensions.split('x')
         h = float(dims[0].strip()) * 2.54          # 高 cm
         w = float(dims[1].strip()) * 2.54          # 宽 cm
-        i = float(dims[2].replace('inches', '').strip()) * 2.54  # 长 cm
-        # 体积重 (kg)
+        i = float(dims[2].replace('inches', '').replace('cm', '').strip()) * 2.54  # 长 cm
         volume_weight = h * w * i / 6000
-        # 计费重量 = max(实际重, 体积重)
         chargeable_weight = volume_weight if volume_weight > pkgWeight else pkgWeight
-        # 头程费用（假设单价 5 元/kg）
         head_distance = chargeable_weight * 5
         result = {
             "FBA": fba_val,
@@ -125,21 +143,21 @@ async def process_asin(asin):
         print(f"处理 ASIN {asin} 失败: {e}")
         return asin, None
 
-async def async_fba_batch(asin_list, max_concurrent=5):
+async def async_fba_batch(asin_list, max_concurrent=5, *, marketplace: str | None = None):
     """
-    并发处理多个 ASIN
-    :param asin_list: ASIN 列表
-    :param max_concurrent: 最大并发数
-    :return: 字典，键为 ASIN，值为 {"FBA": ..., "head_distance": ...} 或 None
+    并发处理多个 ASIN。
+    marketplace=US|UK：决定 marketId 与 module-station-market-research。
     """
+    mp = normalize_sellersprite_marketplace(marketplace or get_sellersprite_marketplace())
     config = await ensure_seller_login()
     apply_login_config(cookies, config)
+    apply_sellersprite_station_cookie(cookies, mp)
     apply_login_headers(headers, config)
     semaphore = asyncio.Semaphore(max_concurrent)
 
     async def bounded_process(asin):
         async with semaphore:
-            return await process_asin(asin)
+            return await process_asin(asin, marketplace=mp)
 
     tasks = [bounded_process(asin) for asin in asin_list]
     results = await asyncio.gather(*tasks)
@@ -147,11 +165,6 @@ async def async_fba_batch(asin_list, max_concurrent=5):
 
 
 if __name__ == "__main__":
-    # 示例：多个 ASIN 并发处理
     asins = ["B0GQVXM199"]
     result = asyncio.run(async_fba_batch(asins, max_concurrent=3))
     print(result)
-
-    # 也可以使用原有的单 ASIN 函数
-    # single = asyncio.run(async_fba_main("B01KVYTV7M"))
-    # print(single)

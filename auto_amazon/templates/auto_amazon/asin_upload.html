@@ -57,6 +57,14 @@
         <div class="asin-upload-card__body">
             <form method="post" enctype="multipart/form-data" id="asin-upload-form">
                 {% csrf_token %}
+                <div class="asin-upload-field" style="margin-bottom:1rem;">
+                    <label for="id_marketplace" style="display:block;font-size:.85rem;font-weight:600;margin-bottom:.35rem;">上传站点</label>
+                    <select name="marketplace" id="id_marketplace" class="asin-upload-select" style="min-width:12rem;padding:.5rem .65rem;border-radius:8px;border:1px solid #e2e8f0;">
+                        <option value="US" {% if upload_marketplace == 'US' %}selected{% endif %}>美国站 · US</option>
+                        <option value="UK" {% if upload_marketplace == 'UK' %}selected{% endif %}>英国站 · UK</option>
+                    </select>
+                    <p style="margin:.35rem 0 0;font-size:.8rem;color:#64748b;">美英站 ASIN 库分开去重，请先选对站点再上传。</p>
+                </div>
                 <label class="asin-upload-drop" id="asin-upload-drop" for="id_asin_file">
                     <span class="asin-upload-drop__icon" aria-hidden="true">📄</span>
                     <p class="asin-upload-drop__title">点击或拖拽文件到此处</p>

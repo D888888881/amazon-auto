@@ -183,6 +183,8 @@ def run_roi_asins_sequential(
     on_asin_done: Callable[[str, dict], None] | None = None,
     on_asin_failed: Callable[[AsinFailure], None] | None = None,
     max_retries: int | None = None,
+    marketplace: str = 'US',
+    roi_defaults: dict | None = None,
 ) -> BatchRunResult:
     """
     逐个 ASIN 计算 ROI；单 ASIN 失败不中断整批。
@@ -207,6 +209,8 @@ def run_roi_asins_sequential(
                     parity,
                     cost_overrides=co,
                     on_stderr_line=on_stderr_line,
+                    marketplace=marketplace,
+                    roi_defaults=roi_defaults,
                 ),
                 on_progress=on_progress,
             )
@@ -251,6 +255,8 @@ def run_roi_asins_batch(
     on_asin_done: Callable[[str, dict], None] | None = None,
     on_asin_failed: Callable[[AsinFailure], None] | None = None,
     max_retries: int | None = None,
+    marketplace: str = 'US',
+    roi_defaults: dict | None = None,
 ) -> BatchRunResult:
     """一次调用批量计算 ROI（内部多 ASIN 并发）；失败 ASIN 单独记录。"""
     asin_list = ordered_unique_asins(asins)
@@ -266,6 +272,8 @@ def run_roi_asins_batch(
             on_asin_done=on_asin_done,
             on_asin_failed=on_asin_failed,
             max_retries=max_retries,
+            marketplace=marketplace,
+            roi_defaults=roi_defaults,
         )
     if on_progress:
         on_progress(
@@ -282,6 +290,8 @@ def run_roi_asins_batch(
                 parity,
                 cost_overrides=cost_overrides,
                 on_stderr_line=on_stderr_line,
+                marketplace=marketplace,
+                roi_defaults=roi_defaults,
             ),
             on_progress=on_progress,
         )
@@ -338,6 +348,7 @@ def run_ad_difficulty_asins_sequential(
     on_asin_done: Callable[[str, dict], None] | None = None,
     on_asin_failed: Callable[[AsinFailure], None] | None = None,
     max_retries: int | None = None,
+    marketplace: str = 'US',
 ) -> BatchRunResult:
     """逐个 ASIN 计算广告难度；单 ASIN 失败不中断整批。"""
     result = BatchRunResult()
@@ -346,14 +357,16 @@ def run_ad_difficulty_asins_sequential(
 
     for idx, asin in enumerate(asins, start=1):
         if on_progress:
-            on_progress(f'进度 {idx}/{total}：开始计算广告难度 · {asin}')
+            on_progress(f'进度 {idx}/{total}：开始计算广告难度 · {asin}（{marketplace}）')
 
         try:
             part = _run_one_asin_with_retry(
                 asin,
                 max_retries=retries,
-                run_fn=lambda: run_ad_difficulty_for_asins(
-                    [asin], on_stderr_line=on_stderr_line
+                run_fn=lambda a=asin: run_ad_difficulty_for_asins(
+                    [a],
+                    on_stderr_line=on_stderr_line,
+                    marketplace=marketplace,
                 ),
                 on_progress=on_progress,
             )
@@ -388,6 +401,105 @@ def run_ad_difficulty_asins_sequential(
     return result
 
 
+def _seller_ban_partial_merged(exc: BaseException) -> dict | None:
+    """从禁号异常中提取可合并的部分广告难度结果（含 __ban__）。"""
+    from .seller_unlock import is_seller_account_banned_error
+
+    cause = getattr(exc, 'cause', exc)
+    if not is_seller_account_banned_error(cause):
+        return None
+    partial = getattr(cause, 'partial_results', None) or {}
+    ban_pending = getattr(cause, 'ban_pending', None) or []
+    if not partial and not ban_pending:
+        return None
+    merged = dict(partial)
+    if ban_pending:
+        merged['__ban__'] = {
+            'pending': ban_pending,
+            'message': str(cause),
+        }
+    return merged
+
+
+def _ad_failure_message_from_payload(payload: dict) -> str:
+    skip = str(payload.get('skip_reason') or '').strip()
+    if skip == 'zero_ad_words':
+        return '广告词数量为0'
+    keywords = payload.get('keywords') or {}
+    if isinstance(keywords, dict):
+        reasons = [
+            str(d.get('reason') or '')
+            for d in keywords.values()
+            if isinstance(d, dict) and d.get('reason')
+        ]
+        if reasons and all(r == 'zero_ad_words' for r in reasons):
+            return '广告词数量为0'
+        mapping = {
+            'zero_ad_words': '广告词数量为0',
+            'no_ad_efficiency_table': '未能生成广告效率表',
+            'empty_products': '关键词无有效产品数据',
+            'invalid_ranking': '广告效率排名无效',
+        }
+        messages = [mapping.get(r, r) for r in reasons[:3]]
+        if messages:
+            return '; '.join(messages)
+    return '广告难度未成功计算'
+
+
+def _ad_batch_result_from_merged(
+    asin_list: list[str],
+    merged: dict,
+    *,
+    on_asin_done: Callable[[str, dict], None] | None = None,
+    on_asin_failed: Callable[[AsinFailure], None] | None = None,
+) -> BatchRunResult:
+    """将 wizard 返回的 merged（可含 __ban__）拆成成功/失败 ASIN。"""
+    result = BatchRunResult()
+    ban_meta = merged.pop('__ban__', None) if isinstance(merged, dict) else None
+    ban_pending: set[str] = set()
+    ban_msg = ''
+    if isinstance(ban_meta, dict):
+        ban_pending = {
+            normalize_asin(a) for a in (ban_meta.get('pending') or []) if str(a).strip()
+        }
+        ban_msg = str(
+            ban_meta.get('message')
+            or '卖家精灵账号被禁，未完成 ASIN 已加入续算队列'
+        )
+
+    for asin in asin_list:
+        key = normalize_asin(asin)
+        payload = merged.get(key) or merged.get(asin)
+        if (
+            isinstance(payload, dict)
+            and payload.get('computed_ad')
+            and payload.get('ranking_percent') is not None
+        ):
+            part = {key: payload}
+            result.merged.update(part)
+            result.succeeded.append(key)
+            if on_asin_done:
+                on_asin_done(key, part)
+        elif key in ban_pending:
+            failure = AsinFailure(asin=key, error=ban_msg, attempts=1)
+            result.failures.append(failure)
+            if on_asin_failed:
+                on_asin_failed(failure)
+        else:
+            err = ''
+            if isinstance(payload, dict):
+                err = str(payload.get('error') or '').strip()
+                if not err:
+                    err = _ad_failure_message_from_payload(payload)
+            else:
+                err = '无广告难度结果'
+            failure = AsinFailure(asin=key, error=err, attempts=1)
+            result.failures.append(failure)
+            if on_asin_failed:
+                on_asin_failed(failure)
+    return result
+
+
 def run_ad_difficulty_asins_batch(
     asins: list[str],
     *,
@@ -397,6 +509,7 @@ def run_ad_difficulty_asins_batch(
     on_asin_failed: Callable[[AsinFailure], None] | None = None,
     max_retries: int | None = None,
     sequential: bool = False,
+    marketplace: str = 'US',
 ) -> BatchRunResult:
     """一次调用批量计算广告难度；sequential=True 时供定时任务顺序拉取（无并发）。"""
     asin_list = ordered_unique_asins(asins)
@@ -405,7 +518,7 @@ def run_ad_difficulty_asins_batch(
         return result
     if on_progress:
         mode = '顺序' if sequential else '并发'
-        on_progress(f'批量计算广告难度：共 {len(asin_list)} 个 ASIN（{mode}）…')
+        on_progress(f'批量计算广告难度：共 {len(asin_list)} 个 ASIN（{mode}，站点 {marketplace}）…')
     retries = max_retries if max_retries is not None else roi_asin_max_retries()
     try:
         merged = _run_one_asin_with_retry(
@@ -415,10 +528,22 @@ def run_ad_difficulty_asins_batch(
                 asin_list,
                 on_stderr_line=on_stderr_line,
                 sequential=sequential,
+                marketplace=marketplace,
             ),
             on_progress=on_progress,
         )
     except AsinRunFailed as exc:
+        partial = _seller_ban_partial_merged(exc)
+        if partial is not None:
+            result = _ad_batch_result_from_merged(
+                asin_list,
+                partial,
+                on_asin_done=on_asin_done,
+                on_asin_failed=on_asin_failed,
+            )
+            if on_progress:
+                on_progress(result.summary_text())
+            return result
         for asin in asin_list:
             failure = AsinFailure(
                 asin=asin,
@@ -432,6 +557,17 @@ def run_ad_difficulty_asins_batch(
             on_progress(result.summary_text())
         return result
     except Exception as exc:
+        partial = _seller_ban_partial_merged(exc)
+        if partial is not None:
+            result = _ad_batch_result_from_merged(
+                asin_list,
+                partial,
+                on_asin_done=on_asin_done,
+                on_asin_failed=on_asin_failed,
+            )
+            if on_progress:
+                on_progress(result.summary_text())
+            return result
         for asin in asin_list:
             failure = AsinFailure(
                 asin=asin,
@@ -445,25 +581,12 @@ def run_ad_difficulty_asins_batch(
             on_progress(result.summary_text())
         return result
 
-    for asin in asin_list:
-        payload = merged.get(asin)
-        if isinstance(payload, dict) and payload and not payload.get('error'):
-            part = {asin: payload}
-            result.merged.update(part)
-            result.succeeded.append(asin)
-            if on_asin_done:
-                on_asin_done(asin, part)
-        else:
-            err = ''
-            if isinstance(payload, dict):
-                err = str(payload.get('error') or '无广告难度结果')
-            else:
-                err = '无广告难度结果'
-            failure = AsinFailure(asin=asin, error=err, attempts=1)
-            result.failures.append(failure)
-            if on_asin_failed:
-                on_asin_failed(failure)
-
+    result = _ad_batch_result_from_merged(
+        asin_list,
+        merged,
+        on_asin_done=on_asin_done,
+        on_asin_failed=on_asin_failed,
+    )
     if on_progress:
         on_progress(result.summary_text())
     return result
