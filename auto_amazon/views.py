@@ -53,6 +53,13 @@ from .excel_browse_index import (
 )
 from .dashboard_ops_filter import run_dashboard_ops_filter
 from .dashboard_index import build_dashboard_page, stamp_map_for_asins, verified_asins_on_page
+from .asin_verify_pass import (
+    mark_asins_passed,
+    mark_asins_verified,
+    passed_asins_on_page,
+    unmark_asins_passed,
+    verification_labels_for_asins,
+)
 from .asin_access import (
     asin_importer_user_ids,
     asin_root_from_rel_path,
@@ -246,27 +253,31 @@ def _parse_dt_local(raw: str | None, end_of_day: bool = False):
     return None
 
 
-def _attach_row_assignee_labels(
+def _attach_row_page_labels(
     rows,
-    label_map: dict[str, str],
     viewer,
-    viewer_assigned_asins: set[str],
-    roi_verified_asins: set[str] | None = None,
+    *,
+    marketplace: str | None,
     uploader_map: dict[str, str] | None = None,
 ) -> None:
-    verified = roi_verified_asins or set()
+    """当前页补校验人 / 已通过 / 操作权限（不做全表扫描）。"""
     upl_map = uploader_map or {}
-    viewer_id = viewer.id
-    viewer_is_superuser = bool(getattr(viewer, 'is_superuser', False))
+    asins = {normalize_asin(r.asin) for r in rows if r.asin}
+    verify_map = verification_labels_for_asins(
+        asins, marketplace=marketplace, viewer_id=getattr(viewer, 'id', None)
+    )
+    passed_set = passed_asins_on_page(asins, marketplace=marketplace)
     for r in rows:
         key = normalize_asin(r.asin)
-        r.assignee_display = label_map.get(key) or '—'
+        info = verify_map.get(key) or {'my_verified': False, 'labels': '—', 'names': []}
         r.uploader_display = upl_map.get(key) or '—'
-        can_operate = viewer_is_superuser or r.user_id == viewer_id or key in viewer_assigned_asins
+        r.roi_pack_verified = bool(info.get('my_verified'))
+        r.roi_verify_labels = info.get('labels') or '—'
+        r.asin_passed = key in passed_set
+        can_operate = user_can_operate_dashboard_row(viewer, r)
         r.ops_readonly = not can_operate
-        r.can_delete_row = can_operate  # 与可操作范围一致，避免逐行 exists()
+        r.can_delete_row = user_can_delete_dashboard_row(viewer, r)
         r.can_open_dir = can_operate
-        r.roi_pack_verified = key in verified
 
 
 def _require_superuser_for_excel_audit(request) -> bool:
@@ -726,9 +737,9 @@ def index(request):
     from .dashboard_index import ops_review_interval_options
     from .marketplace import MARKETPLACE_UK, MARKETPLACE_US, get_marketplace
 
+    mp_rows = get_marketplace(request) or MARKETPLACE_US
     if request.method == 'POST':
         action = request.POST.get('action')
-        mp_rows = get_marketplace(request) or MARKETPLACE_US
         if action == 'delete_batch':
             ids = request.POST.getlist('row_ids')
             if ids:
@@ -930,6 +941,75 @@ def index(request):
             if nxt.startswith('/') and not nxt.startswith('//'):
                 return redirect(nxt)
             return redirect('index')
+        elif action == 'batch_roi_verify':
+            ids = [int(x) for x in request.POST.getlist('row_ids') if str(x).isdigit()]
+            if not ids:
+                messages.error(request, '请先勾选需要校验的 ASIN。')
+                return redirect('index')
+            rows_sel = list(
+                user_dashboard_rows_qs(request.user, marketplace=mp_rows)
+                .filter(pk__in=ids)
+                .only('pk', 'asin')
+            )
+            asins = sorted(
+                {
+                    normalize_asin(r.asin)
+                    for r in rows_sel
+                    if r.asin and user_can_operate_dashboard_row(request.user, r)
+                }
+            )
+            if not asins:
+                messages.error(request, '未找到可校验的 ASIN。')
+                return redirect('index')
+            n = mark_asins_verified(request.user, asins, marketplace=mp_rows)
+            messages.success(request, f'已为当前账号标记校验 {n} 个 ASIN。')
+            return redirect('index')
+        elif action == 'batch_mark_passed':
+            ids = [int(x) for x in request.POST.getlist('row_ids') if str(x).isdigit()]
+            if not ids:
+                messages.error(request, '请先勾选需要标记已通过的 ASIN。')
+                return redirect('index')
+            rows_sel = list(
+                user_dashboard_rows_qs(request.user, marketplace=mp_rows)
+                .filter(pk__in=ids)
+                .only('pk', 'asin')
+            )
+            asins = sorted(
+                {
+                    normalize_asin(r.asin)
+                    for r in rows_sel
+                    if r.asin and user_can_operate_dashboard_row(request.user, r)
+                }
+            )
+            if not asins:
+                messages.error(request, '未找到可标记的 ASIN。')
+                return redirect('index')
+            n = mark_asins_passed(request.user, asins, marketplace=mp_rows)
+            messages.success(request, f'已全局标记已通过 {n} 个 ASIN（全员可见）。')
+            return redirect('index')
+        elif action == 'batch_unmark_passed':
+            ids = [int(x) for x in request.POST.getlist('row_ids') if str(x).isdigit()]
+            if not ids:
+                messages.error(request, '请先勾选需要取消已通过的 ASIN。')
+                return redirect('index')
+            rows_sel = list(
+                user_dashboard_rows_qs(request.user, marketplace=mp_rows)
+                .filter(pk__in=ids)
+                .only('pk', 'asin')
+            )
+            asins = sorted(
+                {
+                    normalize_asin(r.asin)
+                    for r in rows_sel
+                    if r.asin and user_can_operate_dashboard_row(request.user, r)
+                }
+            )
+            if not asins:
+                messages.error(request, '未找到可取消的 ASIN。')
+                return redirect('index')
+            n = unmark_asins_passed(asins, marketplace=mp_rows)
+            messages.success(request, f'已取消已通过标记 {n} 个 ASIN。')
+            return redirect('index')
         return redirect('index')
 
     assigned_codes = user_assigned_asin_codes(request.user)
@@ -953,13 +1033,10 @@ def index(request):
     filter_meta = page_result.filter_meta
 
     asins_on_page = {normalize_asin(r.asin) for r in rows}
-    verified_norm = verified_asins_on_page(asins_on_page)
-    _attach_row_assignee_labels(
+    _attach_row_page_labels(
         rows,
-        _assignment_label_map(asins_on_page),
         request.user,
-        assigned_set,
-        roi_verified_asins=verified_norm,
+        marketplace=mp_rows,
         uploader_map=uploader_label_map(asins_on_page),
     )
     attach_product_image_urls(rows)
@@ -973,7 +1050,6 @@ def index(request):
     kept.pop('page', None)
     kept.pop('_rv', None)
     filter_qs = kept.urlencode()
-    assignee_choices = _cached_filter_usernames('assignee')
     uploader_choices = _cached_filter_usernames('uploader')
     return render(
         request,
@@ -986,7 +1062,6 @@ def index(request):
             'dir': direction,
             'filter_qs': filter_qs,
             'per_page': page_obj.paginator.per_page,
-            'assignee_choices': assignee_choices,
             'uploader_choices': uploader_choices,
             'viewer_is_superuser': viewer_is_superuser,
             'filters': {
@@ -996,6 +1071,9 @@ def index(request):
                 'selected_grades': filter_meta['allowed_grades'],
                 'roi_verified': filter_meta['roi_verified_f']
                 if filter_meta['roi_verified_f'] in ('yes', 'no')
+                else '',
+                'passed': filter_meta.get('passed_f')
+                if filter_meta.get('passed_f') in ('yes', 'no')
                 else '',
                 'follow_filter': filter_meta['follow_f']
                 if filter_meta['follow_f']
@@ -2020,6 +2098,7 @@ def schedule_messages_page(request):
     upl_map = uploader_label_map(asins_on_page)
     for m in page_obj.object_list:
         m.uploader_display = upl_map.get(normalize_asin(m.asin)) or '—'
+    attach_product_image_urls(page_obj.object_list)
 
     page_start = max(1, page_obj.number - 4)
     page_end = min(paginator.num_pages, page_obj.number + 5)
@@ -2419,9 +2498,6 @@ def fetch_data_page(request):
 @login_required
 def excel_page(request):
     _warm_shared_page_caches(request, warm_excel_index=True)
-    assignable_users = list(
-        User.objects.filter(is_active=True).order_by('username').values('id', 'username')
-    )
     uploader_user_ids = ImportedMediaPath.objects.values_list('user_id', flat=True).distinct()
     uploader_users = list(
         User.objects.filter(id__in=uploader_user_ids, is_active=True)
@@ -2432,8 +2508,6 @@ def excel_page(request):
         request,
         'auto_amazon/excel.html',
         {
-            'assignable_users': assignable_users,
-            'assignable_users_json': json.dumps(assignable_users, ensure_ascii=False),
             'uploader_users_json': json.dumps(uploader_users, ensure_ascii=False),
             'is_superuser': bool(request.user.is_superuser),
         },
@@ -2446,7 +2520,14 @@ def excel_editor_page(request):
         return render(
             request,
             'auto_amazon/excel_editor.html',
-            {'rel_path': '', 'local_mode': True, 'page_title': 'Excel', 'read_only_excel': False},
+            {
+                'rel_path': '',
+                'local_mode': True,
+                'page_title': 'Excel',
+                'read_only_excel': False,
+                'back_url': reverse('index'),
+                'back_label': '返回看板',
+            },
         )
     rel = (request.GET.get('path') or '').strip().replace('\\', '/')
     excel_home = 'excel' if _require_superuser_for_excel_audit(request) else 'index'
@@ -2465,6 +2546,16 @@ def excel_editor_page(request):
     ):
         messages.error(request, '无权打开该文件（需由管理员将对应 ASIN 文件夹分配给您）。')
         return redirect('index')
+    is_roi_pack = 'roi-us-pack' in path.name.lower()
+    if is_roi_pack:
+        back_url = reverse('index')
+        back_label = '返回看板'
+    elif excel_home == 'excel':
+        back_url = reverse('excel')
+        back_label = '返回文件库'
+    else:
+        back_url = reverse('index')
+        back_label = '返回看板'
     return render(
         request,
         'auto_amazon/excel_editor.html',
@@ -2473,6 +2564,8 @@ def excel_editor_page(request):
             'local_mode': False,
             'page_title': _first_word_from_filename(path.name),
             'read_only_excel': False,
+            'back_url': back_url,
+            'back_label': back_label,
         },
     )
 
@@ -2508,8 +2601,6 @@ def _excel_browse_filter_params(request) -> dict:
         'q': (request.GET.get('q') or '').strip().lower(),
         'calc': (request.GET.get('calc') or 'all').strip() or 'all',
         'roi_verified': (request.GET.get('roi_verified') or 'all').strip() or 'all',
-        'assign_status': (request.GET.get('assign_status') or 'all').strip() or 'all',
-        'assignee': (request.GET.get('assignee') or '').strip(),
         'updated_from_ms': _ms('updated_from'),
         'updated_to_ms': _ms('updated_to'),
         'uploaded_by': (request.GET.get('uploaded_by') or '').strip(),
@@ -2584,25 +2675,23 @@ def excel_browse(request):
             if re.match(r'^B0[A-Z0-9]{8}$', nm):
                 asin_names_in_view.append(nm)
     try:
+        from .marketplace import MARKETPLACE_US, get_marketplace, normalize_marketplace
+
+        mp_browse = normalize_marketplace(get_marketplace(request)) or MARKETPLACE_US
         dashboard_asins = (
             {
                 normalize_asin(a)
-                for a in AsinDashboardRow.objects.filter(asin__in=asin_names_in_view).values_list(
-                    'asin', flat=True
-                )
-            }
-            if asin_names_in_view
-            else set()
-        )
-        roi_verified_asins = (
-            {
-                normalize_asin(a)
-                for a in AsinRoiPackVerification.objects.filter(
-                    asin__in=asin_names_in_view
+                for a in AsinDashboardRow.objects.filter(
+                    asin__in=asin_names_in_view, marketplace=mp_browse
                 ).values_list('asin', flat=True)
             }
             if asin_names_in_view
             else set()
+        )
+        verify_map = verification_labels_for_asins(
+            set(asin_names_in_view),
+            marketplace=mp_browse,
+            viewer_id=request.user.id,
         )
         updated_map = (
             {
@@ -2614,37 +2703,11 @@ def excel_browse(request):
             if asin_names_in_view
             else {}
         )
-        assign_map: dict[str, list[str]] = {}
-        if asin_names_in_view:
-            for obj in (
-                AsinFolderAssignment.objects.filter(asin__in=asin_names_in_view)
-                .prefetch_related('assignees')
-            ):
-                assign_map[normalize_asin(obj.asin)] = sorted(
-                    {u.username for u in obj.assignees.all()}
-                )
-        assigned_set = set(user_assigned_asin_codes(request.user)) if not is_super else set()
-        from .marketplace import MARKETPLACE_US, get_marketplace, normalize_marketplace
-
-        mp_browse = normalize_marketplace(get_marketplace(request)) or MARKETPLACE_US
         import_roots = (
             user_imported_asin_codes(request.user, marketplace=mp_browse) if not is_super else set()
         )
-        # 进入某 ASIN 子目录时，根权限只判定一次
         folder_root = asin_root_from_rel_path(rel) if rel else None
-        root_access_ok = True
-        if not is_super and folder_root:
-            from .asin_access import user_can_access_asin_root
-
-            root_access_ok = user_can_access_asin_root(
-                request.user,
-                folder_root,
-                assigned_set=assigned_set,
-                import_roots=import_roots,
-            )
-            if not root_access_ok:
-                # 兜底：看板归属等特殊情况仍走完整权限
-                root_access_ok = user_can_access_excel_media_path(request.user, folder_root)
+        root_access_ok = bool(getattr(request.user, 'is_authenticated', False))
         owned_paths = set()
         if not is_super:
             oq = ImportedMediaPath.objects.filter(user=request.user)
@@ -2704,16 +2767,8 @@ def excel_browse(request):
         if p.is_dir():
             nm = p.name.strip().upper()
             is_asin_dir = re.match(r'^B0[A-Z0-9]{8}$', nm) is not None
-            if not is_super:
-                if rel == '':
-                    if not is_asin_dir:
-                        continue
-                    if nm not in assigned_set and nm not in import_roots:
-                        continue
-                elif not root_access_ok:
-                    continue
             uploaders_list = sorted(uploaders_by_asin.get(nm, [])) if is_asin_dir else []
-            assignees = assign_map.get(nm, []) if is_asin_dir else []
+            vinfo = verify_map.get(nm) or {} if is_asin_dir else {}
             updated_at = updated_map.get(nm)
             updated_label = timezone.localtime(updated_at).strftime('%Y-%m-%d %H:%M:%S') if updated_at else ''
             if is_asin_dir:
@@ -2727,9 +2782,8 @@ def excel_browse(request):
                     'type': 'dir',
                     'calculated': bool(is_asin_dir and nm in dashboard_asins),
                     'is_asin_dir': bool(is_asin_dir),
-                    'assigned': bool(assignees),
-                    'assignees': assignees,
-                    'roi_verified': bool(is_asin_dir and nm in roi_verified_asins),
+                    'roi_verified': bool(vinfo.get('my_verified')),
+                    'roi_verify_labels': vinfo.get('labels') or '—',
                     'updated_at': updated_label,
                     'updated_at_ts': int(updated_at.timestamp() * 1000) if updated_at else 0,
                     'imported_by_me': bool(is_asin_dir and nm in import_roots),
@@ -2738,8 +2792,6 @@ def excel_browse(request):
                 }
             )
         else:
-            if not is_super and not root_access_ok:
-                continue
             try:
                 st = p.stat()
                 size = st.st_size
@@ -2753,8 +2805,8 @@ def excel_browse(request):
                 'size': size,
                 'calculated': None,
                 'is_asin_dir': False,
-                'assigned': False,
-                'assignees': [],
+                'roi_verified': False,
+                'roi_verify_labels': '—',
                 'updated_at': '',
                 'updated_at_ts': 0,
                 'imported_by_me': bool(child_rel in owned_paths),
@@ -3148,7 +3200,16 @@ def excel_load_media(request):
         parent = path.parent.name.strip().upper()
         if re.match(r'^B0[A-Z0-9]{8}$', parent):
             a = normalize_asin(parent)
-            payload['roi_pack_verified'] = AsinRoiPackVerification.objects.filter(asin=a).exists()
+            from .marketplace import MARKETPLACE_US, get_marketplace, normalize_marketplace
+
+            mp = normalize_marketplace(get_marketplace(request)) or MARKETPLACE_US
+            payload['roi_pack_verified'] = AsinRoiPackVerification.objects.filter(
+                user=request.user, asin=a, marketplace=mp
+            ).exists()
+            labels = verification_labels_for_asins(
+                {a}, marketplace=mp, viewer_id=request.user.id
+            ).get(a, {})
+            payload['roi_pack_verify_labels'] = labels.get('labels') or '—'
     payload['ok'] = True
     payload['path'] = rel
     return JsonResponse(payload)
@@ -3424,7 +3485,7 @@ def excel_recalc_roi_media(request):
 @login_required
 @require_POST
 def excel_confirm_roi_verify(request):
-    """在 ROI-US-pack 编辑器中确认校验：将对应 ASIN 在看板与数据审核中标记为「是」。"""
+    """在 ROI-US-pack 编辑器中确认校验：按当前用户写入校验记录。"""
     try:
         payload = json.loads(request.body.decode('utf-8'))
     except json.JSONDecodeError:
@@ -3445,50 +3506,24 @@ def excel_confirm_roi_verify(request):
     if not re.match(r'^B0[A-Z0-9]{8}$', parent):
         return JsonResponse({'ok': False, 'error': '文件须位于 ASIN 文件夹下'}, status=400)
     asin = normalize_asin(parent)
-    AsinRoiPackVerification.objects.update_or_create(
-        asin=asin,
-        defaults={'verified_by': request.user},
-    )
+    from .marketplace import MARKETPLACE_US, get_marketplace, normalize_marketplace
+
+    mp = normalize_marketplace(get_marketplace(request)) or MARKETPLACE_US
+    mark_asins_verified(request.user, [asin], marketplace=mp)
     return JsonResponse({'ok': True, 'asin': asin})
 
 
 @login_required
 @require_POST
 def excel_assign_folders(request):
-    """超级管理员：将 ASIN 文件夹分配给若干用户（覆盖该 ASIN 下的分配名单）。"""
-    if not _require_superuser_for_excel_audit(request):
-        return JsonResponse({'ok': False, 'error': '无权限'}, status=403)
-    try:
-        body = json.loads(request.body.decode('utf-8'))
-    except json.JSONDecodeError:
-        return JsonResponse({'ok': False, 'error': '无效的 JSON'}, status=400)
-    asins_raw = body.get('asins') or []
-    user_ids = body.get('user_ids') or []
-    if not isinstance(asins_raw, list) or not asins_raw:
-        return JsonResponse({'ok': False, 'error': '缺少 asins'}, status=400)
-    if not isinstance(user_ids, list):
-        user_ids = []
-    uid_set = {int(x) for x in user_ids if str(x).isdigit()}
-    users = list(User.objects.filter(pk__in=uid_set, is_active=True))
-    updated, assignee_labels = bulk_assign_asin_folders(
-        asins_raw,
-        users,
-        assigned_by=request.user,
-    )
-    bust_excel_browse_cache()
-    return JsonResponse(
-        {
-            'ok': True,
-            'updated': updated,
-            'assignee_labels': assignee_labels,
-        }
-    )
+    """已废弃：分配功能已取消。"""
+    return JsonResponse({'ok': False, 'error': '分配功能已取消'}, status=410)
 
 
 @login_required
 @require_POST
 def dashboard_export_excel(request):
-    """导出勾选看板行为 Excel（本人数据 + 已分配共享行）。"""
+    """导出勾选看板行为 Excel。"""
     from .marketplace import MARKETPLACE_US, get_marketplace, normalize_marketplace
 
     ids = [int(x) for x in request.POST.getlist('row_ids') if str(x).isdigit()]
@@ -3505,11 +3540,16 @@ def dashboard_export_excel(request):
     if not rows:
         messages.error(request, '没有可导出的数据。')
         return redirect('index')
-    label_map = _assignment_label_map({normalize_asin(r.asin) for r in rows})
+    asins = {normalize_asin(r.asin) for r in rows}
+    verify_map = verification_labels_for_asins(
+        asins, marketplace=mp, viewer_id=request.user.id
+    )
+    passed_set = passed_asins_on_page(asins, marketplace=mp)
     headers = [
         'ASIN',
         '数据归属用户',
-        '分配人',
+        '已校验用户',
+        '已通过',
         '去广告毛利率%',
         '去广告投产比%',
         '体量',
@@ -3525,12 +3565,16 @@ def dashboard_export_excel(request):
     ws.append(headers)
     for r in rows:
         ak = normalize_asin(r.asin)
-        assign_txt = label_map.get(ak) or ''
+        info = verify_map.get(ak) or {}
+        labels = info.get('labels') or ''
+        if labels == '—':
+            labels = ''
         ws.append(
             [
                 r.asin,
                 r.user.username if r.user_id else '',
-                assign_txt,
+                labels,
+                '是' if ak in passed_set else '否',
                 round(r.profit_margin, 2) if r.profit_margin is not None else '',
                 round(r.ad_removed_roi, 2) if r.ad_removed_roi is not None else '',
                 int(r.monthly_results) if r.monthly_results is not None else '',

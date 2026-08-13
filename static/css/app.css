@@ -602,6 +602,35 @@ body.body-guest .main {
   color: #991b1b;
 }
 
+.sif-auth-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  padding: 0.65rem 1.1rem;
+  font-size: 0.9rem;
+  line-height: 1.4;
+  border-bottom: 1px solid transparent;
+}
+.sif-auth-banner strong {
+  font-weight: 650;
+}
+.sif-auth-banner a {
+  margin-left: auto;
+  font-weight: 600;
+  text-decoration: underline;
+}
+.sif-auth-banner--expired {
+  background: #fef2f2;
+  color: #991b1b;
+  border-bottom-color: #fecaca;
+}
+.sif-auth-banner--expiring_soon {
+  background: #fffbeb;
+  color: #92400e;
+  border-bottom-color: #fde68a;
+}
+
 .excel-toolbar {
   display: flex;
   flex-direction: column;
@@ -1908,10 +1937,49 @@ body.fs-excel-studio-open.fs-body .site-header {
 }
 
 .fs-table-wrap {
+  position: relative;
   border: 1px solid #e5e6eb;
   border-radius: 8px;
   overflow: hidden;
   background: #fff;
+  min-height: 240px;
+}
+
+.fs-table-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.85rem;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(1px);
+}
+
+.fs-table-loading[hidden] {
+  display: none !important;
+}
+
+.fs-table-loading__spinner {
+  width: 42px;
+  height: 42px;
+  border: 3px solid #e2e8f0;
+  border-top-color: #2563eb;
+  border-radius: 50%;
+  animation: fs-spin 0.8s linear infinite;
+}
+
+@keyframes fs-spin {
+  to { transform: rotate(360deg); }
+}
+
+.fs-table-loading__text {
+  margin: 0;
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: #475569;
 }
 
 .fs-table {

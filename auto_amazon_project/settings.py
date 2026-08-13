@@ -70,6 +70,7 @@ TEMPLATES = [
                 'django.contrib.messages.context_processors.messages',
                 'auto_amazon.context_processors.wizard_job_context',
                 'auto_amazon.context_processors.marketplace_context',
+                'auto_amazon.context_processors.sif_auth_alert_context',
             ],
         },
     },
@@ -141,7 +142,16 @@ STATICFILES_DIRS = [
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 MEDIA_URL = 'media/'
-MEDIA_ROOT = BASE_DIR / 'media'
+MEDIA_ROOT = Path(os.environ.get('MEDIA_ROOT', str(BASE_DIR / 'media'))).expanduser().resolve()
+
+# ASIN 产品主图目录（与 media/file 同类持久化数据，部署时随 MEDIA 卷挂载即可）
+# 可用环境变量 ASIN_IMAGES_ROOT 单独映射到服务器其它路径
+_asin_images_env = (os.environ.get('ASIN_IMAGES_ROOT') or '').strip()
+ASIN_IMAGES_ROOT = (
+    Path(_asin_images_env).expanduser().resolve()
+    if _asin_images_env
+    else (MEDIA_ROOT / 'images')
+)
 
 # 数据审核 ZIP 导入：分片单请求体积（整包约 500MB 由多片组成，避免单次读入内存过大）
 DATA_UPLOAD_MAX_MEMORY_SIZE = 64 * 1024 * 1024

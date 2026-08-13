@@ -26,6 +26,7 @@ urlpatterns = [
     path('compute-roi/', views.compute_roi_page, name='compute_roi'),
     path('auto-roi/', views_auto.auto_roi_page, name='auto_roi'),
     path('auto-roi/status/', views_auto.auto_roi_status, name='auto_roi_status'),
+    path('auto-roi/logs/', views_auto.auto_roi_logs, name='auto_roi_logs'),
     path('auto-roi/start/', views_auto.auto_roi_start, name='auto_roi_start'),
     path('auto-roi/pause/', views_auto.auto_roi_pause, name='auto_roi_pause'),
     path('auto-roi/stop/', views_auto.auto_roi_stop, name='auto_roi_stop'),

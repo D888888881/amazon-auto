@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from django.core.cache import cache
 from django.utils import timezone
 
-from .asin_access import normalize_asin, user_assigned_asin_codes, user_imported_asin_codes
+from .asin_access import normalize_asin, user_imported_asin_codes
 from .media_paths import media_root
 
 if TYPE_CHECKING:
@@ -106,8 +106,6 @@ def _global_asin_meta(version: str, *, marketplace: str) -> dict:
     from .models import (
         AsinDashboardRow,
         AsinDataUpdateStamp,
-        AsinFolderAssignment,
-        AsinRoiPackVerification,
         ImportedMediaPath,
     )
 
@@ -117,13 +115,9 @@ def _global_asin_meta(version: str, *, marketplace: str) -> dict:
             'asin', flat=True
         )
     }
-    roi = {normalize_asin(a) for a in AsinRoiPackVerification.objects.values_list('asin', flat=True)}
     updated = {
         normalize_asin(a): t for a, t in AsinDataUpdateStamp.objects.values_list('asin', 'updated_at')
     }
-    assign_map: dict[str, list[str]] = {}
-    for obj in AsinFolderAssignment.objects.prefetch_related('assignees').only('asin', 'id'):
-        assign_map[normalize_asin(obj.asin)] = sorted({u.username for u in obj.assignees.all()})
     uploaders: dict[str, list[str]] = defaultdict(set)
     for rpath, uname in ImportedMediaPath.objects.filter(marketplace=marketplace).values_list(
         'rel_path', 'user__username'
@@ -136,9 +130,7 @@ def _global_asin_meta(version: str, *, marketplace: str) -> dict:
             uploaders[seg].add(uname)
     hit = {
         'dashboard': dashboard,
-        'roi': roi,
         'updated': updated,
-        'assign': assign_map,
         'uploaders': {k: sorted(v) for k, v in uploaders.items()},
     }
     cache.set(key, hit, _CACHE_TTL)
@@ -150,9 +142,8 @@ def _user_root_access(user: User, *, marketplace: str | None = None) -> dict:
     hit = cache.get(key)
     if hit is not None:
         return hit
-    assigned = {normalize_asin(a) for a in user_assigned_asin_codes(user)}
     imported = set(user_imported_asin_codes(user, marketplace=marketplace))
-    hit = {'assigned': assigned, 'imported': imported}
+    hit = {'assigned': set(), 'imported': imported}
     cache.set(key, hit, _CACHE_TTL)
     return hit
 
@@ -195,8 +186,7 @@ def build_root_index_items(
 
     entries = _fs_root_entries(version)
     meta = _global_asin_meta(version, marketplace=mp)
-    access = None if is_super else _user_root_access(user, marketplace=mp)
-    import_roots = access['imported'] if access else set()
+    import_roots = set() if is_super else _user_root_access(user, marketplace=mp)['imported']
     site_roots = asins_for_marketplace(mp)
 
     items: list[dict] = []
@@ -206,9 +196,6 @@ def build_root_index_items(
         nm = ent['name'].strip().upper()
         if nm not in site_roots:
             continue
-        if access is not None and nm not in access['assigned'] and nm not in import_roots:
-            continue
-        assignees = meta['assign'].get(nm, [])
         updated_at = meta['updated'].get(nm)
         updated_label = (
             timezone.localtime(updated_at).strftime('%Y-%m-%d %H:%M:%S') if updated_at else ''
@@ -219,9 +206,8 @@ def build_root_index_items(
                 'type': 'dir',
                 'calculated': nm in meta['dashboard'],
                 'is_asin_dir': True,
-                'assigned': bool(assignees),
-                'assignees': assignees,
-                'roi_verified': nm in meta['roi'],
+                'roi_verified': False,
+                'roi_verify_labels': '—',
                 'updated_at': updated_label,
                 'updated_at_ts': int(updated_at.timestamp() * 1000) if updated_at else 0,
                 'imported_by_me': nm in import_roots,
@@ -264,16 +250,6 @@ def apply_root_filters(items: list[dict], fp: dict) -> list[dict]:
                 continue
             if fp['updated_to_ms'] and ts > fp['updated_to_ms']:
                 continue
-        if fp['assign_status'] != 'all':
-            has_a = bool(it.get('assignees'))
-            if fp['assign_status'] == 'yes' and not has_a:
-                continue
-            if fp['assign_status'] == 'no' and has_a:
-                continue
-        if fp['assignee']:
-            names = it.get('assignees') or []
-            if fp['assignee'] not in names:
-                continue
         if fp['uploaded_by']:
             upl = set(it.get('uploaders') or [])
             if fp['uploaded_by'] not in upl:
@@ -294,10 +270,9 @@ def enrich_root_page_delete_flags(
             it['can_delete'] = True
         return
     owned = _user_owned_root_asins(user, marketplace=marketplace)
-    assigned = {normalize_asin(a) for a in user_assigned_asin_codes(user)}
     for it in items:
         nm = str(it.get('name') or '').strip().upper()
-        it['can_delete'] = nm in owned or nm in assigned
+        it['can_delete'] = nm in owned
 
 
 def build_root_page(
@@ -311,18 +286,18 @@ def build_root_page(
 ) -> tuple[list[dict], int]:
     """
     按页构建审核根目录（基于 MarketplaceAsinRoot），避免先建全量索引再切片。
-    返回 (page_items, total)。
+    返回 (page_items, total)。登录用户可见当前站点全部 ASIN。
     """
     from datetime import datetime
 
     from django.contrib.auth.models import User as AuthUser
-    from django.db.models import Count, Exists, F, OuterRef, Q, Subquery
+    from django.db.models import Exists, F, OuterRef, Q, Subquery
 
+    from .asin_verify_pass import verification_labels_for_asins
     from .marketplace import MARKETPLACE_US, normalize_marketplace
     from .models import (
         AsinDashboardRow,
         AsinDataUpdateStamp,
-        AsinFolderAssignment,
         AsinRoiPackVerification,
         ImportedMediaPath,
         MarketplaceAsinRoot,
@@ -330,13 +305,6 @@ def build_root_page(
 
     mp = normalize_marketplace(marketplace) or MARKETPLACE_US
     qs = MarketplaceAsinRoot.objects.filter(marketplace=mp)
-
-    if not is_super:
-        access = _user_root_access(user, marketplace=mp)
-        allowed = access['assigned'] | access['imported']
-        if not allowed:
-            return [], 0
-        qs = qs.filter(asin__in=allowed)
 
     q = (fp.get('q') or '').strip()
     if q:
@@ -347,15 +315,14 @@ def build_root_page(
             AsinDashboardRow.objects.filter(asin=OuterRef('asin'), marketplace=mp)
         ),
         roi_verified=Exists(
-            AsinRoiPackVerification.objects.filter(asin=OuterRef('asin'))
+            AsinRoiPackVerification.objects.filter(
+                user_id=user.id,
+                asin=OuterRef('asin'),
+                marketplace=mp,
+            )
         ),
         stamp_at=Subquery(
             AsinDataUpdateStamp.objects.filter(asin=OuterRef('asin')).values('updated_at')[:1]
-        ),
-        assign_count=Subquery(
-            AsinFolderAssignment.objects.filter(asin=OuterRef('asin'))
-            .annotate(n=Count('assignees'))
-            .values('n')[:1]
         ),
     )
 
@@ -370,18 +337,6 @@ def build_root_page(
         qs = qs.filter(roi_verified=True)
     elif roi_f == 'no':
         qs = qs.filter(roi_verified=False)
-
-    assign_status = fp.get('assign_status') or 'all'
-    if assign_status == 'yes':
-        qs = qs.filter(assign_count__gt=0)
-    elif assign_status == 'no':
-        qs = qs.filter(Q(assign_count__isnull=True) | Q(assign_count=0))
-
-    if fp.get('assignee'):
-        asins = AsinFolderAssignment.objects.filter(
-            assignees__username=fp['assignee']
-        ).values_list('asin', flat=True)
-        qs = qs.filter(asin__in=asins)
 
     if fp.get('uploaded_by'):
         upl = AuthUser.objects.filter(username=fp['uploaded_by'], is_active=True).first()
@@ -411,14 +366,9 @@ def build_root_page(
     page_asins = [normalize_asin(r.asin) for r in page_rows]
     page_asin_set = set(page_asins)
 
-    assign_map: dict[str, list[str]] = {}
-    if page_asins:
-        for obj in AsinFolderAssignment.objects.filter(asin__in=page_asins).prefetch_related(
-            'assignees'
-        ):
-            assign_map[normalize_asin(obj.asin)] = sorted(
-                {u.username for u in obj.assignees.all()}
-            )
+    verify_map = verification_labels_for_asins(
+        page_asin_set, marketplace=mp, viewer_id=user.id
+    )
 
     uploaders: dict[str, list[str]] = defaultdict(set)
     if page_asins:
@@ -445,16 +395,15 @@ def build_root_page(
         updated_label = (
             timezone.localtime(updated_at).strftime('%Y-%m-%d %H:%M:%S') if updated_at else ''
         )
-        assignees = assign_map.get(nm, [])
+        vinfo = verify_map.get(nm) or {}
         items.append(
             {
                 'name': nm,
                 'type': 'dir',
                 'calculated': bool(getattr(r, 'calculated', False)),
                 'is_asin_dir': True,
-                'assigned': bool(assignees),
-                'assignees': assignees,
-                'roi_verified': bool(getattr(r, 'roi_verified', False)),
+                'roi_verified': bool(vinfo.get('my_verified')),
+                'roi_verify_labels': vinfo.get('labels') or '—',
                 'updated_at': updated_label,
                 'updated_at_ts': int(updated_at.timestamp() * 1000) if updated_at else 0,
                 'imported_by_me': nm in import_roots,

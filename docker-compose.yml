@@ -90,7 +90,6 @@ services:
 
       - media_data:/app/media
 
-      - ./scripts/asin_find_project/images:/app/scripts/asin_find_project/images
 
       - ./scripts/asin_find_project/config_file:/app/scripts/asin_find_project/config_file
 
@@ -152,7 +151,6 @@ services:
 
       - media_data:/app/media
 
-      - ./scripts/asin_find_project/images:/app/scripts/asin_find_project/images
 
       - ./scripts/asin_find_project/config_file:/app/scripts/asin_find_project/config_file
 
@@ -218,7 +216,6 @@ services:
 
       - media_data:/app/media
 
-      - ./scripts/asin_find_project/images:/app/scripts/asin_find_project/images
 
       - ./scripts/asin_find_project/config_file:/app/scripts/asin_find_project/config_file
 
@@ -284,7 +281,6 @@ services:
 
       - media_data:/app/media
 
-      - ./scripts/asin_find_project/images:/app/scripts/asin_find_project/images
 
       - ./scripts/asin_find_project/config_file:/app/scripts/asin_find_project/config_file
 

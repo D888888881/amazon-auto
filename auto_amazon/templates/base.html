@@ -79,6 +79,15 @@
         </form>
     </div>
 </header>
+{% if sif_auth_alert %}
+<div class="sif-auth-banner sif-auth-banner--{{ sif_auth_alert.status }}" role="alert">
+    <strong>{% if sif_auth_alert.expired %}SIF JWT 已过期{% elif sif_auth_alert.expiring_soon %}SIF JWT 即将过期{% else %}SIF 凭证提醒{% endif %}</strong>
+    <span>{{ sif_auth_alert.message }}</span>
+    {% if user.is_superuser %}
+    <a href="{% url 'credentials_config' %}">去凭证配置</a>
+    {% endif %}
+</div>
+{% endif %}
 {% endif %}
 <main class="main {% block main_class %}{% endblock %}">
     {% block content %}{% endblock %}

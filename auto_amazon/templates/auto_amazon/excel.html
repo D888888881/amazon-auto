@@ -3,7 +3,6 @@
 {% block body_class %}fs-body{% endblock %}
 {% block main_class %}main--fs{% endblock %}
 {% block content %}
-<script type="application/json" id="fs-assign-users">{{ assignable_users_json|safe }}</script>
 <script type="application/json" id="fs-uploader-users">{{ uploader_users_json|safe }}</script>
 <div class="fs-workspace" id="fs-workspace">
     <button type="button" class="fs-sider-reveal" id="fs-sider-reveal" title="展开文件目录" aria-label="展开文件目录">
@@ -36,12 +35,7 @@
                         <option value="yes">已计算</option>
                         <option value="no">未计算</option>
                     </select>
-                    <select id="fs-assign-status" class="fs-input" title="按是否已分配筛选">
-                        <option value="all">分配：全部</option>
-                        <option value="yes">已分配</option>
-                        <option value="no">未分配</option>
-                    </select>
-                    <select id="fs-roi-verify-filter" class="fs-input" title="按是否校验筛选">
+                    <select id="fs-roi-verify-filter" class="fs-input" title="按我是否已校验筛选">
                         <option value="all">校验：全部</option>
                         <option value="yes">是</option>
                         <option value="no">否</option>
@@ -52,9 +46,6 @@
                     <label class="fs-page-size-label">更新止
                         <input type="datetime-local" id="fs-updated-to" class="fs-input">
                     </label>
-                    <select id="fs-assignee-filter" class="fs-input" title="按被分配人筛选">
-                        <option value="">被分配人：全部</option>
-                    </select>
                     <select id="fs-uploader-filter" class="fs-input" title="按导入上传者筛选（仅根目录 ASIN 列表）">
                         <option value="">上传者：全部</option>
                     </select>
@@ -67,12 +58,6 @@
                         </select>
                     </label>
                     <input type="number" id="fs-page-size-custom" class="fs-input fs-input--narrow" min="1" max="2000" placeholder="自定义" title="选择「自定义」时生效" style="max-width:88px;">
-                    <div id="fs-assign-panel" class="fs-assign-panel" title="勾选左侧 ASIN 文件夹后，选择用户并点击分配" {% if not is_superuser %}hidden{% endif %}>
-                        <span class="fs-assign-panel__label">分配给</span>
-                        <select id="fs-assign-users-select" style="height: 50px" class="fs-input" multiple size="5" title="可多选用户">
-                        </select>
-                        <button type="button" class="fs-btn fs-btn--primary" id="fs-btn-assign">分配选中</button>
-                    </div>
                     <select id="fs-import-marketplace" class="fs-input" title="导入 ZIP 所属站点（与导航当前站点一致，可单独改）">
                         <option value="US" {% if current_marketplace == 'US' or not current_marketplace %}selected{% endif %}>① 导入站点：美国站</option>
                         <option value="UK" {% if current_marketplace == 'UK' %}selected{% endif %}>① 导入站点：英国站</option>
@@ -92,6 +77,10 @@
                         <span class="fs-pane__meta" id="folder-meta"></span>
                     </div>
                     <div class="fs-table-wrap">
+                        <div class="fs-table-loading" id="fs-table-loading" aria-live="polite" aria-busy="true">
+                            <div class="fs-table-loading__spinner" aria-hidden="true"></div>
+                            <p class="fs-table-loading__text">数据加载中…</p>
+                        </div>
                         <table class="fs-table" id="folder-table">
                             <thead>
                                 <tr>
@@ -100,11 +89,9 @@
                                     <th class="fs-table__type">类型</th>
                                     <th class="fs-table__size">大小</th>
                                     <th class="fs-table__size" style="width: 300px">是否计算</th>
-                                    <th class="fs-table__assign">是否已分配</th>
-                                    <th class="fs-table__roi-verify">是否校验</th>
+                                    <th class="fs-table__roi-verify">已校验用户</th>
                                     <th class="fs-table__updated-at">更新时间</th>
                                     <th class="fs-table__uploaders">上传者</th>
-                                    <th class="fs-table__assignees">分配给</th>
                                 </tr>
                             </thead>
                             <tbody id="folder-tbody"></tbody>
@@ -151,7 +138,6 @@
   const batchZipUrl = '{% url "excel_batch_download" %}';
   const chunkUrl = '{% url "excel_import_chunk" %}';
   const commitUrl = '{% url "excel_import_commit" %}';
-  const assignUrl = '{% url "excel_assign_folders" %}';
   const csrftoken = '{{ csrf_token }}';
   /** 单分片大小（4MB），整包由多请求顺序上传 */
   const IMPORT_CHUNK_SIZE = 4 * 1024 * 1024;
@@ -190,17 +176,26 @@
   const bcEl = document.getElementById('fs-bc');
   const fsSelectAll = document.getElementById('fs-select-all');
   const paginationEl = document.getElementById('fs-pagination');
+  const tableLoadingEl = document.getElementById('fs-table-loading');
+
+  function setTableLoading(on, msg) {
+    if (!tableLoadingEl) return;
+    tableLoadingEl.hidden = !on;
+    tableLoadingEl.setAttribute('aria-busy', on ? 'true' : 'false');
+    var textEl = tableLoadingEl.querySelector('.fs-table-loading__text');
+    if (textEl) textEl.textContent = msg || '数据加载中…';
+    if (on) {
+      if (folderEmpty) folderEmpty.hidden = true;
+      if (paginationEl) paginationEl.hidden = true;
+    }
+  }
   const asinSearchEl = document.getElementById('fs-asin-search');
   const calcFilterEl = document.getElementById('fs-calc-filter');
   const roiVerifyFilterEl = document.getElementById('fs-roi-verify-filter');
   const updatedFromEl = document.getElementById('fs-updated-from');
   const updatedToEl = document.getElementById('fs-updated-to');
-  const assignStatusEl = document.getElementById('fs-assign-status');
-  const assigneeFilterEl = document.getElementById('fs-assignee-filter');
   const pageSizeEl = document.getElementById('fs-page-size');
   const pageSizeCustomEl = document.getElementById('fs-page-size-custom');
-  const assignUsersSelectEl = document.getElementById('fs-assign-users-select');
-  const btnAssign = document.getElementById('fs-btn-assign');
   const uploaderFilterEl = document.getElementById('fs-uploader-filter');
   const isSuperuser = {% if is_superuser %}true{% else %}false{% endif %};
 
@@ -239,8 +234,6 @@
   var currentRoiVerifyFilter = 'all';
   var currentUpdatedFromTs = 0;
   var currentUpdatedToTs = 0;
-  var currentAssignStatus = 'all';
-  var currentAssigneePick = '';
   var currentUploadedByFilter = '';
 
   (function initUploaderFilterUsers() {
@@ -256,30 +249,6 @@
         o.value = u.username;
         o.textContent = u.username;
         sel.appendChild(o);
-      });
-    }
-  })();
-
-  (function initAssignableUsers() {
-    var rawEl = document.getElementById('fs-assign-users');
-    var list = [];
-    try {
-      if (rawEl && rawEl.textContent) list = JSON.parse(rawEl.textContent);
-    } catch (e) {}
-    if (assigneeFilterEl) {
-      list.forEach(function (u) {
-        var o = document.createElement('option');
-        o.value = u.username;
-        o.textContent = u.username;
-        assigneeFilterEl.appendChild(o);
-      });
-    }
-    if (assignUsersSelectEl) {
-      list.forEach(function (u) {
-        var o = document.createElement('option');
-        o.value = String(u.id);
-        o.textContent = u.username;
-        assignUsersSelectEl.appendChild(o);
       });
     }
   })();
@@ -362,10 +331,6 @@
       if (currentRoiVerifyFilter && currentRoiVerifyFilter !== 'all') {
         params.push('roi_verified=' + encodeURIComponent(currentRoiVerifyFilter));
       }
-      if (currentAssignStatus && currentAssignStatus !== 'all') {
-        params.push('assign_status=' + encodeURIComponent(currentAssignStatus));
-      }
-      if (currentAssigneePick) params.push('assignee=' + encodeURIComponent(currentAssigneePick));
       if (currentUpdatedFromTs > 0) {
         params.push('updated_from=' + encodeURIComponent(String(currentUpdatedFromTs)));
       }
@@ -419,10 +384,13 @@
   }
 
   function applyBrowseTableData(data) {
+    setTableLoading(false);
+    if (folderEmpty) folderEmpty.textContent = '此文件夹为空';
     if (!data.ok) {
       folderMeta.textContent = data.error || '加载失败';
       folderTbody.innerHTML = '';
       folderEmpty.hidden = false;
+      folderEmpty.textContent = data.error || '加载失败';
       return;
     }
     var ps = getPageSize();
@@ -557,27 +525,12 @@
           tdCalc.textContent = '—';
         }
         tr.appendChild(tdCalc);
-        var tdAss = document.createElement('td');
-        var tdNames = document.createElement('td');
-        if (it.is_asin_dir) {
-          var hasA = (it.assignees && it.assignees.length > 0);
-          tdAss.innerHTML = hasA
-            ? '<span class="fs-calc-badge fs-calc-badge--yes">是</span>'
-            : '<span class="fs-calc-badge fs-calc-badge--no">否</span>';
-          tdNames.textContent = (it.assignees && it.assignees.length) ? it.assignees.join('、') : '—';
-          tdNames.className = 'fs-table__assignees-cell';
-        } else {
-          tdAss.textContent = '—';
-          tdNames.textContent = '—';
-        }
-        tr.appendChild(tdAss);
         var tdRoiV = document.createElement('td');
         tdRoiV.className = 'fs-table__roi-verify-cell';
         if (it.is_asin_dir) {
-          var rv = document.createElement('span');
-          rv.className = it.roi_verified ? 'fs-calc-badge fs-calc-badge--yes' : 'fs-calc-badge fs-calc-badge--no';
-          rv.textContent = it.roi_verified ? '是' : '否';
-          tdRoiV.appendChild(rv);
+          var labels = it.roi_verify_labels || (it.roi_verified ? '是' : '—');
+          tdRoiV.textContent = labels;
+          tdRoiV.title = it.roi_verified ? '我已校验' : '我未校验';
         } else {
           tdRoiV.textContent = '—';
         }
@@ -590,7 +543,6 @@
         tdUpl.className = 'fs-table__uploaders-cell';
         tdUpl.textContent = formatUploaders(it.uploaders);
         tr.appendChild(tdUpl);
-        tr.appendChild(tdNames);
         tr.style.cursor = 'pointer';
         tr.addEventListener('click', function () {
           document.querySelectorAll('.fs-table__row--active').forEach(function (x) {
@@ -616,13 +568,10 @@
         tr.appendChild(tdSize);
         tr.appendChild(document.createElement('td')).textContent = '—';
         tr.appendChild(document.createElement('td')).textContent = '—';
-        tr.appendChild(document.createElement('td')).textContent = '—';
-        tr.appendChild(document.createElement('td')).textContent = '—';
         var tdUplF = document.createElement('td');
         tdUplF.className = 'fs-table__uploaders-cell';
         tdUplF.textContent = formatUploaders(it.uploaders);
         tr.appendChild(tdUplF);
-        tr.appendChild(document.createElement('td')).textContent = '—';
         tr.style.cursor = 'pointer';
         tr.addEventListener('click', function () {
           document.querySelectorAll('.fs-table__row--active').forEach(function (x) {
@@ -682,23 +631,21 @@
       var offset = (currentPage - 1) * ps;
       var seq = ++browseTableSeq;
       folderMeta.textContent = '加载中…';
+      setTableLoading(true);
       return fetchBrowse('', { limit: ps, offset: offset }).then(function (data) {
         if (seq !== browseTableSeq) return;
         applyBrowseTableData(data);
+      }).catch(function () {
+        if (seq !== browseTableSeq) return;
+        setTableLoading(false);
+        folderMeta.textContent = '加载失败';
+        folderTbody.innerHTML = '';
+        folderEmpty.hidden = false;
+        folderEmpty.textContent = '加载失败，请刷新重试';
       });
     }
-    var filtered = currentFolderItems.filter(function (it) {
-      if (currentAssignStatus !== 'all' && it.is_asin_dir) {
-        var hasA = (it.assignees && it.assignees.length > 0);
-        if (currentAssignStatus === 'yes' && !hasA) return false;
-        if (currentAssignStatus === 'no' && hasA) return false;
-      }
-      if (currentAssigneePick && it.is_asin_dir) {
-        var names = it.assignees || [];
-        if (names.indexOf(currentAssigneePick) < 0) return false;
-      }
-      return true;
-    });
+    setTableLoading(false);
+    var filtered = currentFolderItems;
     var total = filtered.length;
     var ps = getPageSize();
     var totalPages = Math.max(1, Math.ceil(total / ps));
@@ -723,8 +670,12 @@
       renderFolderPage(1);
       return;
     }
+    folderMeta.textContent = '加载中…';
+    setTableLoading(true);
+    folderTbody.innerHTML = '';
     fetchBrowse(rel).then(function (data) {
       if (!data.ok) {
+        setTableLoading(false);
         folderMeta.textContent = data.error || '加载失败';
         folderTbody.innerHTML = '';
         folderEmpty.hidden = false;
@@ -733,6 +684,11 @@
       currentBrowseTotal = 0;
       currentFolderItems = data.items || [];
       renderFolderPage(1);
+    }).catch(function () {
+      setTableLoading(false);
+      folderMeta.textContent = '加载失败';
+      folderEmpty.hidden = false;
+      folderEmpty.textContent = '加载失败，请刷新重试';
     });
   }
 
@@ -1138,11 +1094,18 @@
       folderTitle.textContent = 'file';
       if (fsSelectAll) fsSelectAll.checked = false;
       folderMeta.textContent = '加载中…';
+      setTableLoading(true);
       currentPage = 1;
       var ps = getPageSize();
       if (ps === browseBatchSize) {
         bootPromise.then(function (data) {
           if (seqGuard()) applyBrowseTableData(data);
+        }).catch(function () {
+          if (!seqGuard()) return;
+          setTableLoading(false);
+          folderMeta.textContent = '加载失败';
+          folderEmpty.hidden = false;
+          folderEmpty.textContent = '加载失败，请刷新重试';
         });
       } else {
         renderFolderPage(1);
@@ -1211,20 +1174,6 @@
       else renderFolderPage(1);
     });
   }
-  if (assignStatusEl) {
-    assignStatusEl.addEventListener('change', function () {
-      currentAssignStatus = assignStatusEl.value || 'all';
-      if (currentFolderRel === '') refreshRootBrowse();
-      else renderFolderPage(1);
-    });
-  }
-  if (assigneeFilterEl) {
-    assigneeFilterEl.addEventListener('change', function () {
-      currentAssigneePick = String(assigneeFilterEl.value || '');
-      if (currentFolderRel === '') refreshRootBrowse();
-      else renderFolderPage(1);
-    });
-  }
   if (uploaderFilterEl) {
     uploaderFilterEl.addEventListener('change', function () {
       currentUploadedByFilter = String(uploaderFilterEl.value || '').trim();
@@ -1239,66 +1188,6 @@
   if (pageSizeCustomEl) {
     pageSizeCustomEl.addEventListener('change', function () {
       renderFolderPage(1);
-    });
-  }
-  if (btnAssign && assignUsersSelectEl) {
-    btnAssign.addEventListener('click', function () {
-      if (!isSuperuser) return;
-      var dirs = [];
-      folderTbody.querySelectorAll('.fs-row-check:checked').forEach(function (cb) {
-        if (cb.getAttribute('data-entry-type') === 'dir') {
-          var r = cb.getAttribute('data-rel') || '';
-          var segs = r.split('/');
-          var leaf = segs[segs.length - 1] || '';
-          if (/^B0[A-Z0-9]{8}$/i.test(leaf)) dirs.push(leaf.toUpperCase());
-        }
-      });
-      if (!dirs.length) {
-        alert('请勾选 ASIN 文件夹（名称形如 B0XXXXXXXX）后再分配。');
-        return;
-      }
-      var uids = Array.prototype.slice.call(assignUsersSelectEl.selectedOptions || []).map(function (i) {
-        return Number(i.value);
-      });
-      if (!uids.length) {
-        alert('请至少选择一名用户。');
-        return;
-      }
-      var prevLabel = btnAssign.textContent;
-      btnAssign.disabled = true;
-      btnAssign.textContent = '分配中…（' + dirs.length + ' 个 ASIN）';
-      fetch(assignUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrftoken },
-        body: JSON.stringify({ asins: dirs, user_ids: uids }),
-        credentials: 'same-origin',
-      })
-        .then(function (r) {
-          return readJsonResponse(r);
-        })
-        .then(function (data) {
-          if (!data.ok) throw new Error(data.error || '分配失败');
-          var labels = data.assignee_labels || [];
-          var asinSet = {};
-          dirs.forEach(function (d) {
-            asinSet[d] = true;
-          });
-          currentFolderItems.forEach(function (it) {
-            if (it.is_asin_dir && asinSet[(it.name || '').toUpperCase()]) {
-              it.assignees = labels.slice();
-              it.assigned = labels.length > 0;
-            }
-          });
-          renderFolderPage(currentPage);
-          alert('已更新 ' + (data.updated != null ? data.updated : dirs.length) + ' 个 ASIN 的分配。');
-        })
-        .catch(function (e) {
-          alert(e.message || String(e));
-        })
-        .finally(function () {
-          btnAssign.disabled = false;
-          btnAssign.textContent = prevLabel;
-        });
     });
   }
 })();

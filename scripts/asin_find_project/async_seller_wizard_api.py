@@ -32,8 +32,34 @@ from wizard_progress import emit_progress
 # 本地数据根目录：相对本脚本所在目录的 file/，避免「在别的 cwd 运行脚本」时扫不到 Excel
 # FILE_DATA_ROOT = Path(r"E:\py_projiect\auto_amazon_project\media\file")
 SCRIPT_DIR = Path(__file__).resolve().parent
-IMAGES_DIR = SCRIPT_DIR / "images"
-FILE_DATA_ROOT = SCRIPT_DIR.parent.parent / "media" / "file"
+PROJECT_ROOT = SCRIPT_DIR.parent.parent
+FILE_DATA_ROOT = PROJECT_ROOT / "media" / "file"
+# 旧主图目录（仅读取兼容）；新图写入 media/images 或 ASIN_IMAGES_ROOT
+_LEGACY_IMAGES_DIR = SCRIPT_DIR / "images"
+
+
+def resolve_asin_images_dir() -> Path:
+    """ASIN 主图目录：优先环境变量 / Django settings，默认 media/images。"""
+    env = (os.environ.get("ASIN_IMAGES_ROOT") or "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+    try:
+        from django.conf import settings
+
+        if getattr(settings, "configured", False):
+            root = getattr(settings, "ASIN_IMAGES_ROOT", None)
+            if root:
+                return Path(root).resolve()
+            media = getattr(settings, "MEDIA_ROOT", None)
+            if media:
+                return (Path(media) / "images").resolve()
+    except Exception:
+        pass
+    return (PROJECT_ROOT / "media" / "images").resolve()
+
+
+# 兼容旧引用名；运行时请用 resolve_asin_images_dir()，避免 import 时 Django 未就绪
+IMAGES_DIR = PROJECT_ROOT / "media" / "images"
 
 # SIF 无 ASIN 数据时的广告指标默认值
 SIF_DEFAULT_AD_CPC = 1.0
@@ -91,13 +117,17 @@ def resolve_sif_ad_metrics(
         ad_cpc = SIF_DEFAULT_AD_CPC
         used_defaults = True
 
+    # SIF 偶发返回百分数（如 10 表示 10%），统一成 0~1 小数
     conversion_rate = _positive_float_or_none(cpc_info.get('clickPurchaseRatio'))
+    if conversion_rate is not None and conversion_rate > 1:
+        conversion_rate = conversion_rate / 100.0
     if conversion_rate is None:
         conversion_rate = SIF_DEFAULT_CONVERSION_RATE
         used_defaults = True
 
     if daily_orders > 0 and conversion_rate > 0:
-        ad_clicks = daily_orders / conversion_rate * 0.5
+        # 总流量中广告占比 7、自然流量占比 3
+        ad_clicks = daily_orders / conversion_rate * 0.7
     else:
         ad_clicks = None
     if ad_clicks is None or ad_clicks <= 0:
@@ -1739,9 +1769,18 @@ async def collect_node_label_paths(
     return asin_to_path
 
 
-def asin_image_file(asin: str) -> Path:
-    """ASIN 主图绝对路径：scripts/asin_find_project/images/<ASIN>.jpg"""
-    return IMAGES_DIR / f"{str(asin).strip().upper()}.jpg"
+def asin_image_file(asin: str, *, for_write: bool = False) -> Path:
+    """ASIN 主图路径：写入 media/images（或 ASIN_IMAGES_ROOT）；读取时可回退旧目录。"""
+    name = f"{str(asin).strip().upper()}.jpg"
+    primary = resolve_asin_images_dir() / name
+    if for_write:
+        return primary
+    if primary.is_file():
+        return primary
+    legacy = _LEGACY_IMAGES_DIR / name
+    if legacy.is_file():
+        return legacy
+    return primary
 
 
 def _parse_unit_purchase_cell(raw) -> float | None:
@@ -2205,9 +2244,9 @@ async def save_roi_us_pack(nodeLabelPath: str,
     else:
         total_traffic = None
 
-    # 日自然流量
+    # 日自然流量（总流量的 30%；广告点击为 70%）
     if total_traffic is not None:
-        daily_natural_traffic = total_traffic * 0.5
+        daily_natural_traffic = total_traffic * 0.3
     else:
         daily_natural_traffic = None
 
@@ -2584,13 +2623,15 @@ async def get_month_number(asin_list: list, data_nested: dict, key_list: dict):
     return asin_month
 
 
-# 并发下载图片到本地（绝对路径：scripts/asin_find_project/images/<ASIN>.jpg）
+# 并发下载图片到本地（绝对路径：media/images/<ASIN>.jpg，可用 ASIN_IMAGES_ROOT 覆盖）
 async def download_one(asin, info, *, retries: int = 2):
-    IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-    local_path = asin_image_file(asin)
-    if local_path.is_file():
-        print(f"图片已存在: {local_path}")
-        return str(local_path)
+    images_dir = resolve_asin_images_dir()
+    images_dir.mkdir(parents=True, exist_ok=True)
+    existing = asin_image_file(asin)
+    if existing.is_file():
+        print(f"图片已存在: {existing}")
+        return str(existing)
+    local_path = asin_image_file(asin, for_write=True)
 
     image_url = (info or {}).get('imageUrl') if isinstance(info, dict) else None
     if not image_url:
@@ -3197,14 +3238,80 @@ async def _seller_wizard_main_body(
         asin_to_image_path = await _download_asin_images(asin_info_dict, asin_to_image_path)
 
     # 2. SIF：CPC 等（关键词以本地扫描为准；英国站 country=UK）
+    emit_progress(f'正在请求 SIF 广告 CPC / 转化率（站点 {mp}，{len(target_asins)} 个 ASIN）…')
     try:
+        # Django 侧解析 authorization JWT exp；过期则直接失败，避免整批默默用 $1/10%
+        try:
+            from django.conf import settings as dj_settings
+
+            base = Path(getattr(dj_settings, 'BASE_DIR', Path.cwd()))
+            auth_path = base / 'scripts' / 'asin_find_project' / 'config_file' / 'sif_authorization.txt'
+            if auth_path.is_file():
+                import base64
+                import json
+                from datetime import datetime, timezone as dt_tz
+
+                jwt = auth_path.read_text(encoding='utf-8').strip()
+                if jwt.count('.') >= 2:
+                    payload_b64 = jwt.split('.')[1]
+                    pad = '=' * (-len(payload_b64) % 4)
+                    payload = json.loads(base64.urlsafe_b64decode(payload_b64 + pad).decode('utf-8'))
+                    exp_ts = int(payload.get('exp') or 0)
+                    if exp_ts > 0:
+                        left = exp_ts - int(datetime.now(tz=dt_tz.utc).timestamp())
+                        exp_label = datetime.fromtimestamp(exp_ts).strftime('%Y-%m-%d %H:%M:%S')
+                        if left <= 0:
+                            msg = (
+                                f'SIF authorization（JWT）已过期（到期 {exp_label}）。'
+                                '请到「凭证配置」更新 JWT 并刷新 Token 后重试；'
+                                '本次不会继续用默认 $1/10% 掩盖问题。'
+                            )
+                            emit_progress(msg)
+                            raise RuntimeError(msg)
+                        if left <= 48 * 3600:
+                            emit_progress(
+                                f'警告：SIF JWT 将在约 {max(1, left // 3600)} 小时内过期（{exp_label}），请尽快更新'
+                            )
+        except RuntimeError:
+            raise
+        except Exception as e:
+            emit_progress(f'SIF JWT 到期检查跳过：{e}')
+
         async with async_api_slot('sif'):
             asin_cpc, _ = await async_sif_api.sif_main(target_asins, country=mp)
     except Exception as e:
-        print(f"警告: SIF CPC 获取失败，广告 CPC 将使用默认值: {e}")
+        emit_progress(f'SIF CPC 获取失败：{e}')
+        print(f"警告: SIF CPC 获取失败: {e}")
+        # JWT 过期属于配置错误，整批中止，避免自动/手动 ROI 静默默认值
+        err_s = str(e)
+        if 'JWT' in err_s or 'authorization' in err_s.lower() or '已过期' in err_s:
+            raise
+        emit_progress(f'SIF 失败，将使用默认 CPC=$1 / 转化率=10%：{e}')
         asin_cpc = []
     if not isinstance(asin_cpc, list):
         asin_cpc = []
+    sif_ok = 0
+    for item in asin_cpc:
+        if not isinstance(item, dict):
+            continue
+        for _k, info in item.items():
+            if not isinstance(info, dict):
+                continue
+            cpc = info.get('cpc') if isinstance(info.get('cpc'), dict) else {}
+            med = cpc.get('median')
+            ratio = info.get('clickPurchaseRatio')
+            try:
+                if (med is not None and float(med) > 0) or (
+                    ratio is not None and float(ratio) > 0
+                ):
+                    sif_ok += 1
+                    break
+            except (TypeError, ValueError):
+                pass
+    emit_progress(
+        f'SIF 结果：{sif_ok}/{len(target_asins)} 个 ASIN 有可用 CPC/转化率'
+        + ('（其余将用默认 $1 / 10%）' if sif_ok < len(target_asins) else '')
+    )
 
     asin_path_dict = await collect_node_label_paths(keyword_dict, nested_result, target_asins)
 

@@ -58,6 +58,163 @@ def read_sif_authorization() -> str:
 
 def write_sif_authorization(value: str) -> None:
     _write_text(sif_authorization_path(), value)
+    try:
+        from django.core.cache import cache
+
+        cache.delete('sif:jwt_alert:v1')
+    except Exception:
+        pass
+
+
+def decode_jwt_payload(token: str | None) -> dict | None:
+    """解码 JWT payload（不验签）；失败返回 None。"""
+    import base64
+    import json
+
+    raw = (token or '').strip()
+    if not raw or raw.count('.') < 2:
+        return None
+    try:
+        payload_b64 = raw.split('.')[1]
+        pad = '=' * (-len(payload_b64) % 4)
+        data = base64.urlsafe_b64decode(payload_b64 + pad)
+        obj = json.loads(data.decode('utf-8'))
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        return None
+
+
+def sif_authorization_expiry_info(
+    auth: str | None = None,
+    *,
+    warn_hours: int = 48,
+) -> dict:
+    """
+    解析 SIF authorization JWT 的 exp。
+    status: missing | invalid | expired | expiring_soon | ok
+    """
+    from datetime import datetime, timezone as dt_timezone
+
+    from django.utils import timezone as dj_tz
+
+    token = (auth if auth is not None else read_sif_authorization()).strip()
+    out = {
+        'has_authorization': bool(token),
+        'status': 'missing',
+        'expired': False,
+        'expiring_soon': False,
+        'exp_ts': None,
+        'expires_at': None,
+        'expires_at_label': '',
+        'seconds_left': None,
+        'message': '未配置 SIF authorization（JWT）',
+        'ok_for_roi': False,
+    }
+    if not token:
+        return out
+
+    payload = decode_jwt_payload(token)
+    if not payload:
+        out.update(
+            {
+                'status': 'invalid',
+                'message': 'authorization 不是可解析的 JWT，请重新从 sif.com 复制',
+                'ok_for_roi': False,
+            }
+        )
+        return out
+
+    exp = payload.get('exp')
+    try:
+        exp_ts = int(exp)
+    except (TypeError, ValueError):
+        out.update(
+            {
+                'status': 'invalid',
+                'message': 'JWT 缺少有效 exp，无法判断是否过期',
+                'ok_for_roi': True,  # 无法判断时不阻断，但仍提示
+            }
+        )
+        return out
+
+    exp_dt = datetime.fromtimestamp(exp_ts, tz=dt_timezone.utc)
+    if dj_tz.is_naive(exp_dt):
+        exp_dt = dj_tz.make_aware(exp_dt, dt_timezone.utc)
+    try:
+        local_exp = dj_tz.localtime(exp_dt)
+        label = local_exp.strftime('%Y-%m-%d %H:%M:%S')
+        now = dj_tz.now()
+    except Exception:
+        label = exp_dt.strftime('%Y-%m-%d %H:%M:%S UTC')
+        now = datetime.now(tz=dt_timezone.utc)
+    seconds_left = int((exp_dt - now).total_seconds())
+    out['exp_ts'] = exp_ts
+    out['expires_at'] = exp_dt
+    out['expires_at_label'] = label
+    out['seconds_left'] = seconds_left
+
+    if seconds_left <= 0:
+        out.update(
+            {
+                'status': 'expired',
+                'expired': True,
+                'expiring_soon': False,
+                'ok_for_roi': False,
+                'message': (
+                    f'SIF authorization（JWT）已过期（到期 {label}）。'
+                    '请到「凭证配置」重新粘贴 JWT 并刷新 Token，'
+                    '否则 ROI/自动 ROI 的 CPC 与转化率会全部落入默认 $1 / 10%。'
+                ),
+            }
+        )
+        return out
+
+    warn_sec = max(1, int(warn_hours)) * 3600
+    if seconds_left <= warn_sec:
+        hours = max(1, seconds_left // 3600)
+        out.update(
+            {
+                'status': 'expiring_soon',
+                'expired': False,
+                'expiring_soon': True,
+                'ok_for_roi': True,
+                'message': (
+                    f'SIF authorization（JWT）将在约 {hours} 小时内过期（{label}）。'
+                    '请尽快到 sif.com 重新复制 JWT 并保存刷新，避免自动 ROI 静默用默认值。'
+                ),
+            }
+        )
+        return out
+
+    days = seconds_left // 86400
+    out.update(
+        {
+            'status': 'ok',
+            'expired': False,
+            'expiring_soon': False,
+            'ok_for_roi': True,
+            'message': f'SIF authorization 有效，约 {days} 天后到期（{label}）'
+            if days >= 1
+            else f'SIF authorization 有效，到期时间 {label}',
+        }
+    )
+    return out
+
+
+def assert_sif_authorization_usable(*, for_auto_roi: bool = False) -> dict:
+    """JWT 已过期或不存在时抛出 ValueError（供自动 ROI / 任务入口拦截）。"""
+    info = sif_authorization_expiry_info()
+    if not info.get('has_authorization'):
+        raise ValueError(
+            '未配置 SIF authorization（JWT）。请到「凭证配置」填写后刷新 Token，'
+            '否则 CPC/转化率会全部使用默认 $1 / 10%。'
+        )
+    if info.get('expired') or info.get('status') == 'expired':
+        prefix = '自动 ROI 已中止：' if for_auto_roi else ''
+        raise ValueError(prefix + (info.get('message') or 'SIF authorization 已过期'))
+    if info.get('status') == 'invalid' and not info.get('ok_for_roi'):
+        raise ValueError(info.get('message') or 'SIF authorization 无效')
+    return info
 
 
 def read_sif_token_status() -> dict:
@@ -294,16 +451,24 @@ def read_credentials_page_context() -> dict:
     """凭证配置页完整上下文。"""
     auth = read_sif_authorization()
     token_status = read_sif_token_status()
+    jwt_info = sif_authorization_expiry_info(auth)
     seller = read_seller_credentials_form('single')
     seller_bulk = read_seller_credentials_form('bulk')
     bulk_pool = read_bulk_accounts_form()
     bulk_threshold = int(getattr(settings, 'ROI_BULK_ASIN_THRESHOLD', 20))
+    sif_ready = (
+        bool(auth)
+        and bool(token_status.get('exists'))
+        and bool(jwt_info.get('ok_for_roi'))
+        and not bool(jwt_info.get('expired'))
+    )
     return {
         'authorization': auth,
         'has_authorization': bool(auth),
         'authorization_preview': _mask_secret(auth, head=18, tail=8),
         'token_status': token_status,
-        'sif_ready': bool(auth) and bool(token_status.get('exists')),
+        'sif_jwt': jwt_info,
+        'sif_ready': sif_ready,
         'seller': seller,
         'seller_bulk': seller_bulk,
         'bulk_pool': bulk_pool,
@@ -324,6 +489,11 @@ def _ensure_script_path() -> Path:
 
 def refresh_sif_token() -> tuple[bool, str]:
     """调用 sif_set_cookie 用当前 authorization 换取 sif_token。"""
+    info = sif_authorization_expiry_info()
+    if info.get('expired'):
+        return False, info.get('message') or 'SIF authorization（JWT）已过期，请先更新 JWT'
+    if not info.get('has_authorization'):
+        return False, '请先填写并保存 SIF authorization（JWT）'
     _ensure_script_path()
     try:
         from sif_set_cookie import get_sif_cookie
@@ -332,5 +502,5 @@ def refresh_sif_token() -> tuple[bool, str]:
     except Exception as exc:
         return False, f'{type(exc).__name__}: {exc}'
     if not token:
-        return False, '未从 SIF 响应中获取到 sif_token'
+        return False, '未从 SIF 响应中获取到 sif_token（authorization 可能已失效，请重新复制 JWT）'
     return True, token

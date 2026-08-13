@@ -1,165 +1,401 @@
 {% extends 'base.html' %}
+{% load static %}
 {% block title %}自动ROI — Amazon 自动化{% endblock %}
-{% block main_class %}main--upload{% endblock %}
+{% block extra_head %}
+<link rel="stylesheet" href="{% static 'css/auto_roi.css' %}">
+{% endblock %}
+{% block main_class %}main--auto-roi{% endblock %}
 {% block content %}
-<div class="upload-page" id="auto-roi-page"
+<div class="ar-page" id="auto-roi-page"
      data-status-url="{% url 'auto_roi_status' %}"
+     data-logs-url="{% url 'auto_roi_logs' %}"
      data-start-url="{% url 'auto_roi_start' %}"
      data-pause-url="{% url 'auto_roi_pause' %}"
      data-stop-url="{% url 'auto_roi_stop' %}"
      data-config-url="{% url 'auto_roi_save_config' %}">
-    <header class="upload-hero">
-        <h1 class="upload-hero__title">自动ROI · {{ current_site_label|default:"当前站点" }}</h1>
-        <p class="upload-hero__desc">单线程稳态批跑：按站点吃完待算池；禁号自动解禁换号并重试同一 ASIN。默认 ASIN 间隔 1–3 秒、批间隔 4–8 秒。</p>
+
+    <header class="ar-hero">
+        <div>
+            <p class="ar-hero__eyebrow">Amazon · 自动批跑</p>
+            <h1 class="ar-hero__title">自动 ROI</h1>
+            <p class="ar-hero__sub">全屏查看执行日志：按 ASIN、卖家精灵账号、时间与成败筛选。禁号会自动换号并重试同一 ASIN。</p>
+        </div>
+        <div class="ar-hero__meta">
+            {% if current_site_label %}
+            <span class="ar-pill ar-pill--site" id="ar-site-pill">{{ current_site_label }}</span>
+            {% endif %}
+            <span class="ar-pill ar-pill--muted" id="ar-pending-pill">待计算 {{ pending_count }}</span>
+            <span class="ar-pill" id="ar-status-pill">{% if active_run %}{{ active_run.status_label }}{% else %}未启动{% endif %}</span>
+        </div>
     </header>
 
-    <section class="upload-panel upload-panel--accent">
-        <div class="upload-live-hint" id="auto-roi-summary">
-            待计算：{{ pending_count }}；
-            {% if active_run %}
-            状态：{{ active_run.status_label }}；成功 {{ active_run.succeeded }} / 失败 {{ active_run.failed }}；
-            当前：{{ active_run.current_asin|default:"—" }}；账号：{{ active_run.last_account|default:"—" }}
-            {% else %}
-            尚未开启自动任务
-            {% endif %}
-            {% if wizard_busy %} · 注意：手动 ROI 任务进行中{% endif %}
-        </div>
-        <form id="auto-roi-control" class="upload-form" style="margin-top:.8rem;">
-            {% csrf_token %}
-            <div class="upload-field">
-                <label class="upload-field__label" for="id_parity">汇率</label>
-                <input type="text" name="parity" id="id_parity" class="upload-textarea"
-                       style="min-height:auto;height:2.75rem;resize:none;"
-                       inputmode="decimal" value="{{ default_parity }}" required>
-            </div>
-            <div class="upload-actions">
-                <button type="button" class="upload-submit" id="btn-auto-start">开启 / 继续</button>
-                <button type="button" class="upload-submit" id="btn-auto-pause" style="background:#6b7280;">暂停</button>
-                <button type="button" class="upload-submit" id="btn-auto-stop" style="background:#b45309;">停止</button>
-            </div>
-            <p class="upload-live-hint" id="auto-roi-msg" style="margin-top:.5rem;"></p>
-        </form>
-    </section>
+    <div class="ar-grid">
+        <aside class="ar-side">
+            <section class="ar-panel">
+                <div class="ar-panel__head">
+                    <div>
+                        <h2 class="ar-panel__title">运行控制</h2>
+                        <p class="ar-panel__hint">单线程稳态 · 当前站点 {{ current_marketplace }}</p>
+                    </div>
+                </div>
+                <div class="ar-panel__body">
+                    <div class="ar-stats" id="ar-stats">
+                        <div class="ar-stat">
+                            <span class="ar-stat__label">成功</span>
+                            <span class="ar-stat__value ar-stat__value--good" data-k="succeeded">{{ active_run.succeeded|default:0 }}</span>
+                        </div>
+                        <div class="ar-stat">
+                            <span class="ar-stat__label">失败</span>
+                            <span class="ar-stat__value ar-stat__value--bad" data-k="failed">{{ active_run.failed|default:0 }}</span>
+                        </div>
+                        <div class="ar-stat">
+                            <span class="ar-stat__label">剩余约</span>
+                            <span class="ar-stat__value" data-k="remaining">{{ active_run.remaining|default:"—" }}</span>
+                        </div>
+                        <div class="ar-stat">
+                            <span class="ar-stat__label">当前 ASIN</span>
+                            <span class="ar-stat__value" data-k="current_asin">{{ active_run.current_asin|default:"—" }}</span>
+                        </div>
+                        <div class="ar-stat" style="grid-column:1/-1;">
+                            <span class="ar-stat__label">当前卖家精灵账号</span>
+                            <span class="ar-stat__value" data-k="last_account">{{ active_run.last_account|default:"—" }}</span>
+                        </div>
+                    </div>
 
-    <section class="upload-panel" style="margin-top:1rem;">
-        <h2 style="font-size:1.05rem;margin:0 0 .6rem;">站点定值（{{ current_marketplace }}）</h2>
-        <form id="auto-roi-config" class="upload-form">
-            {% csrf_token %}
-            <input type="hidden" name="marketplace" value="{{ current_marketplace }}">
-            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:.6rem;">
-                <label>平台佣金%<input name="platform_commission" value="{{ config.platform_commission }}"></label>
-                <label>默认退款率%<input name="default_refund_rate" value="{{ config.default_refund_rate }}"></label>
-                <label>默认FBA$<input name="default_fba_fee" value="{{ config.default_fba_fee }}"></label>
-                <label>默认采购￥<input name="default_unit_purchase" value="{{ config.default_unit_purchase }}"></label>
-                <label>批大小<input name="batch_size" value="{{ config.batch_size }}"></label>
-                <label>ASIN间隔min<input name="asin_delay_min_sec" value="{{ config.asin_delay_min_sec }}"></label>
-                <label>ASIN间隔max<input name="asin_delay_max_sec" value="{{ config.asin_delay_max_sec }}"></label>
-                <label>批间隔min<input name="batch_delay_min_sec" value="{{ config.batch_delay_min_sec }}"></label>
-                <label>批间隔max<input name="batch_delay_max_sec" value="{{ config.batch_delay_max_sec }}"></label>
-                <label>连续失败暂停<input name="consecutive_fail_pause" value="{{ config.consecutive_fail_pause }}"></label>
-                <label>单ASIN禁号重试<input name="max_ban_retries_per_asin" value="{{ config.max_ban_retries_per_asin }}"></label>
-                <label>最大换号次数<input name="max_ban_rotations_per_run" value="{{ config.max_ban_rotations_per_run }}"></label>
-                <label>汇率覆盖<input name="exchange_rate_override" value="{{ config.exchange_rate_override|default_if_none:'' }}" placeholder="空=自动"></label>
-            </div>
-            <div class="upload-actions" style="margin-top:.8rem;">
-                <button type="submit" class="upload-submit">保存定值</button>
-            </div>
-        </form>
-    </section>
+                    <form id="auto-roi-control">
+                        {% csrf_token %}
+                        <div class="ar-field">
+                            <label for="id_parity">汇率</label>
+                            <input type="text" name="parity" id="id_parity" inputmode="decimal"
+                                   value="{{ default_parity }}" required>
+                        </div>
+                        <div class="ar-actions">
+                            <button type="button" class="ar-btn ar-btn--primary" id="btn-auto-start">开启 / 继续</button>
+                            <button type="button" class="ar-btn ar-btn--muted" id="btn-auto-pause">暂停</button>
+                            <button type="button" class="ar-btn ar-btn--warn" id="btn-auto-stop">停止</button>
+                        </div>
+                        <p class="ar-msg" id="auto-roi-msg"></p>
+                        {% if wizard_busy %}
+                        <p class="ar-msg ar-msg--err">注意：手动 ROI 任务进行中，开启前请先完成或解除。</p>
+                        {% endif %}
+                    </form>
+                </div>
+            </section>
 
-    <section class="upload-panel" style="margin-top:1rem;">
-        <h2 style="font-size:1.05rem;margin:0 0 .6rem;">执行日志</h2>
-        <div id="auto-roi-logs" style="max-height:420px;overflow:auto;border:1px solid #e6e8ee;border-radius:10px;padding:.6rem;font-size:.9rem;line-height:1.45;">
-            <p class="upload-live-hint">等待日志…</p>
-        </div>
-    </section>
+            <section class="ar-panel" style="margin-top:1rem;">
+                <div class="ar-panel__head">
+                    <div>
+                        <h2 class="ar-panel__title">站点定值</h2>
+                        <p class="ar-panel__hint">佣金 / 默认费用 / 节流参数</p>
+                    </div>
+                    <button type="button" class="ar-config-toggle" id="btn-toggle-config">展开</button>
+                </div>
+                <div class="ar-panel__body ar-config-body" id="ar-config-body" hidden>
+                    <form id="auto-roi-config">
+                        {% csrf_token %}
+                        <input type="hidden" name="marketplace" value="{{ current_marketplace }}">
+                        <div class="ar-config-grid">
+                            <div class="ar-field"><label>平台佣金%</label><input name="platform_commission" value="{{ config.platform_commission }}"></div>
+                            <div class="ar-field"><label>默认退款率%</label><input name="default_refund_rate" value="{{ config.default_refund_rate }}"></div>
+                            <div class="ar-field"><label>默认 FBA $</label><input name="default_fba_fee" value="{{ config.default_fba_fee }}"></div>
+                            <div class="ar-field"><label>默认采购 ￥</label><input name="default_unit_purchase" value="{{ config.default_unit_purchase }}"></div>
+                            <div class="ar-field"><label>批大小</label><input name="batch_size" value="{{ config.batch_size }}"></div>
+                            <div class="ar-field"><label>连续失败暂停</label><input name="consecutive_fail_pause" value="{{ config.consecutive_fail_pause }}"></div>
+                            <div class="ar-field"><label>ASIN 间隔 min</label><input name="asin_delay_min_sec" value="{{ config.asin_delay_min_sec }}"></div>
+                            <div class="ar-field"><label>ASIN 间隔 max</label><input name="asin_delay_max_sec" value="{{ config.asin_delay_max_sec }}"></div>
+                            <div class="ar-field"><label>批间隔 min</label><input name="batch_delay_min_sec" value="{{ config.batch_delay_min_sec }}"></div>
+                            <div class="ar-field"><label>批间隔 max</label><input name="batch_delay_max_sec" value="{{ config.batch_delay_max_sec }}"></div>
+                            <div class="ar-field"><label>单 ASIN 禁号重试</label><input name="max_ban_retries_per_asin" value="{{ config.max_ban_retries_per_asin }}"></div>
+                            <div class="ar-field"><label>最大换号次数</label><input name="max_ban_rotations_per_run" value="{{ config.max_ban_rotations_per_run }}"></div>
+                            <div class="ar-field" style="grid-column:1/-1;"><label>汇率覆盖（空=自动）</label><input name="exchange_rate_override" value="{{ config.exchange_rate_override|default_if_none:'' }}" placeholder="留空则用自动汇率"></div>
+                        </div>
+                        <div class="ar-actions" style="margin-top:.85rem;">
+                            <button type="submit" class="ar-btn ar-btn--primary">保存定值</button>
+                        </div>
+                    </form>
+                </div>
+            </section>
+        </aside>
+
+        <section class="ar-panel ar-main ar-log-panel">
+            <div class="ar-panel__head">
+                <div>
+                    <h2 class="ar-panel__title">执行日志</h2>
+                    <p class="ar-panel__hint" id="ar-log-count-hint">加载中…</p>
+                </div>
+                <button type="button" class="ar-btn" id="btn-refresh-logs">刷新</button>
+            </div>
+
+            <form class="ar-filter" id="ar-log-filter" autocomplete="off">
+                <div class="ar-filter__item">
+                    <label for="f-asin">ASIN</label>
+                    <input type="text" id="f-asin" name="asin" placeholder="关键字搜索" maxlength="32">
+                </div>
+                <div class="ar-filter__item">
+                    <label for="f-account">卖家精灵账号</label>
+                    <input type="text" id="f-account" name="account" list="ar-account-list" placeholder="账号筛选">
+                    <datalist id="ar-account-list"></datalist>
+                </div>
+                <div class="ar-filter__item">
+                    <label for="f-status">结果</label>
+                    <select id="f-status" name="status">
+                        <option value="">全部</option>
+                        <option value="success">成功</option>
+                        <option value="failed">失败</option>
+                        <option value="banned_rotated">禁号换号</option>
+                        <option value="retry">重试</option>
+                    </select>
+                </div>
+                <div class="ar-filter__item">
+                    <label for="f-from">开始时间</label>
+                    <input type="datetime-local" id="f-from" name="time_from">
+                </div>
+                <div class="ar-filter__item">
+                    <label for="f-to">结束时间</label>
+                    <input type="datetime-local" id="f-to" name="time_to">
+                </div>
+                <div class="ar-filter__actions">
+                    <button type="submit" class="ar-btn ar-btn--primary">筛选</button>
+                    <button type="button" class="ar-btn" id="btn-reset-filter">重置</button>
+                </div>
+                <div class="ar-filter__item">
+                    <label for="f-per-page">每页</label>
+                    <select id="f-per-page" name="per_page">
+                        <option value="20">20</option>
+                        <option value="50" selected>50</option>
+                        <option value="100">100</option>
+                    </select>
+                </div>
+            </form>
+
+            <div class="ar-table-wrap">
+                <table class="ar-table" id="ar-log-table">
+                    <thead>
+                        <tr>
+                            <th style="width:9rem;">时间</th>
+                            <th style="width:8rem;">ASIN</th>
+                            <th style="width:5.5rem;">结果</th>
+                            <th style="width:10rem;">卖家精灵账号</th>
+                            <th style="width:4.5rem;">尝试</th>
+                            <th style="width:5rem;">耗时</th>
+                            <th>失败原因 / 详情</th>
+                        </tr>
+                    </thead>
+                    <tbody id="ar-log-tbody">
+                        <tr><td colspan="7" class="ar-empty">正在加载日志…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="ar-pager" id="ar-pager">
+                <div class="ar-pager__nav" id="ar-pager-nav"></div>
+                <div class="ar-pager__meta" id="ar-pager-meta"></div>
+            </div>
+        </section>
+    </div>
 </div>
-<style>
-#auto-roi-config label { display:flex; flex-direction:column; gap:.25rem; font-size:.85rem; color:#374151; }
-#auto-roi-config input { height:2.2rem; border:1px solid #d1d5db; border-radius:8px; padding:0 .5rem; }
-.auto-log-row { padding:.35rem 0; border-bottom:1px solid #f0f1f4; }
-.auto-log-row--fail { color:#b91c1c; }
-.auto-log-row--ok { color:#047857; }
-.auto-log-row--ban { color:#b45309; }
-.auto-log-detail { white-space:pre-wrap; font-size:.8rem; color:#6b7280; margin:.25rem 0 0; display:none; }
-</style>
+
 <script>
 (function () {
   const root = document.getElementById('auto-roi-page');
   if (!root) return;
   const csrf = document.querySelector('#auto-roi-control [name=csrfmiddlewaretoken]')?.value
     || document.querySelector('#auto-roi-config [name=csrfmiddlewaretoken]')?.value || '';
-  let afterId = 0;
+
   let runId = {{ active_run.id|default:'null' }};
+  let page = 1;
+  let loadingLogs = false;
+  let lastLogFingerprint = '';
+
+  const esc = function (s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  };
 
   function setMsg(t, isErr) {
     const el = document.getElementById('auto-roi-msg');
     el.textContent = t || '';
-    el.style.color = isErr ? '#b91c1c' : '#047857';
+    el.className = 'ar-msg' + (t ? (isErr ? ' ar-msg--err' : ' ar-msg--ok') : '');
+  }
+
+  function fmtTime(iso) {
+    if (!iso) return '—';
+    return String(iso).replace('T', ' ').replace(/\.\d+/, '').slice(0, 19);
+  }
+
+  function fmtDur(ms) {
+    if (ms == null || ms === '') return '—';
+    ms = Number(ms);
+    if (ms < 1000) return ms + 'ms';
+    return (ms / 1000).toFixed(1) + 's';
+  }
+
+  function statusClass(st) {
+    return 'ar-chip ar-chip--' + (st || 'retry');
+  }
+
+  function filterParams() {
+    const f = document.getElementById('ar-log-filter');
+    const fd = new FormData(f);
+    const p = new URLSearchParams();
+    ['asin', 'account', 'status', 'time_from', 'time_to', 'per_page'].forEach(function (k) {
+      const v = (fd.get(k) || '').toString().trim();
+      if (v) p.set(k, v);
+    });
+    p.set('page', String(page));
+    return p;
+  }
+
+  function fillAccounts(list) {
+    const dl = document.getElementById('ar-account-list');
+    if (!dl || !list) return;
+    dl.innerHTML = list.map(function (a) {
+      return '<option value="' + esc(a) + '"></option>';
+    }).join('');
+  }
+
+  function renderPager(data) {
+    const nav = document.getElementById('ar-pager-nav');
+    const meta = document.getElementById('ar-pager-meta');
+    const numPages = data.num_pages || 1;
+    const cur = data.page || 1;
+    meta.textContent = '第 ' + cur + ' / ' + numPages + ' 页 · 共 ' + (data.count || 0) + ' 条';
+
+    const buttons = [];
+    buttons.push('<button type="button" class="ar-page-num" data-page="' + (cur - 1) + '"'
+      + (data.has_previous ? '' : ' disabled') + '>上一页</button>');
+
+    let start = Math.max(1, cur - 2);
+    let end = Math.min(numPages, start + 4);
+    start = Math.max(1, end - 4);
+    for (let i = start; i <= end; i++) {
+      buttons.push('<button type="button" class="ar-page-num'
+        + (i === cur ? ' ar-page-num--active' : '') + '" data-page="' + i + '"'
+        + (i === cur ? ' disabled' : '') + '>' + i + '</button>');
+    }
+
+    buttons.push('<button type="button" class="ar-page-num" data-page="' + (cur + 1) + '"'
+      + (data.has_next ? '' : ' disabled') + '>下一页</button>');
+    nav.innerHTML = buttons.join('');
+  }
+
+  function renderRows(results) {
+    const tb = document.getElementById('ar-log-tbody');
+    if (!results || !results.length) {
+      tb.innerHTML = '<tr><td colspan="7" class="ar-empty">当前筛选下没有日志</td></tr>';
+      return;
+    }
+    tb.innerHTML = results.map(function (log) {
+      const hasDetail = !!(log.error_detail && String(log.error_detail).trim());
+      const summary = log.error_summary || '';
+      let reason = '';
+      if (summary) {
+        reason = '<div class="ar-err__summary">' + esc(summary) + '</div>';
+      } else if (log.status === 'success') {
+        reason = '<span class="ar-err__empty">—</span>';
+      } else {
+        reason = '<span class="ar-err__empty">无摘要</span>';
+      }
+      if (hasDetail) {
+        reason += '<button type="button" class="ar-err__toggle" data-toggle-detail="' + log.id + '">查看完整堆栈</button>'
+          + '<pre class="ar-err__detail" id="detail-' + log.id + '" hidden></pre>';
+      }
+      return '<tr data-id="' + log.id + '">'
+        + '<td class="ar-muted">' + esc(fmtTime(log.created_at)) + '</td>'
+        + '<td class="ar-asin">' + esc(log.asin) + '</td>'
+        + '<td><span class="' + statusClass(log.status) + '">' + esc(log.status_label || log.status) + '</span></td>'
+        + '<td class="ar-mono">' + esc(log.account_username || '—') + '</td>'
+        + '<td>' + esc(log.attempt || 1) + '</td>'
+        + '<td class="ar-muted">' + esc(fmtDur(log.duration_ms)) + '</td>'
+        + '<td class="ar-err" data-detail="' + esc(log.error_detail || '') + '">' + reason + '</td>'
+        + '</tr>';
+    }).join('');
+  }
+
+  async function loadLogs(opts) {
+    if (loadingLogs) return;
+    loadingLogs = true;
+    opts = opts || {};
+    if (opts.resetPage) page = 1;
+    try {
+      const url = root.dataset.logsUrl + '?' + filterParams().toString();
+      const resp = await fetch(url, { headers: { Accept: 'application/json' } });
+      const data = await resp.json();
+      if (!data.ok) {
+        document.getElementById('ar-log-tbody').innerHTML =
+          '<tr><td colspan="7" class="ar-empty">加载失败</td></tr>';
+        return;
+      }
+      const fp = JSON.stringify({
+        count: data.count,
+        page: data.page,
+        ids: (data.results || []).map(function (r) { return r.id; }),
+      });
+      if (fp !== lastLogFingerprint || opts.force) {
+        lastLogFingerprint = fp;
+        renderRows(data.results || []);
+        renderPager(data);
+        fillAccounts(data.accounts || []);
+      }
+      document.getElementById('ar-log-count-hint').textContent =
+        '共 ' + (data.count || 0) + ' 条 · 第 ' + (data.page || 1) + ' / ' + (data.num_pages || 1) + ' 页';
+      page = data.page || page;
+    } catch (e) {
+      document.getElementById('ar-log-count-hint').textContent = '日志加载失败';
+    } finally {
+      loadingLogs = false;
+    }
+  }
+
+  function updateStatusPill(run) {
+    const pill = document.getElementById('ar-status-pill');
+    pill.className = 'ar-pill';
+    if (!run) {
+      pill.textContent = '未启动';
+      pill.classList.add('ar-pill--muted');
+      return;
+    }
+    pill.textContent = run.status_label || run.status;
+    if (run.status === 'running') pill.classList.add('ar-pill--run');
+    else if (run.status === 'paused') pill.classList.add('ar-pill--paused');
+    else pill.classList.add('ar-pill--muted');
   }
 
   function renderSummary(data) {
     const r = data.run;
-    const el = document.getElementById('auto-roi-summary');
-    if (!r) {
-      el.textContent = '待计算：' + data.pending_count + '；尚未开启自动任务';
-      return;
-    }
-    el.textContent = '待计算：' + data.pending_count
-      + '；状态：' + (r.status_label || r.status)
-      + '；成功 ' + r.succeeded + ' / 失败 ' + r.failed
-      + '；剩余约 ' + r.remaining
-      + '；当前：' + (r.current_asin || '—')
-      + '；账号：' + (r.last_account || '—')
-      + (r.error_message ? ('；' + r.error_message) : '');
-  }
-
-  function appendLogs(logs) {
-    if (!logs || !logs.length) return;
-    const box = document.getElementById('auto-roi-logs');
-    if (box.querySelector('.upload-live-hint')) box.innerHTML = '';
-    logs.forEach(function (log) {
-      afterId = Math.max(afterId, log.id);
-      const div = document.createElement('div');
-      let cls = 'auto-log-row';
-      if (log.status === 'success') cls += ' auto-log-row--ok';
-      else if (log.status === 'failed') cls += ' auto-log-row--fail';
-      else if (log.status === 'banned_rotated') cls += ' auto-log-row--ban';
-      div.className = cls;
-      const t = (log.created_at || '').replace('T', ' ').slice(0, 19);
-      const dur = log.duration_ms != null ? (log.duration_ms + 'ms') : '';
-      div.innerHTML = '<div><strong>' + log.asin + '</strong> · ' + log.status_label
-        + ' · attempt ' + log.attempt
-        + (log.account_username ? (' · ' + log.account_username) : '')
-        + (dur ? (' · ' + dur) : '')
-        + ' · ' + t
-        + (log.error_summary ? (' · ' + log.error_summary) : '')
-        + '</div>';
-      if (log.error_detail) {
-        const pre = document.createElement('pre');
-        pre.className = 'auto-log-detail';
-        pre.textContent = log.error_detail;
-        div.appendChild(pre);
-        div.style.cursor = 'pointer';
-        div.addEventListener('click', function () {
-          pre.style.display = pre.style.display === 'block' ? 'none' : 'block';
-        });
-      }
-      box.appendChild(div);
-      box.scrollTop = box.scrollHeight;
+    document.getElementById('ar-pending-pill').textContent = '待计算 ' + (data.pending_count != null ? data.pending_count : '—');
+    updateStatusPill(r);
+    const map = {
+      succeeded: r ? r.succeeded : 0,
+      failed: r ? r.failed : 0,
+      remaining: r ? r.remaining : '—',
+      current_asin: r && r.current_asin ? r.current_asin : '—',
+      last_account: r && r.last_account ? r.last_account : '—',
+    };
+    Object.keys(map).forEach(function (k) {
+      const el = document.querySelector('#ar-stats [data-k="' + k + '"]');
+      if (el) el.textContent = map[k];
     });
   }
 
-  async function poll() {
-    const url = root.dataset.statusUrl + '?after_id=' + afterId
-      + (runId ? ('&run_id=' + runId) : '');
+  async function pollStatus() {
     try {
-      const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
+      const url = root.dataset.statusUrl + (runId ? ('?run_id=' + runId) : '');
+      const resp = await fetch(url, { headers: { Accept: 'application/json' } });
       const data = await resp.json();
       if (!data.ok) return;
       if (data.run) runId = data.run.id;
       renderSummary(data);
-      appendLogs(data.logs || []);
+      // 运行中且停在第 1 页、无复杂筛选时自动刷新日志
+      const f = filterParams();
+      const light = !f.get('asin') && !f.get('account') && !f.get('status')
+        && !f.get('time_from') && !f.get('time_to') && page === 1;
+      if (data.run && data.run.status === 'running' && light) {
+        loadLogs();
+      }
     } catch (e) { /* ignore */ }
   }
 
@@ -167,7 +403,7 @@
     const fd = new FormData(formEl || document.getElementById('auto-roi-control'));
     const resp = await fetch(url, {
       method: 'POST',
-      headers: { 'X-CSRFToken': csrf, 'Accept': 'application/json' },
+      headers: { 'X-CSRFToken': csrf, Accept: 'application/json' },
       body: fd,
     });
     const data = await resp.json().catch(function () { return { ok: false, error: '请求失败' }; });
@@ -177,10 +413,12 @@
     }
     if (data.run) {
       runId = data.run.id;
-      renderSummary({ run: data.run, pending_count: data.pending_count != null ? data.pending_count : '{{ pending_count }}' });
+      renderSummary({ run: data.run, pending_count: data.pending_count });
     }
-    setMsg('已提交', false);
-    poll();
+    if (data.warning) setMsg(data.warning, true);
+    else setMsg('已提交', false);
+    pollStatus();
+    loadLogs({ force: true, resetPage: true });
     return data;
   }
 
@@ -198,9 +436,62 @@
     const data = await post(root.dataset.configUrl, e.target);
     if (data && data.ok) setMsg('定值已保存', false);
   });
+  document.getElementById('btn-toggle-config').addEventListener('click', function () {
+    const body = document.getElementById('ar-config-body');
+    const open = body.hasAttribute('hidden');
+    if (open) body.removeAttribute('hidden');
+    else body.setAttribute('hidden', '');
+    this.textContent = open ? '收起' : '展开';
+  });
 
-  poll();
-  setInterval(poll, 2500);
+  document.getElementById('ar-log-filter').addEventListener('submit', function (e) {
+    e.preventDefault();
+    loadLogs({ resetPage: true, force: true });
+  });
+  document.getElementById('btn-reset-filter').addEventListener('click', function () {
+    document.getElementById('ar-log-filter').reset();
+    document.getElementById('f-per-page').value = '50';
+    loadLogs({ resetPage: true, force: true });
+  });
+  document.getElementById('btn-refresh-logs').addEventListener('click', function () {
+    loadLogs({ force: true });
+  });
+  document.getElementById('f-per-page').addEventListener('change', function () {
+    loadLogs({ resetPage: true, force: true });
+  });
+
+  document.getElementById('ar-pager-nav').addEventListener('click', function (e) {
+    const btn = e.target.closest('[data-page]');
+    if (!btn || btn.disabled) return;
+    const n = parseInt(btn.getAttribute('data-page'), 10);
+    if (!n || n < 1) return;
+    page = n;
+    loadLogs({ force: true });
+  });
+
+  document.getElementById('ar-log-tbody').addEventListener('click', function (e) {
+    const btn = e.target.closest('[data-toggle-detail]');
+    if (!btn) return;
+    const id = btn.getAttribute('data-toggle-detail');
+    const pre = document.getElementById('detail-' + id);
+    const td = btn.closest('td');
+    const tr = btn.closest('tr');
+    if (!pre) return;
+    if (pre.hasAttribute('hidden')) {
+      pre.textContent = td.getAttribute('data-detail') || '';
+      pre.removeAttribute('hidden');
+      btn.textContent = '收起堆栈';
+      tr.classList.add('ar-row--open');
+    } else {
+      pre.setAttribute('hidden', '');
+      btn.textContent = '查看完整堆栈';
+      tr.classList.remove('ar-row--open');
+    }
+  });
+
+  loadLogs({ force: true });
+  pollStatus();
+  setInterval(pollStatus, 2500);
 })();
 </script>
 {% endblock %}

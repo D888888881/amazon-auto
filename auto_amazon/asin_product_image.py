@@ -13,38 +13,62 @@ IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.webp')
 
 
 def asin_images_dir() -> Path:
-    return (
-        Path(settings.BASE_DIR).resolve()
-        / 'scripts'
-        / 'asin_find_project'
-        / 'images'
-    )
+    """主图写入/优先读取目录：默认 MEDIA_ROOT/images，可用 ASIN_IMAGES_ROOT 覆盖。"""
+    root = getattr(settings, 'ASIN_IMAGES_ROOT', None)
+    if root:
+        return Path(root).resolve()
+    return (Path(settings.MEDIA_ROOT) / 'images').resolve()
+
+
+def asin_images_legacy_dirs() -> list[Path]:
+    """兼容旧路径：仓库内 scripts/asin_find_project/images（仅读取回退）。"""
+    return [
+        (
+            Path(settings.BASE_DIR).resolve()
+            / 'scripts'
+            / 'asin_find_project'
+            / 'images'
+        )
+    ]
+
+
+def _candidate_image_dirs() -> list[Path]:
+    dirs = [asin_images_dir()]
+    for d in asin_images_legacy_dirs():
+        if d not in dirs:
+            dirs.append(d)
+    return dirs
 
 
 def find_asin_image_file(asin: str) -> Path | None:
     a = normalize_asin(asin)
     if not a:
         return None
-    base = asin_images_dir()
-    for ext in IMAGE_EXTS:
-        path = base / f'{a}{ext}'
-        if path.is_file():
-            return path
+    for base in _candidate_image_dirs():
+        for ext in IMAGE_EXTS:
+            path = base / f'{a}{ext}'
+            if path.is_file():
+                return path
     return None
 
 
 def asins_with_image_files(asins: set[str]) -> set[str]:
-    base = asin_images_dir()
-    if not base.is_dir():
+    dirs = [d for d in _candidate_image_dirs() if d.is_dir()]
+    if not dirs:
         return set()
     out: set[str] = set()
     for raw in asins:
         a = normalize_asin(raw)
         if not a:
             continue
-        for ext in IMAGE_EXTS:
-            if (base / f'{a}{ext}').is_file():
-                out.add(a)
+        for base in dirs:
+            found = False
+            for ext in IMAGE_EXTS:
+                if (base / f'{a}{ext}').is_file():
+                    out.add(a)
+                    found = True
+                    break
+            if found:
                 break
     return out
 
@@ -67,7 +91,15 @@ def user_can_view_asin_product_image(user, asin: str) -> bool:
     a = normalize_asin(asin)
     if not a:
         return False
-    return user_dashboard_rows_qs(user).filter(asin=a).exists()
+    if user_dashboard_rows_qs(user).filter(asin=a).exists():
+        return True
+    from .asin_access import user_assigned_asin_codes, user_imported_asin_codes
+
+    if a in {normalize_asin(x) for x in user_assigned_asin_codes(user)}:
+        return True
+    if a in user_imported_asin_codes(user):
+        return True
+    return False
 
 
 def guess_image_content_type(path: Path) -> str:

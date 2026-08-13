@@ -268,15 +268,47 @@ def _row_passes_ops_filter(row, ops: dict) -> bool:
     return False
 
 
-def _apply_roi_verified_filter(qs: QuerySet, roi_verified_f: str) -> QuerySet:
+def _apply_roi_verified_filter(
+    qs: QuerySet,
+    roi_verified_f: str,
+    *,
+    user_id: int | None,
+    marketplace: str | None,
+) -> QuerySet:
+    """按当前登录用户是否已校验筛选（与他人校验互不影响）。"""
+    from .marketplace import MARKETPLACE_US, normalize_marketplace
     from .models import AsinRoiPackVerification
 
-    if roi_verified_f not in ('yes', 'no'):
+    if roi_verified_f not in ('yes', 'no') or not user_id:
         return qs
-    verified = AsinRoiPackVerification.objects.filter(asin=OuterRef('asin'))
+    mp = normalize_marketplace(marketplace) or MARKETPLACE_US
+    verified = AsinRoiPackVerification.objects.filter(
+        user_id=user_id,
+        asin=OuterRef('asin'),
+        marketplace=mp,
+    )
     if roi_verified_f == 'yes':
         return qs.filter(Exists(verified))
     return qs.filter(~Exists(verified))
+
+
+def _apply_passed_filter(
+    qs: QuerySet,
+    passed_f: str,
+    *,
+    marketplace: str | None,
+) -> QuerySet:
+    """已通过为全局标记：一人标记，全员筛选可见。"""
+    from .marketplace import MARKETPLACE_US, normalize_marketplace
+    from .models import AsinPassedFlag
+
+    if passed_f not in ('yes', 'no'):
+        return qs
+    mp = normalize_marketplace(marketplace) or MARKETPLACE_US
+    passed = AsinPassedFlag.objects.filter(asin=OuterRef('asin'), marketplace=mp)
+    if passed_f == 'yes':
+        return qs.filter(Exists(passed))
+    return qs.filter(~Exists(passed))
 
 
 def _apply_updated_stamp_range_filter(
@@ -317,7 +349,7 @@ def _build_filtered_queryset(
 ) -> tuple[QuerySet, dict]:
     from django.contrib.auth import get_user_model
 
-    from .models import AsinCatalogItem, AsinDashboardRow, AsinFolderAssignment
+    from .models import AsinCatalogItem, AsinDashboardRow
 
     User = get_user_model()
     from .marketplace import MARKETPLACE_US, get_marketplace
@@ -328,15 +360,6 @@ def _build_filtered_queryset(
     asin_kw = (request.GET.get('asin_kw') or '').strip()
     if asin_kw:
         rows_qs = rows_qs.filter(asin__icontains=asin_kw)
-
-    assignee_username = (request.GET.get('assignee_user') or '').strip()
-    if assignee_username:
-        u = User.objects.filter(username__iexact=assignee_username, is_active=True).first()
-        if u:
-            asins_for_u = AsinFolderAssignment.objects.filter(assignees=u).values_list(
-                'asin', flat=True
-            )
-            rows_qs = rows_qs.filter(asin__in=list(asins_for_u))
 
     uploaded_by_username = (request.GET.get('uploaded_by') or '').strip()
     if uploaded_by_username:
@@ -384,7 +407,15 @@ def _build_filtered_queryset(
         rows_qs = rows_qs.filter(product_grade__in=allowed)
 
     roi_verified_f = (request.GET.get('roi_verified') or '').strip().lower()
-    rows_qs = _apply_roi_verified_filter(rows_qs, roi_verified_f)
+    rows_qs = _apply_roi_verified_filter(
+        rows_qs,
+        roi_verified_f,
+        user_id=getattr(user, 'id', None),
+        marketplace=mp,
+    )
+
+    passed_f = (request.GET.get('passed') or '').strip().lower()
+    rows_qs = _apply_passed_filter(rows_qs, passed_f, marketplace=mp)
 
     follow_f = (request.GET.get('follow_filter') or '').strip()
     if follow_f == AsinDashboardRow.FollowStatus.NORMAL:
@@ -395,6 +426,7 @@ def _build_filtered_queryset(
     meta = {
         'allowed_grades': allowed,
         'roi_verified_f': roi_verified_f,
+        'passed_f': passed_f,
         'follow_f': follow_f,
         'updated_from': (request.GET.get('updated_from') or '').strip(),
         'updated_to': (request.GET.get('updated_to') or '').strip(),
@@ -632,14 +664,22 @@ def build_dashboard_page(
     )
 
 
-def verified_asins_on_page(asins: set[str]) -> set[str]:
+def verified_asins_on_page(
+    asins: set[str],
+    *,
+    user_id: int | None = None,
+    marketplace: str | None = None,
+) -> set[str]:
+    """当前页中「当前用户」已校验的 ASIN（兼容旧调用：无 user 时取任意人）。"""
+    from .marketplace import MARKETPLACE_US, normalize_marketplace
     from .models import AsinRoiPackVerification
 
     if not asins:
         return set()
-    return {
-        normalize_asin(a)
-        for a in AsinRoiPackVerification.objects.filter(asin__in=asins).values_list(
-            'asin', flat=True
-        )
-    }
+    qs = AsinRoiPackVerification.objects.filter(asin__in=asins)
+    if user_id is not None:
+        qs = qs.filter(user_id=user_id)
+    if marketplace is not None:
+        mp = normalize_marketplace(marketplace) or MARKETPLACE_US
+        qs = qs.filter(marketplace=mp)
+    return {normalize_asin(a) for a in qs.values_list('asin', flat=True)}

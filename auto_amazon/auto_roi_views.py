@@ -2,18 +2,60 @@
 from __future__ import annotations
 
 import threading
+from datetime import datetime, time as dt_time
 
 from django.contrib.auth.decorators import login_required
+from django.core.paginator import Paginator
 from django.db import close_old_connections
+from django.db.models import Q
 from django.http import JsonResponse
 from django.shortcuts import render
 from django.utils import timezone
+from django.utils.dateparse import parse_date, parse_datetime
 from django.views.decorators.http import require_GET, require_POST
 
 from .marketplace import MARKETPLACE_US, get_marketplace, marketplace_label, normalize_marketplace
 from .models import RoiAutoRun, RoiAutoRunLog
 from .roi_site_defaults import config_to_api_dict, ensure_all_site_configs, ensure_site_config
 from .wizard_jobs import get_active_job_for_user
+
+_LOG_PAGE_SIZES = {20, 50, 100}
+
+
+def _parse_log_datetime(raw: str | None, *, end_of_day: bool = False):
+    """解析筛选时间；支持 ISO datetime 或 YYYY-MM-DD。"""
+    if not raw or not str(raw).strip():
+        return None
+    s = str(raw).strip().replace(' ', 'T')
+    # datetime-local 常为 YYYY-MM-DDTHH:MM，补秒便于解析
+    if len(s) == 16 and s[10] == 'T':
+        s = s + ':00'
+    dt = parse_datetime(s)
+    if dt is None:
+        d = parse_date(s[:10] if len(s) >= 10 else s)
+        if d is None:
+            return None
+        dt = datetime.combine(d, dt_time.max if end_of_day else dt_time.min)
+    if timezone.is_naive(dt):
+        dt = timezone.make_aware(dt, timezone.get_current_timezone())
+    return dt
+
+
+def _log_to_dict(log: RoiAutoRunLog) -> dict:
+    return {
+        'id': log.pk,
+        'run_id': log.run_id,
+        'asin': log.asin,
+        'seq': log.seq,
+        'status': log.status,
+        'status_label': log.get_status_display(),
+        'attempt': log.attempt,
+        'account_username': log.account_username,
+        'duration_ms': log.duration_ms,
+        'error_summary': log.error_summary,
+        'error_detail': log.error_detail,
+        'created_at': log.created_at.isoformat() if log.created_at else None,
+    }
 
 
 def _active_auto_run(user, marketplace: str) -> RoiAutoRun | None:
@@ -134,26 +176,6 @@ def auto_roi_status(request):
                 .order_by('-id')
                 .first()
             )
-    after_id = int(request.GET.get('after_id') or 0)
-    logs_qs = RoiAutoRunLog.objects.none()
-    if run:
-        logs_qs = run.logs.filter(id__gt=after_id).order_by('id')[:80]
-    logs = [
-        {
-            'id': log.pk,
-            'asin': log.asin,
-            'seq': log.seq,
-            'status': log.status,
-            'status_label': log.get_status_display(),
-            'attempt': log.attempt,
-            'account_username': log.account_username,
-            'duration_ms': log.duration_ms,
-            'error_summary': log.error_summary,
-            'error_detail': log.error_detail,
-            'created_at': log.created_at.isoformat() if log.created_at else None,
-        }
-        for log in logs_qs
-    ]
     from .views import _discover_local_asins, _compute_allowed_asins_for_user
 
     pending, _ = _discover_local_asins(force_recompute=False, marketplace=mp)
@@ -167,8 +189,107 @@ def auto_roi_status(request):
             'marketplace': mp,
             'pending_count': len(pending),
             'run': _run_to_dict(run),
-            'logs': logs,
             'config': config_to_api_dict(cfg),
+        }
+    )
+
+
+@login_required
+@require_GET
+def auto_roi_logs(request):
+    """执行日志：筛选 + 分页（当前用户、当前站点）。"""
+    mp = normalize_marketplace(get_marketplace(request)) or MARKETPLACE_US
+    run_ids = list(
+        RoiAutoRun.objects.filter(user=request.user, marketplace=mp).values_list('id', flat=True)
+    )
+    qs = RoiAutoRunLog.objects.filter(run_id__in=run_ids).select_related('run')
+
+    run_id_raw = (request.GET.get('run_id') or '').strip()
+    if run_id_raw.isdigit():
+        rid = int(run_id_raw)
+        if rid in set(run_ids):
+            qs = qs.filter(run_id=rid)
+
+    asin_kw = (request.GET.get('asin') or request.GET.get('asin_kw') or '').strip().upper()
+    if asin_kw:
+        qs = qs.filter(asin__icontains=asin_kw)
+
+    account = (request.GET.get('account') or '').strip()
+    if account:
+        qs = qs.filter(account_username__icontains=account)
+
+    status = (request.GET.get('status') or '').strip().lower()
+    if status in {
+        RoiAutoRunLog.Status.SUCCESS,
+        RoiAutoRunLog.Status.FAILED,
+        RoiAutoRunLog.Status.RETRY,
+        RoiAutoRunLog.Status.BANNED_ROTATED,
+    }:
+        qs = qs.filter(status=status)
+    elif status == 'ok':
+        qs = qs.filter(status=RoiAutoRunLog.Status.SUCCESS)
+    elif status == 'fail':
+        qs = qs.filter(status=RoiAutoRunLog.Status.FAILED)
+    elif status == 'other':
+        qs = qs.filter(
+            status__in=[RoiAutoRunLog.Status.RETRY, RoiAutoRunLog.Status.BANNED_ROTATED]
+        )
+
+    t_from = _parse_log_datetime(request.GET.get('time_from') or request.GET.get('from'))
+    t_to = _parse_log_datetime(
+        request.GET.get('time_to') or request.GET.get('to'),
+        end_of_day=True,
+    )
+    if t_from:
+        qs = qs.filter(created_at__gte=t_from)
+    if t_to:
+        qs = qs.filter(created_at__lte=t_to)
+
+    try:
+        per_page = int(request.GET.get('per_page') or 50)
+    except (TypeError, ValueError):
+        per_page = 50
+    if per_page not in _LOG_PAGE_SIZES:
+        per_page = 50
+    try:
+        page = max(1, int(request.GET.get('page') or 1))
+    except (TypeError, ValueError):
+        page = 1
+
+    qs = qs.order_by('-created_at', '-id')
+    paginator = Paginator(qs, per_page)
+    page_obj = paginator.get_page(page)
+
+    accounts = list(
+        RoiAutoRunLog.objects.filter(run_id__in=run_ids)
+        .exclude(Q(account_username='') | Q(account_username__isnull=True))
+        .values_list('account_username', flat=True)
+        .distinct()
+        .order_by('account_username')[:200]
+    )
+
+    return JsonResponse(
+        {
+            'ok': True,
+            'marketplace': mp,
+            'count': paginator.count,
+            'page': page_obj.number,
+            'num_pages': paginator.num_pages or 1,
+            'per_page': per_page,
+            'has_previous': page_obj.has_previous(),
+            'has_next': page_obj.has_next(),
+            'previous_page': page_obj.previous_page_number() if page_obj.has_previous() else None,
+            'next_page': page_obj.next_page_number() if page_obj.has_next() else None,
+            'filters': {
+                'asin': asin_kw,
+                'account': account,
+                'status': status,
+                'time_from': request.GET.get('time_from') or request.GET.get('from') or '',
+                'time_to': request.GET.get('time_to') or request.GET.get('to') or '',
+                'run_id': run_id_raw if run_id_raw.isdigit() else '',
+            },
+            'accounts': accounts,
+            'results': [_log_to_dict(log) for log in page_obj.object_list],
         }
     )
 
@@ -177,6 +298,14 @@ def auto_roi_status(request):
 @require_POST
 def auto_roi_start(request):
     mp = normalize_marketplace(get_marketplace(request)) or MARKETPLACE_US
+    try:
+        from .credentials_config import assert_sif_authorization_usable, sif_authorization_expiry_info
+
+        assert_sif_authorization_usable(for_auto_roi=True)
+        jwt_info = sif_authorization_expiry_info()
+    except ValueError as e:
+        return JsonResponse({'ok': False, 'error': str(e)}, status=400)
+
     if get_active_job_for_user(request.user.id):
         return JsonResponse(
             {'ok': False, 'error': '当前有手动计算 ROI 任务进行中，请先完成或解除后再开启自动 ROI。'},
@@ -248,7 +377,10 @@ def auto_roi_start(request):
         run.rq_job_id = rq_id
         run.save(update_fields=['rq_job_id', 'updated_at'])
 
-    return JsonResponse({'ok': True, 'run': _run_to_dict(run)})
+    payload = {'ok': True, 'run': _run_to_dict(run)}
+    if jwt_info.get('expiring_soon'):
+        payload['warning'] = jwt_info.get('message')
+    return JsonResponse(payload)
 
 
 @login_required

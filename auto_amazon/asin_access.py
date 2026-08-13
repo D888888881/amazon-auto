@@ -73,25 +73,8 @@ def user_is_assigned_to_asin(user: User, asin: str | None) -> bool:
 
 
 def user_can_access_excel_media_path(user: User, rel_path: str) -> bool:
-    """非超管：可访问已分配给自己的 ASIN 目录，或本人曾导入过的 ASIN 目录下路径。"""
-    if getattr(user, 'is_superuser', False):
-        return True
-    root = asin_root_from_rel_path(rel_path)
-    if not root:
-        return False
-    if user_is_assigned_to_asin(user, root):
-        return True
-    if root in user_imported_asin_codes(user):
-        return True
-    from .models import AsinDashboardRow
-
-    if AsinDashboardRow.objects.filter(user=user, asin=root).exists():
-        return True
-    from .models import ImportedMediaPath
-
-    if ImportedMediaPath.objects.filter(user=user, rel_path__startswith=f'{root}/').exists():
-        return True
-    return ImportedMediaPath.objects.filter(user=user, rel_path=root).exists()
+    """登录用户可访问 media/file 下路径（已取消分配门控）。"""
+    return bool(getattr(user, 'is_authenticated', False))
 
 
 def user_can_access_asin_root(
@@ -101,93 +84,68 @@ def user_can_access_asin_root(
     assigned_set: set[str] | None = None,
     import_roots: set[str] | None = None,
 ) -> bool:
-    """批量场景下按 ASIN 根判定权限（避免子目录逐文件查库）。"""
-    if getattr(user, 'is_superuser', False):
-        return True
-    a = normalize_asin(asin)
-    if not a:
-        return False
-    assigned = assigned_set if assigned_set is not None else {
-        normalize_asin(x) for x in user_assigned_asin_codes(user)
-    }
-    if a in assigned:
-        return True
-    imported = import_roots if import_roots is not None else user_imported_asin_codes(user)
-    return a in imported
+    """批量场景下 ASIN 根权限：登录即可。"""
+    return bool(getattr(user, 'is_authenticated', False)) and bool(normalize_asin(asin))
 
 
 def user_dashboard_rows_qs(user: User, *, marketplace: str | None = None):
-    """首页看板可见行：超管全部；否则本人 + 被分配 + 本人导入的 ASIN。
+    """首页看板：登录用户可见当前站点全部看板行（取消分配门控）。
 
-    指定站点时：只显示该站看板行，且 ASIN 必须在该站有过导入记录
-    （避免英国站误显示旧运营难度占位行等孤儿数据）。
+    用 MarketplaceAsinRoot Exists 过滤孤儿行，避免把全站 ASIN 载入 Python 再 IN。
     """
-    from django.db.models import Q
+    from django.db.models import Exists, OuterRef
 
     from .marketplace import normalize_marketplace
-    from .models import AsinDashboardRow
+    from .models import AsinDashboardRow, MarketplaceAsinRoot
 
     if not getattr(user, 'is_authenticated', False):
         return AsinDashboardRow.objects.none()
     mp = normalize_marketplace(marketplace)
-    if getattr(user, 'is_superuser', False):
-        qs = AsinDashboardRow.objects.all()
-    else:
-        assigned = user_assigned_asin_codes(user)
-        imported = user_imported_asin_codes(user, marketplace=mp)
-        qs = AsinDashboardRow.objects.filter(
-            Q(user=user) | Q(asin__in=assigned) | Q(asin__in=imported)
-        ).distinct()
+    qs = AsinDashboardRow.objects.all()
     if mp:
-        qs = qs.filter(marketplace=mp)
-        site_asins = asins_for_marketplace(mp)
-        if not site_asins:
-            return AsinDashboardRow.objects.none()
-        qs = qs.filter(asin__in=site_asins)
+        qs = qs.filter(marketplace=mp).filter(
+            Exists(
+                MarketplaceAsinRoot.objects.filter(
+                    marketplace=mp,
+                    asin=OuterRef('asin'),
+                )
+            )
+        )
     return qs
 
 
 def user_can_operate_dashboard_row(user: User, row) -> bool:
-    """可勾选、计算 ROI/广告难度、导出、编辑采购价等（不含删除）。"""
-    if getattr(user, 'is_superuser', False):
-        return True
-    if row.user_id == user.id:
-        return True
-    return user_is_assigned_to_asin(user, row.asin)
+    """可勾选、计算 ROI/广告难度、导出、校验、已通过等。"""
+    return bool(getattr(user, 'is_authenticated', False))
 
 
 def user_can_delete_dashboard_row(user: User, row) -> bool:
-    """看板行删除：超管、数据归属者或被分配用户。"""
+    """删除：超管或数据归属者。"""
     if getattr(user, 'is_superuser', False):
         return True
-    if row.user_id == user.id:
-        return True
-    return user_is_assigned_to_asin(user, row.asin)
+    return bool(getattr(user, 'is_authenticated', False)) and row.user_id == getattr(
+        user, 'id', None
+    )
 
 
 def user_can_delete_asin_media_folder(user: User, asin: str | None) -> bool:
-    """是否可删除 media/file/<ASIN> 整目录。"""
+    """是否可删除 media/file/<ASIN> 整目录：超管或本人导入过。"""
     if getattr(user, 'is_superuser', False):
         return True
     a = normalize_asin(asin)
     if not a:
         return False
-    if user_is_assigned_to_asin(user, a):
-        return True
     from .models import ImportedMediaPath
 
     return ImportedMediaPath.objects.filter(user=user, rel_path=a).exists()
 
 
 def user_can_delete_excel_media_path(user: User, rel_path: str) -> bool:
-    """数据审核页删除：超管、被分配 ASIN 下任意路径，或本人导入的路径。"""
+    """数据审核页删除：超管或本人导入的路径。"""
     if getattr(user, 'is_superuser', False):
         return True
     if not user_can_access_excel_media_path(user, rel_path):
         return False
-    root = asin_root_from_rel_path(rel_path)
-    if root and user_is_assigned_to_asin(user, root):
-        return True
     from .models import ImportedMediaPath
 
     return ImportedMediaPath.objects.filter(user=user, rel_path=rel_path).exists()

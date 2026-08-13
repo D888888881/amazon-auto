@@ -9,8 +9,20 @@
 {% block content %}
 <div class="dash-page">
     <header class="dash-hero">
-        <h1 class="dash-hero__title">ASIN 数据看板{% if current_marketplace_label %} · {{ current_marketplace_label }}{% endif %}</h1>
-{#        <p class="dash-hero__sub">广告难度为 <code>ranking_percent</code>。运营难度1/2/3 各对应<strong>一个关键词</strong>下整段 <code>review_interval</code>（区间、平均销量、运营难度为一组）；每列用<strong>柱状图</strong>整体展示该关键词数据，悬停可看各区间运营难度。</p>#}
+        <div class="dash-hero__text">
+            <p class="dash-hero__eyebrow">Amazon · ASIN 分析</p>
+            <h1 class="dash-hero__title">数据看板</h1>
+            <p class="dash-hero__sub">筛选、校验、批量计算 ROI 与广告难度，一页完成核心决策。</p>
+        </div>
+        <div class="dash-hero__meta">
+            {% if current_marketplace_label %}
+            <span class="dash-pill dash-pill--site">{{ current_marketplace_label }}</span>
+            {% endif %}
+            {% if page_obj %}
+            <span class="dash-pill">本页 {{ rows|length }} 条</span>
+            <span class="dash-pill dash-pill--muted">共 {{ page_obj.paginator.count }} 条</span>
+            {% endif %}
+        </div>
     </header>
 
     {% if messages %}
@@ -30,225 +42,349 @@
     </form>
 
     <div class="dash-toolbar">
+        <div class="dash-toolbar__label">
+            <span class="dash-toolbar__title">批量操作</span>
+            <span class="dash-toolbar__hint" id="dash-selection-hint">勾选行后启用</span>
+        </div>
         <div class="dash-toolbar__actions">
-
-            <input type="text" name="exchange_rate" form="dash-batch-form" class="dash-rate-input"
-                   value="{{ default_exchange_rate }}"
-                   placeholder="汇率 USD→CNY" aria-label="汇率" title="已自动获取实时汇率，可手动修改">
-            <button type="submit" form="dash-batch-form" data-action="calc_roi_selected" class="dash-btn" id="dash-batch-roi" disabled>计算ROI</button>
-            <button type="submit" form="dash-batch-form" data-action="calc_ranking_selected" class="dash-btn" id="dash-batch-calc" disabled>计算广告难度</button>
-            <button type="submit" form="dash-batch-form" data-action="delete_batch" class="dash-btn dash-btn--danger" id="dash-batch-delete" disabled>批量删除</button>
-            <button type="button" class="dash-btn" id="dash-export-excel" disabled>导出 Excel</button>
+            <label class="dash-rate-wrap" title="已自动获取实时汇率，可手动修改">
+                <span class="dash-rate-wrap__label">汇率</span>
+                <input type="text" name="exchange_rate" form="dash-batch-form" class="dash-rate-input"
+                       value="{{ default_exchange_rate }}"
+                       placeholder="USD→CNY" aria-label="汇率">
+            </label>
+            <div class="dash-toolbar__group">
+                <button type="submit" form="dash-batch-form" data-action="calc_roi_selected" class="dash-btn dash-btn--accent" id="dash-batch-roi" disabled>计算ROI</button>
+                <button type="submit" form="dash-batch-form" data-action="calc_ranking_selected" class="dash-btn" id="dash-batch-calc" disabled>广告难度</button>
+            </div>
+            <div class="dash-toolbar__group">
+                <button type="submit" form="dash-batch-form" data-action="batch_roi_verify" class="dash-btn" id="dash-batch-verify" disabled>批量校验</button>
+                <button type="submit" form="dash-batch-form" data-action="batch_mark_passed" class="dash-btn" id="dash-batch-passed" disabled>标记已通过</button>
+                <button type="submit" form="dash-batch-form" data-action="batch_unmark_passed" class="dash-btn dash-btn--ghost" id="dash-batch-unpassed" disabled>取消已通过</button>
+            </div>
+            <div class="dash-toolbar__group">
+                <button type="button" class="dash-btn" id="dash-export-excel" disabled>导出</button>
+                <button type="submit" form="dash-batch-form" data-action="delete_batch" class="dash-btn dash-btn--danger" id="dash-batch-delete" disabled>删除</button>
+            </div>
         </div>
     </div>
 
-    <form method="get" class="dash-filter-form">
-        <div class="dash-filter-grid">
-            <label>ASIN搜索
-                <input type="text" name="asin_kw" placeholder="输入 ASIN 关键字" value="{{ request.GET.asin_kw }}">
-            </label>
-            <label>去广告毛利率%
-                <input type="number" step="0.01" name="profit_margin_min" placeholder="最小" value="{{ request.GET.profit_margin_min }}">
-                <input type="number" step="0.01" name="profit_margin_max" placeholder="最大" value="{{ request.GET.profit_margin_max }}">
-            </label>
-            <label>去广告投产比%
-                <input type="number" step="0.01" name="ad_removed_roi_min" placeholder="最小" value="{{ request.GET.ad_removed_roi_min }}">
-                <input type="number" step="0.01" name="ad_removed_roi_max" placeholder="最大" value="{{ request.GET.ad_removed_roi_max }}">
-            </label>
-            <label>体量
-                <input type="number" step="1" name="monthly_results_min" placeholder="最小" value="{{ request.GET.monthly_results_min }}">
-                <input type="number" step="1" name="monthly_results_max" placeholder="最大" value="{{ request.GET.monthly_results_max }}">
-            </label>
-            <label>利润额
-                <input type="number" step="0.01" name="profit_per_order_min" placeholder="最小" value="{{ request.GET.profit_per_order_min }}">
-                <input type="number" step="0.01" name="profit_per_order_max" placeholder="最大" value="{{ request.GET.profit_per_order_max }}">
-            </label>
-            <label>(体量*利润额)
-                <input type="number" step="0.01" name="monthly_sales_total_min" placeholder="最小" value="{{ request.GET.monthly_sales_total_min }}">
-                <input type="number" step="0.01" name="monthly_sales_total_max" placeholder="最大" value="{{ request.GET.monthly_sales_total_max }}">
-            </label>
-            <label>采购价
-                <input type="number" step="0.01" name="unit_purchase_min" placeholder="最小" value="{{ request.GET.unit_purchase_min }}">
-                <input type="number" step="0.01" name="unit_purchase_max" placeholder="最大" value="{{ request.GET.unit_purchase_max }}">
-            </label>
-            <label>(采购价+头程)
-                <input type="number" step="0.01" name="head_actual_total_min" placeholder="最小" value="{{ request.GET.head_actual_total_min }}">
-                <input type="number" step="0.01" name="head_actual_total_max" placeholder="最大" value="{{ request.GET.head_actual_total_max }}">
-            </label>
-            <label>分配人
-                <select name="assignee_user">
-                    <option value="">不限</option>
-                    {% for u in assignee_choices %}
-                    <option value="{{ u }}" {% if request.GET.assignee_user == u %}selected{% endif %}>{{ u }}</option>
-                    {% endfor %}
-                </select>
-            </label>
-            {% if viewer_is_superuser %}
-            <label>上传人
-                <select name="uploaded_by">
-                    <option value="">不限</option>
-                    {% for u in uploader_choices %}
-                    <option value="{{ u }}" {% if request.GET.uploaded_by == u %}selected{% endif %}>{{ u }}</option>
-                    {% endfor %}
-                </select>
-            </label>
-            {% endif %}
-            <label>是否校验
-                <select name="roi_verified">
-                    <option value="" {% if filters.roi_verified != 'yes' and filters.roi_verified != 'no' %}selected{% endif %}>全部</option>
-                    <option value="yes" {% if filters.roi_verified == 'yes' %}selected{% endif %}>是</option>
-                    <option value="no" {% if filters.roi_verified == 'no' %}selected{% endif %}>否</option>
-                </select>
-            </label>
-            <label>关注
-                <select name="follow_filter">
-                    <option value="" {% if not filters.follow_filter %}selected{% endif %}>全部</option>
-                    <option value="normal" {% if filters.follow_filter == 'normal' %}selected{% endif %}>未关注</option>
-                    <option value="priority" {% if filters.follow_filter == 'priority' %}selected{% endif %}>重点关注</option>
-                </select>
-            </label>
-            <label>更新时间(起)
-                <input type="datetime-local" name="updated_from" value="{{ filters.updated_from }}">
-            </label>
-            <label>更新时间(止)
-                <input type="datetime-local" name="updated_to" value="{{ filters.updated_to }}">
-            </label>
-            <label>广告难度%
-                <input type="number" step="0.001" name="ranking_percent_min" placeholder="最小" value="{{ request.GET.ranking_percent_min }}">
-                <input type="number" step="0.001" name="ranking_percent_max" placeholder="最大" value="{{ request.GET.ranking_percent_max }}">
-            </label>
-            <label>每页条数
-                <select name="per_page">
-                    <option value="10" {% if per_page == 10 %}selected{% endif %}>10</option>
-                    <option value="20" {% if per_page == 20 %}selected{% endif %}>20</option>
-                    <option value="40" {% if per_page == 40 %}selected{% endif %}>40</option>
-                    <option value="100" {% if per_page == 100 %}selected{% endif %}>100</option>
-                    <option value="custom" {% if request.GET.per_page == 'custom' %}selected{% endif %}>自定义</option>
-                </select>
-                <input type="number" name="per_page_custom" min="1" max="500" placeholder="自定义上限500" value="{{ request.GET.per_page_custom }}">
-            </label>
+    <form method="get" class="dash-filter-form" id="dash-filter-form">
+        <div class="dash-filter-head">
+            <div class="dash-filter-head__left">
+                <span class="dash-filter-head__icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3-3"/></svg>
+                </span>
+                <div>
+                    <span class="dash-filter-head__title">筛选条件</span>
+                    <span class="dash-filter-head__sub">按 ASIN、财务指标与状态收窄列表</span>
+                </div>
+            </div>
+            <div class="dash-filter-head__right">
+                <button type="submit" class="dash-btn dash-btn--primary">应用筛选</button>
+                <a href="{% url 'index' %}" class="dash-btn dash-btn--ghost">重置</a>
+            </div>
         </div>
-        <div class="dash-filter-row">
-            <div class="dash-grade-filter">
-                <span>产品等级：</span>
-                {% for g in 'ABCDE' %}
-                <label><input type="checkbox" name="product_grade" value="{{ g }}" {% if g in filters.selected_grades %}checked{% endif %}> {{ g }}</label>
-                {% endfor %}
-            </div>
-            <div class="dash-ops-filter">
-                <span>运营难度：</span>
-                <select name="ops_slot">
-                    <option value="any" {% if filters.ops_slot == 'any' %}selected{% endif %}>不限</option>
-                    <option value="1" {% if filters.ops_slot == '1' %}selected{% endif %}>运营难度1</option>
-                    <option value="2" {% if filters.ops_slot == '2' %}selected{% endif %}>运营难度2</option>
-                    <option value="3" {% if filters.ops_slot == '3' %}selected{% endif %}>运营难度3</option>
-                </select>
-                <select name="ops_range">
-                    <option value="all" {% if filters.ops_range == 'all' %}selected{% endif %}>不限</option>
-                    <option value="0-5" {% if filters.ops_range == '0-5' %}selected{% endif %}>0%-5%</option>
-                    <option value="5-10" {% if filters.ops_range == '5-10' %}selected{% endif %}>5%-10%</option>
-                    <option value="10-20" {% if filters.ops_range == '10-20' %}selected{% endif %}>10%-20%</option>
-                    <option value="30-100" {% if filters.ops_range == '30-100' %}selected{% endif %}>30%-100%</option>
-                    <option value="custom" {% if filters.ops_range == 'custom' %}selected{% endif %}>自定义</option>
-                </select>
-                <input type="number" step="0.01" name="ops_custom_min" placeholder="自定义最小%" value="{{ request.GET.ops_custom_min }}">
-                <input type="number" step="0.01" name="ops_custom_max" placeholder="自定义最大%" value="{{ request.GET.ops_custom_max }}">
-                <span>评价数量：</span>
-                <select name="ops_review_interval">
-                    <option value="all" {% if filters.ops_review_interval == 'all' %}selected{% endif %}>不限</option>
-                    {% for opt in ops_review_interval_choices %}
-                    <option value="{{ opt }}" {% if filters.ops_review_interval == opt %}selected{% endif %}>{{ opt }}</option>
-                    {% endfor %}
-                </select>
-            </div>
-            <div class="dash-filter-actions">
-                <button type="submit" class="dash-btn dash-btn--primary">筛选</button>
-                <a href="{% url 'index' %}" class="dash-btn">重置</a>
-            </div>
+
+        <div class="dash-filter-sections">
+            <section class="dash-filter-section">
+                <h3 class="dash-filter-section__title">搜索与状态</h3>
+                <div class="dash-filter-fields">
+                    <label class="dash-field dash-field--wide">
+                        <span class="dash-field__label">ASIN 搜索</span>
+                        <input type="text" name="asin_kw" class="dash-field__control" placeholder="输入 ASIN 关键字" value="{{ request.GET.asin_kw }}">
+                    </label>
+                    {% if viewer_is_superuser %}
+                    <label class="dash-field">
+                        <span class="dash-field__label">上传人</span>
+                        <select name="uploaded_by" class="dash-field__control">
+                            <option value="">不限</option>
+                            {% for u in uploader_choices %}
+                            <option value="{{ u }}" {% if request.GET.uploaded_by == u %}selected{% endif %}>{{ u }}</option>
+                            {% endfor %}
+                        </select>
+                    </label>
+                    {% endif %}
+                    <label class="dash-field">
+                        <span class="dash-field__label">是否校验（我）</span>
+                        <select name="roi_verified" class="dash-field__control">
+                            <option value="" {% if filters.roi_verified != 'yes' and filters.roi_verified != 'no' %}selected{% endif %}>全部</option>
+                            <option value="yes" {% if filters.roi_verified == 'yes' %}selected{% endif %}>是</option>
+                            <option value="no" {% if filters.roi_verified == 'no' %}selected{% endif %}>否</option>
+                        </select>
+                    </label>
+                    <label class="dash-field">
+                        <span class="dash-field__label">已通过</span>
+                        <select name="passed" class="dash-field__control">
+                            <option value="" {% if filters.passed != 'yes' and filters.passed != 'no' %}selected{% endif %}>全部</option>
+                            <option value="yes" {% if filters.passed == 'yes' %}selected{% endif %}>是</option>
+                            <option value="no" {% if filters.passed == 'no' %}selected{% endif %}>否</option>
+                        </select>
+                    </label>
+                    <label class="dash-field">
+                        <span class="dash-field__label">关注</span>
+                        <select name="follow_filter" class="dash-field__control">
+                            <option value="" {% if not filters.follow_filter %}selected{% endif %}>全部</option>
+                            <option value="normal" {% if filters.follow_filter == 'normal' %}selected{% endif %}>未关注</option>
+                            <option value="priority" {% if filters.follow_filter == 'priority' %}selected{% endif %}>重点关注</option>
+                        </select>
+                    </label>
+                    <label class="dash-field">
+                        <span class="dash-field__label">更新时间（起）</span>
+                        <input type="datetime-local" name="updated_from" class="dash-field__control" value="{{ filters.updated_from }}">
+                    </label>
+                    <label class="dash-field">
+                        <span class="dash-field__label">更新时间（止）</span>
+                        <input type="datetime-local" name="updated_to" class="dash-field__control" value="{{ filters.updated_to }}">
+                    </label>
+                    <label class="dash-field">
+                        <span class="dash-field__label">每页条数</span>
+                        <div class="dash-field__split">
+                            <select name="per_page" class="dash-field__control">
+                                <option value="10" {% if per_page == 10 %}selected{% endif %}>10</option>
+                                <option value="20" {% if per_page == 20 %}selected{% endif %}>20</option>
+                                <option value="40" {% if per_page == 40 %}selected{% endif %}>40</option>
+                                <option value="100" {% if per_page == 100 %}selected{% endif %}>100</option>
+                                <option value="custom" {% if request.GET.per_page == 'custom' %}selected{% endif %}>自定义</option>
+                            </select>
+                            <input type="number" name="per_page_custom" class="dash-field__control" min="1" max="500" placeholder="自定义≤500" value="{{ request.GET.per_page_custom }}">
+                        </div>
+                    </label>
+                </div>
+            </section>
+
+            <section class="dash-filter-section">
+                <h3 class="dash-filter-section__title">财务与难度指标</h3>
+                <div class="dash-filter-fields">
+                    <div class="dash-field">
+                        <span class="dash-field__label">去广告毛利率 %</span>
+                        <div class="dash-range">
+                            <input type="number" step="0.01" name="profit_margin_min" class="dash-field__control" placeholder="最小" value="{{ request.GET.profit_margin_min }}">
+                            <span class="dash-range__sep" aria-hidden="true">–</span>
+                            <input type="number" step="0.01" name="profit_margin_max" class="dash-field__control" placeholder="最大" value="{{ request.GET.profit_margin_max }}">
+                        </div>
+                    </div>
+                    <div class="dash-field">
+                        <span class="dash-field__label">去广告投产比 %</span>
+                        <div class="dash-range">
+                            <input type="number" step="0.01" name="ad_removed_roi_min" class="dash-field__control" placeholder="最小" value="{{ request.GET.ad_removed_roi_min }}">
+                            <span class="dash-range__sep" aria-hidden="true">–</span>
+                            <input type="number" step="0.01" name="ad_removed_roi_max" class="dash-field__control" placeholder="最大" value="{{ request.GET.ad_removed_roi_max }}">
+                        </div>
+                    </div>
+                    <div class="dash-field">
+                        <span class="dash-field__label">体量</span>
+                        <div class="dash-range">
+                            <input type="number" step="1" name="monthly_results_min" class="dash-field__control" placeholder="最小" value="{{ request.GET.monthly_results_min }}">
+                            <span class="dash-range__sep" aria-hidden="true">–</span>
+                            <input type="number" step="1" name="monthly_results_max" class="dash-field__control" placeholder="最大" value="{{ request.GET.monthly_results_max }}">
+                        </div>
+                    </div>
+                    <div class="dash-field">
+                        <span class="dash-field__label">利润额 ￥</span>
+                        <div class="dash-range">
+                            <input type="number" step="0.01" name="profit_per_order_min" class="dash-field__control" placeholder="最小" value="{{ request.GET.profit_per_order_min }}">
+                            <span class="dash-range__sep" aria-hidden="true">–</span>
+                            <input type="number" step="0.01" name="profit_per_order_max" class="dash-field__control" placeholder="最大" value="{{ request.GET.profit_per_order_max }}">
+                        </div>
+                    </div>
+                    <div class="dash-field">
+                        <span class="dash-field__label">体量 × 利润 $</span>
+                        <div class="dash-range">
+                            <input type="number" step="0.01" name="monthly_sales_total_min" class="dash-field__control" placeholder="最小" value="{{ request.GET.monthly_sales_total_min }}">
+                            <span class="dash-range__sep" aria-hidden="true">–</span>
+                            <input type="number" step="0.01" name="monthly_sales_total_max" class="dash-field__control" placeholder="最大" value="{{ request.GET.monthly_sales_total_max }}">
+                        </div>
+                    </div>
+                    <div class="dash-field">
+                        <span class="dash-field__label">采购价 ￥</span>
+                        <div class="dash-range">
+                            <input type="number" step="0.01" name="unit_purchase_min" class="dash-field__control" placeholder="最小" value="{{ request.GET.unit_purchase_min }}">
+                            <span class="dash-range__sep" aria-hidden="true">–</span>
+                            <input type="number" step="0.01" name="unit_purchase_max" class="dash-field__control" placeholder="最大" value="{{ request.GET.unit_purchase_max }}">
+                        </div>
+                    </div>
+                    <div class="dash-field">
+                        <span class="dash-field__label">采购价 + 头程 ￥</span>
+                        <div class="dash-range">
+                            <input type="number" step="0.01" name="head_actual_total_min" class="dash-field__control" placeholder="最小" value="{{ request.GET.head_actual_total_min }}">
+                            <span class="dash-range__sep" aria-hidden="true">–</span>
+                            <input type="number" step="0.01" name="head_actual_total_max" class="dash-field__control" placeholder="最大" value="{{ request.GET.head_actual_total_max }}">
+                        </div>
+                    </div>
+                    <div class="dash-field">
+                        <span class="dash-field__label">广告难度 %</span>
+                        <div class="dash-range">
+                            <input type="number" step="0.001" name="ranking_percent_min" class="dash-field__control" placeholder="最小" value="{{ request.GET.ranking_percent_min }}">
+                            <span class="dash-range__sep" aria-hidden="true">–</span>
+                            <input type="number" step="0.001" name="ranking_percent_max" class="dash-field__control" placeholder="最大" value="{{ request.GET.ranking_percent_max }}">
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="dash-filter-section dash-filter-section--footer">
+                <h3 class="dash-filter-section__title">产品等级与运营难度</h3>
+                <div class="dash-filter-footer">
+                    <div class="dash-grade-filter" role="group" aria-label="产品等级">
+                        <span class="dash-filter-footer__label">产品等级</span>
+                        <div class="dash-grade-chips">
+                            {% for g in 'ABCDE' %}
+                            <label class="dash-grade-chip dash-grade-chip--{{ g|lower }}">
+                                <input type="checkbox" name="product_grade" value="{{ g }}" {% if g in filters.selected_grades %}checked{% endif %}>
+                                <span>{{ g }}</span>
+                            </label>
+                            {% endfor %}
+                        </div>
+                    </div>
+                    <div class="dash-ops-filter">
+                        <span class="dash-filter-footer__label">运营难度</span>
+                        <div class="dash-ops-controls">
+                            <select name="ops_slot" class="dash-field__control">
+                                <option value="any" {% if filters.ops_slot == 'any' %}selected{% endif %}>不限列</option>
+                                <option value="1" {% if filters.ops_slot == '1' %}selected{% endif %}>运营难度1</option>
+                                <option value="2" {% if filters.ops_slot == '2' %}selected{% endif %}>运营难度2</option>
+                                <option value="3" {% if filters.ops_slot == '3' %}selected{% endif %}>运营难度3</option>
+                            </select>
+                            <select name="ops_range" class="dash-field__control">
+                                <option value="all" {% if filters.ops_range == 'all' %}selected{% endif %}>难度区间不限</option>
+                                <option value="0-5" {% if filters.ops_range == '0-5' %}selected{% endif %}>0%–5%</option>
+                                <option value="5-10" {% if filters.ops_range == '5-10' %}selected{% endif %}>5%–10%</option>
+                                <option value="10-20" {% if filters.ops_range == '10-20' %}selected{% endif %}>10%–20%</option>
+                                <option value="30-100" {% if filters.ops_range == '30-100' %}selected{% endif %}>30%–100%</option>
+                                <option value="custom" {% if filters.ops_range == 'custom' %}selected{% endif %}>自定义</option>
+                            </select>
+                            <div class="dash-range dash-range--ops">
+                                <input type="number" step="0.01" name="ops_custom_min" class="dash-field__control" placeholder="最小%" value="{{ request.GET.ops_custom_min }}">
+                                <span class="dash-range__sep" aria-hidden="true">–</span>
+                                <input type="number" step="0.01" name="ops_custom_max" class="dash-field__control" placeholder="最大%" value="{{ request.GET.ops_custom_max }}">
+                            </div>
+                            <select name="ops_review_interval" class="dash-field__control" title="评价数量">
+                                <option value="all" {% if filters.ops_review_interval == 'all' %}selected{% endif %}>评价数量不限</option>
+                                {% for opt in ops_review_interval_choices %}
+                                <option value="{{ opt }}" {% if filters.ops_review_interval == opt %}selected{% endif %}>评价 {{ opt }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                    </div>
+                    <div class="dash-filter-actions">
+                        <button type="submit" class="dash-btn dash-btn--primary">应用筛选</button>
+                        <a href="{% url 'index' %}" class="dash-btn">重置全部</a>
+                    </div>
+                </div>
+            </section>
         </div>
     </form>
 
     {% if rows %}
+    <div class="dash-table-shell">
     <div class="dash-table-wrap">
         <table class="dash-table">
             <thead>
                 <tr>
                     <th class="col-check"><input type="checkbox" id="dash-select-all" title="全选" aria-label="全选"></th>
-                    <th>序号</th>
-                    <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=asin&amp;dir={% if sort == 'asin' and dir == 'asc' %}desc{% else %}asc{% endif %}">ASIN</a></th>
-                    <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=profit_margin&amp;dir={% if sort == 'profit_margin' and dir == 'asc' %}desc{% else %}asc{% endif %}">去广告毛利率</a></th>
-                    <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=ad_removed_roi&amp;dir={% if sort == 'ad_removed_roi' and dir == 'asc' %}desc{% else %}asc{% endif %}">去广告投产比%</a></th>
-
+                    <th class="col-idx">#</th>
+                    <th class="col-product"><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=asin&amp;dir={% if sort == 'asin' and dir == 'asc' %}desc{% else %}asc{% endif %}">产品 / ASIN</a></th>
+                    <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=profit_margin&amp;dir={% if sort == 'profit_margin' and dir == 'asc' %}desc{% else %}asc{% endif %}">毛利率</a></th>
+                    <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=ad_removed_roi&amp;dir={% if sort == 'ad_removed_roi' and dir == 'asc' %}desc{% else %}asc{% endif %}">投产比</a></th>
                     <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=monthly_results&amp;dir={% if sort == 'monthly_results' and dir == 'asc' %}desc{% else %}asc{% endif %}">体量</a></th>
-
-                    <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=profit_per_order&amp;dir={% if sort == 'profit_per_order' and dir == 'asc' %}desc{% else %}asc{% endif %}">利润额￥</a></th>
-                    <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=monthly_sales_total&amp;dir={% if sort == 'monthly_sales_total' and dir == 'asc' %}desc{% else %}asc{% endif %}">(体量*利润额)$</a></th>
-                <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=unit_purchase&amp;dir={% if sort == 'unit_purchase' and dir == 'asc' %}desc{% else %}asc{% endif %}">采购价￥</a></th>
-                    <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=head_actual_total&amp;dir={% if sort == 'head_actual_total' and dir == 'asc' %}desc{% else %}asc{% endif %}">(采购价+头程)￥</a></th>
-                    <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=ranking_percent&amp;dir={% if sort == 'ranking_percent' and dir == 'asc' %}desc{% else %}asc{% endif %}">广告难度%</a></th>
-                    <th class="col-grade"><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=product_grade&amp;dir={% if sort == 'product_grade' and dir == 'asc' %}desc{% else %}asc{% endif %}">产品等级</a></th>
-                    <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=updated_at&amp;dir={% if sort == 'updated_at' and dir == 'asc' %}desc{% else %}asc{% endif %}">更新时间</a></th>
+                    <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=profit_per_order&amp;dir={% if sort == 'profit_per_order' and dir == 'asc' %}desc{% else %}asc{% endif %}">利润额</a></th>
+                    <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=monthly_sales_total&amp;dir={% if sort == 'monthly_sales_total' and dir == 'asc' %}desc{% else %}asc{% endif %}">体量×利润</a></th>
+                    <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=unit_purchase&amp;dir={% if sort == 'unit_purchase' and dir == 'asc' %}desc{% else %}asc{% endif %}">采购价</a></th>
+                    <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=head_actual_total&amp;dir={% if sort == 'head_actual_total' and dir == 'asc' %}desc{% else %}asc{% endif %}">成本合计</a></th>
+                    <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=ranking_percent&amp;dir={% if sort == 'ranking_percent' and dir == 'asc' %}desc{% else %}asc{% endif %}">广告难度</a></th>
+                    <th class="col-grade"><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=product_grade&amp;dir={% if sort == 'product_grade' and dir == 'asc' %}desc{% else %}asc{% endif %}">等级</a></th>
+                    <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=updated_at&amp;dir={% if sort == 'updated_at' and dir == 'asc' %}desc{% else %}asc{% endif %}">更新</a></th>
                     {% if viewer_is_superuser %}<th>上传人</th>{% endif %}
-                    <th>分配人</th>
-                    <th>是否校验</th>
+                    <th>校验</th>
+                    <th>通过</th>
                     <th><a href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort=follow_status&amp;dir={% if sort == 'follow_status' and dir == 'asc' %}desc{% else %}asc{% endif %}">关注</a></th>
-                    <th class="col-product-img">产品图</th>
                     <th>运营难度1</th>
                     <th>运营难度2</th>
                     <th>运营难度3</th>
-
                     <th>操作</th>
                 </tr>
             </thead>
             <tbody>
                 {% for row in rows %}
-                <tr data-can-delete="{% if row.can_delete_row %}1{% else %}0{% endif %}">
+                <tr data-can-delete="{% if row.can_delete_row %}1{% else %}0{% endif %}" class="{% if row.asin_passed %}is-passed{% endif %}{% if row.follow_status == 'priority' %} is-priority{% endif %}">
                     <td class="col-check"><input type="checkbox" name="row_ids" value="{{ row.pk }}" class="dash-row-check" form="dash-batch-form" aria-label="选择 {{ row.asin }}"{% if row.ops_readonly %} disabled{% endif %}></td>
-                    <td class="col-num">{{ page_obj.start_index|add:forloop.counter0 }}</td>
-                    <td class="col-asin">
-                        <a class="dash-asin-link" href="{% url 'excel_editor' %}?path={{ row.asin|add:'/'|add:row.asin|add:'_ROI-US-pack.xlsx'|urlencode }}" title="在 Excel 编辑器中打开该 ASIN 的 ROI-US-pack 表">{{ row.asin }}</a>
+                    <td class="col-idx">{{ page_obj.start_index|add:forloop.counter0 }}</td>
+                    <td class="col-product">
+                        <div class="dash-product">
+                            <div class="dash-product__thumb">
+                                {% if row.product_image_url %}
+                                <button type="button" class="dash-product-thumb-btn js-product-image-open" data-image-url="{{ row.product_image_url }}" title="查看 {{ row.asin }} 产品图" aria-label="查看 {{ row.asin }} 产品图">
+                                    <img src="{{ row.product_image_url }}" alt="" class="dash-product-thumb" loading="lazy" decoding="async" width="48" height="48">
+                                </button>
+                                {% else %}
+                                <span class="dash-product-thumb dash-product-thumb--ph" aria-hidden="true">ASIN</span>
+                                {% endif %}
+                            </div>
+                            <div class="dash-product__body">
+                                <a class="dash-asin-link" href="{% url 'excel_editor' %}?path={{ row.asin|add:'/'|add:row.asin|add:'_ROI-US-pack.xlsx'|urlencode }}" title="打开 ROI-US-pack">{{ row.asin }}</a>
+                                <div class="dash-product__tags">
+                                    {% if row.asin_passed %}<span class="dash-mini-tag dash-mini-tag--ok">已通过</span>{% endif %}
+                                    {% if row.roi_pack_verified %}<span class="dash-mini-tag dash-mini-tag--info">我已校验</span>{% endif %}
+                                    {% if row.follow_status == 'priority' %}<span class="dash-mini-tag dash-mini-tag--warn">重点</span>{% endif %}
+                                </div>
+                            </div>
+                        </div>
                     </td>
-                    <td class="col-num col-profit-margin">{% if row.profit_margin is not None %}{{ row.profit_margin|floatformat:2 }}%{% else %}—{% endif %}</td>
-                    <td class="col-num col-ad-roi">{% if row.ad_removed_roi is not None %}{{ row.ad_removed_roi|floatformat:2 }}%{% else %}—{% endif %}</td>
-                    <td class="col-num">{% if row.monthly_results is not None %}{{ row.monthly_results|floatformat:0 }}{% else %}—{% endif %}</td>
-
-                    <td class="col-num col-profit-order">{% if row.profit_per_order is not None %}{{ row.profit_per_order|floatformat:2 }}￥{% else %}—{% endif %}</td>
-                    <td class="col-num">
+                    <td class="col-num col-metric col-profit-margin">{% if row.profit_margin is not None %}<span class="dash-metric">{{ row.profit_margin|floatformat:2 }}<small>%</small></span>{% else %}<span class="dash-empty-cell">—</span>{% endif %}</td>
+                    <td class="col-num col-metric col-ad-roi">{% if row.ad_removed_roi is not None %}<span class="dash-metric dash-metric--roi">{{ row.ad_removed_roi|floatformat:2 }}<small>%</small></span>{% else %}<span class="dash-empty-cell">—</span>{% endif %}</td>
+                    <td class="col-num col-metric">{% if row.monthly_results is not None %}<span class="dash-metric dash-metric--vol">{{ row.monthly_results|floatformat:0 }}</span>{% else %}<span class="dash-empty-cell">—</span>{% endif %}</td>
+                    <td class="col-num col-metric col-profit-order">{% if row.profit_per_order is not None %}<span class="dash-metric">{{ row.profit_per_order|floatformat:2 }}<small>￥</small></span>{% else %}<span class="dash-empty-cell">—</span>{% endif %}</td>
+                    <td class="col-num col-metric">
                         {% if row.monthly_sales_total is not None %}
-                        {{ row.monthly_sales_total|floatformat:2 }}$
-                        {% else %}—{% endif %}
+                        <span class="dash-metric">{{ row.monthly_sales_total|floatformat:2 }}<small>$</small></span>
+                        {% else %}<span class="dash-empty-cell">—</span>{% endif %}
                     </td>
-                <td class="col-num">
-                    <input type="number" step="0.01" form="dash-batch-form"
-                           class="dash-cell-input js-up"
-                           name="unit_purchase_{{ row.pk }}"
-                           value="{% if row.unit_purchase is not None %}{{ row.unit_purchase|floatformat:2 }}{% endif %}"
-                           placeholder="采购价"{% if row.ops_readonly %} disabled{% endif %}>
-                </td>
-                    <td class="col-num">
+                    <td class="col-num col-cost">
                         <input type="number" step="0.01" form="dash-batch-form"
-                               class="dash-cell-input js-hd"
-                               name="head_distance_{{ row.pk }}"
-                               value="{% if row.head_distance is not None %}{{ row.head_distance|floatformat:2 }}{% endif %}"
-                               placeholder="头程"{% if row.ops_readonly %} disabled{% endif %}>
-                        <span class="dash-cost-preview js-cost-preview">
-                            {% if row.unit_purchase is not None and row.head_distance is not None %}
-                                {{ row.unit_purchase|floatformat:2 }}+{{ row.head_distance|floatformat:2 }}={% if row.head_actual_total is not None %}{{ row.head_actual_total|floatformat:2 }}{% else %}{{ row.unit_purchase|add:row.head_distance|floatformat:2 }}{% endif %}￥
-                            {% else %}—{% endif %}
-                        </span>
+                               class="dash-cell-input js-up"
+                               name="unit_purchase_{{ row.pk }}"
+                               value="{% if row.unit_purchase is not None %}{{ row.unit_purchase|floatformat:2 }}{% endif %}"
+                               placeholder="采购价"{% if row.ops_readonly %} disabled{% endif %}>
                     </td>
-                    <td class="col-num col-ranking-percent">{% if row.ranking_percent is not None %}{{ row.ranking_percent|floatformat:3 }}%{% else %}—{% endif %}</td>
-                <td class="col-grade">
-                    {% if row.asin %}
-                    <a href="https://www.amazon.com/DP/{{ row.asin }}" class="dash-grade-link dash-grade dash-grade--{{ row.product_grade|lower }}" target="_blank" rel="noopener noreferrer" title="在 Amazon 打开 {{ row.asin }}">{{ row.product_grade }}</a>
-                    {% else %}
-                    <span class="dash-grade dash-grade--{{ row.product_grade|lower }}">{{ row.product_grade }}</span>
-                    {% endif %}
-                </td>
-                    <td class="col-updated-at">{% if row.data_updated_at %}{{ row.data_updated_at|date:'Y-m-d H:i:s' }}{% else %}—{% endif %}</td>
-                    {% if viewer_is_superuser %}<td class="col-uploader" title="该 ASIN 资料上传者">{{ row.uploader_display }}</td>{% endif %}
-                    <td class="col-assignees" title="该 ASIN 文件夹当前分配的用户">{{ row.assignee_display }}</td>
-                    <td class="col-roi-verify" title="在 ROI-US-pack 编辑器中点击「确认校验」后为「是」">{% if row.roi_pack_verified %}是{% else %}否{% endif %}</td>
+                    <td class="col-num col-cost">
+                        <div class="dash-cost-stack">
+                            <input type="number" step="0.01" form="dash-batch-form"
+                                   class="dash-cell-input js-hd"
+                                   name="head_distance_{{ row.pk }}"
+                                   value="{% if row.head_distance is not None %}{{ row.head_distance|floatformat:2 }}{% endif %}"
+                                   placeholder="头程"{% if row.ops_readonly %} disabled{% endif %}>
+                            <span class="dash-cost-preview js-cost-preview">
+                                {% if row.unit_purchase is not None and row.head_distance is not None %}
+                                    {% if row.head_actual_total is not None %}合计 {{ row.head_actual_total|floatformat:2 }}￥{% else %}合计 {{ row.unit_purchase|add:row.head_distance|floatformat:2 }}￥{% endif %}
+                                {% else %}合计 —{% endif %}
+                            </span>
+                        </div>
+                    </td>
+                    <td class="col-num col-metric col-ranking-percent">{% if row.ranking_percent is not None %}<span class="dash-metric dash-metric--rank">{{ row.ranking_percent|floatformat:3 }}<small>%</small></span>{% else %}<span class="dash-empty-cell">—</span>{% endif %}</td>
+                    <td class="col-grade">
+                        {% if row.asin %}
+                        <a href="https://www.amazon.com/DP/{{ row.asin }}" class="dash-grade-link dash-grade dash-grade--{{ row.product_grade|lower }}" target="_blank" rel="noopener noreferrer" title="在 Amazon 打开 {{ row.asin }}">{{ row.product_grade|default:"—" }}</a>
+                        {% else %}
+                        <span class="dash-grade dash-grade--{{ row.product_grade|lower }}">{{ row.product_grade|default:"—" }}</span>
+                        {% endif %}
+                    </td>
+                    <td class="col-updated-at">{% if row.data_updated_at %}<time datetime="{{ row.data_updated_at|date:'c' }}">{{ row.data_updated_at|date:'m-d H:i' }}</time>{% else %}<span class="dash-empty-cell">—</span>{% endif %}</td>
+                    {% if viewer_is_superuser %}<td class="col-uploader" title="资料上传者"><span class="dash-person">{{ row.uploader_display }}</span></td>{% endif %}
+                    <td class="col-roi-verify" title="已校验该 ASIN 的用户">
+                        {% if row.roi_verify_labels and row.roi_verify_labels != '—' %}
+                        <span class="dash-status-chip dash-status-chip--verify">{{ row.roi_verify_labels }}</span>
+                        {% else %}
+                        <span class="dash-status-chip dash-status-chip--muted">未校验</span>
+                        {% endif %}
+                    </td>
+                    <td class="col-passed" title="全局已通过">
+                        {% if row.asin_passed %}
+                        <span class="dash-status-chip dash-status-chip--pass">已通过</span>
+                        {% else %}
+                        <span class="dash-status-chip dash-status-chip--muted">未通过</span>
+                        {% endif %}
+                    </td>
                     <td class="col-follow">
                         {% if row.ops_readonly %}
                         <span class="dash-follow-badge dash-follow-badge--{% if row.follow_status == 'priority' %}priority{% else %}normal{% endif %}">
@@ -267,23 +403,13 @@
                         </form>
                         {% endif %}
                     </td>
-                    <td class="col-product-img">
-                        {% if row.product_image_url %}
-                        <button type="button" class="dash-product-thumb-btn js-product-image-open" data-image-url="{{ row.product_image_url }}" title="点击查看 {{ row.asin }} 产品图" aria-label="查看 {{ row.asin }} 产品图">
-                            <img src="{{ row.product_image_url }}" alt="" class="dash-product-thumb" loading="lazy" decoding="async" width="40" height="40">
-                        </button>
-                        {% else %}
-                        <span class="dash-product-thumb--empty">—</span>
-                        {% endif %}
-                    </td>
                     <td class="col-ops-chart">{% include "auto_amazon/_ops_cell.html" with payload=row.ops_difficulty_1 row_pk=row.pk slot=1 ops_readonly=row.ops_readonly %}</td>
                     <td class="col-ops-chart">{% include "auto_amazon/_ops_cell.html" with payload=row.ops_difficulty_2 row_pk=row.pk slot=2 ops_readonly=row.ops_readonly %}</td>
                     <td class="col-ops-chart">{% include "auto_amazon/_ops_cell.html" with payload=row.ops_difficulty_3 row_pk=row.pk slot=3 ops_readonly=row.ops_readonly %}</td>
-
-                    <td>
+                    <td class="col-actions">
                         <div class="dash-row-actions">
                             {% if row.can_open_dir %}
-                            <a class="dash-btn" href="{% url 'excel' %}?path={{ row.asin|urlencode }}" title="打开该 ASIN 的文件目录">目录</a>
+                            <a class="dash-btn dash-btn--sm" href="{% url 'excel' %}?path={{ row.asin|urlencode }}" title="打开该 ASIN 的文件目录">目录</a>
                             {% endif %}
                             {% if row.can_delete_row %}
                             <form method="post" action="{% url 'index' %}" style="display:inline" class="js-delete-one-form">
@@ -291,7 +417,7 @@
                                 <input type="hidden" name="action" value="delete_one">
                                 <input type="hidden" name="row_id" value="{{ row.pk }}">
                                 <input type="hidden" name="delete_with_folder" value="0" class="js-delete-with-folder">
-                                <button type="submit" class="dash-btn">删除</button>
+                                <button type="submit" class="dash-btn dash-btn--sm dash-btn--danger-soft">删除</button>
                             </form>
                             {% endif %}
                         </div>
@@ -301,26 +427,29 @@
             </tbody>
         </table>
     </div>
+    </div>
     {% if page_obj.paginator.num_pages > 1 %}
+    <div class="dash-pager" id="dash-pager">
     <div class="dash-pagination">
         {% if page_obj.has_previous %}
-        <a class="dash-btn" href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort={{ sort }}&amp;dir={{ dir }}&amp;page={{ page_obj.previous_page_number }}">上一页</a>
+        <a class="dash-btn" href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort={{ sort }}&amp;dir={{ dir }}&amp;page={{ page_obj.previous_page_number }}#dash-pager">上一页</a>
         {% endif %}
         {% for p in page_numbers %}
             {% if p == page_obj.number %}
             <span class="dash-page-num dash-page-num--active">{{ p }}</span>
             {% else %}
-            <a class="dash-page-num" href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort={{ sort }}&amp;dir={{ dir }}&amp;page={{ p }}">{{ p }}</a>
+            <a class="dash-page-num" href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort={{ sort }}&amp;dir={{ dir }}&amp;page={{ p }}#dash-pager">{{ p }}</a>
             {% endif %}
         {% endfor %}
         {% if page_obj.has_next %}
-        <a class="dash-btn" href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort={{ sort }}&amp;dir={{ dir }}&amp;page={{ page_obj.next_page_number }}">下一页</a>
+        <a class="dash-btn" href="{% url 'index' %}?{% if filter_qs %}{{ filter_qs }}&amp;{% endif %}sort={{ sort }}&amp;dir={{ dir }}&amp;page={{ page_obj.next_page_number }}#dash-pager">下一页</a>
         {% endif %}
     </div>
     <div class="dash-pagination-meta">
         第
         <input type="number" id="dash-page-jump" class="dash-page-jump-input" min="1" max="{{ page_obj.paginator.num_pages }}" value="{{ page_obj.number }}" aria-label="跳转到页码">
         / {{ page_obj.paginator.num_pages }} 页（共 {{ page_obj.paginator.count }} 条）
+    </div>
     </div>
     {% endif %}
     {% else %}
@@ -356,6 +485,9 @@
 
 <script>
 (function () {
+  var DASH_ROI_RETURN_KEY = 'dash_roi_return';
+  var DASH_ROI_RESTORE_KEY = 'dash_roi_do_restore';
+
   try {
     var k = 'asin_roi_pack_verified_nav';
     if (sessionStorage.getItem(k) === '1') {
@@ -368,6 +500,55 @@
       }
     }
   } catch (e) {}
+
+  // 从 ROI 表返回时：恢复筛选/分页 URL 对应页，并滚回离开前的位置
+  (function restoreDashPositionFromRoi() {
+    try {
+      if (sessionStorage.getItem(DASH_ROI_RESTORE_KEY) !== '1') return;
+      sessionStorage.removeItem(DASH_ROI_RESTORE_KEY);
+      var raw = sessionStorage.getItem(DASH_ROI_RETURN_KEY);
+      if (!raw) return;
+      var o = JSON.parse(raw);
+      if (!o || typeof o !== 'object') return;
+      if (typeof history !== 'undefined' && 'scrollRestoration' in history) {
+        history.scrollRestoration = 'manual';
+      }
+      function applyScroll() {
+        if (typeof o.scrollY === 'number' && o.scrollY >= 0) {
+          window.scrollTo(0, o.scrollY);
+          return;
+        }
+        if (o.asin) {
+          var links = document.querySelectorAll('.dash-asin-link');
+          for (var i = 0; i < links.length; i++) {
+            if ((links[i].textContent || '').trim().toUpperCase() === String(o.asin).toUpperCase()) {
+              links[i].scrollIntoView({ block: 'center', behavior: 'auto' });
+              break;
+            }
+          }
+        }
+      }
+      requestAnimationFrame(function () {
+        applyScroll();
+        setTimeout(applyScroll, 50);
+        setTimeout(applyScroll, 200);
+      });
+    } catch (e) {}
+  })();
+
+  // 点击 ASIN 进入 ROI 表前：记住当前首页 URL 与滚动位置
+  document.addEventListener('click', function (e) {
+    var a = e.target.closest && e.target.closest('a.dash-asin-link');
+    if (!a) return;
+    try {
+      sessionStorage.setItem(DASH_ROI_RETURN_KEY, JSON.stringify({
+        url: window.location.pathname + window.location.search,
+        scrollY: window.scrollY || window.pageYOffset || 0,
+        asin: (a.textContent || '').trim()
+      }));
+    } catch (err) {}
+  }, true);
+
   window.addEventListener('pageshow', function (ev) {
     if (ev.persisted) location.reload();
   });
@@ -476,11 +657,15 @@
   var batchBtn = document.getElementById('dash-batch-delete');
   var calcBtn = document.getElementById('dash-batch-calc');
   var roiBtn = document.getElementById('dash-batch-roi');
+  var verifyBtn = document.getElementById('dash-batch-verify');
+  var passedBtn = document.getElementById('dash-batch-passed');
+  var unpassedBtn = document.getElementById('dash-batch-unpassed');
   var batchForm = document.getElementById('dash-batch-form');
   var actionInput = document.getElementById('dash-action');
   var deleteWithFolderInput = document.getElementById('dash-delete-with-folder');
   var exportBtn = document.getElementById('dash-export-excel');
   var exportUrl = '{% url "dashboard_export_excel" %}';
+  var selectionHint = document.getElementById('dash-selection-hint');
   var deleteDialog = document.getElementById('dash-delete-dialog');
   var deleteDialogText = document.getElementById('dash-delete-dialog-text');
   var deleteFolderCheckbox = document.getElementById('dash-delete-folder-checkbox');
@@ -497,11 +682,11 @@
     var upv = up ? Number(up.value) : NaN;
     var hdv = hd ? Number(hd.value) : NaN;
     if (isNaN(upv) || isNaN(hdv)) {
-      out.textContent = '—';
+      out.textContent = '合计 —';
       return;
     }
     var sum = upv + hdv;
-    out.textContent = upv.toFixed(2) + '+' + hdv.toFixed(2) + '=' + sum.toFixed(2) + '￥';
+    out.textContent = '合计 ' + sum.toFixed(2) + '￥';
   }
   var pendingAction = '';
   function refreshBatch() {
@@ -516,7 +701,14 @@
     if (batchBtn) batchBtn.disabled = n === 0 || deletable !== n;
     if (calcBtn) calcBtn.disabled = n === 0;
     if (roiBtn) roiBtn.disabled = n === 0;
+    if (verifyBtn) verifyBtn.disabled = n === 0;
+    if (passedBtn) passedBtn.disabled = n === 0;
+    if (unpassedBtn) unpassedBtn.disabled = n === 0;
     if (exportBtn) exportBtn.disabled = n === 0;
+    if (selectionHint) {
+      selectionHint.textContent = n > 0 ? ('已选 ' + n + ' 行') : '勾选行后启用';
+      selectionHint.classList.toggle('is-active', n > 0);
+    }
     if (selAll) {
       var enabledChecks = [];
       checks.forEach(function (c) { if (!c.disabled) enabledChecks.push(c); });
@@ -539,7 +731,7 @@
     });
     refreshCostPreview(inp.closest('tr'));
   });
-  [calcBtn, roiBtn, batchBtn].forEach(function (btn) {
+  [calcBtn, roiBtn, verifyBtn, passedBtn, unpassedBtn, batchBtn].forEach(function (btn) {
     if (!btn) return;
     btn.addEventListener('click', function () {
       pendingAction = btn.getAttribute('data-action') || '';
@@ -695,6 +887,16 @@
   }
   refreshBatch();
 
+  (function keepPagerInView() {
+    if (window.location.hash !== '#dash-pager') return;
+    var pager = document.getElementById('dash-pager');
+    if (!pager) return;
+    // 等布局稳定后再滚到底部分页区，避免回到页顶
+    requestAnimationFrame(function () {
+      pager.scrollIntoView({ block: 'end', behavior: 'auto' });
+    });
+  })();
+
   var pageJump = document.getElementById('dash-page-jump');
   if (pageJump) {
     var maxPage = parseInt(pageJump.getAttribute('max'), 10) || 1;
@@ -711,7 +913,7 @@
       parts.push('sort=' + encodeURIComponent(sortKey));
       parts.push('dir=' + encodeURIComponent(sortDir));
       parts.push('page=' + n);
-      window.location.href = '{% url "index" %}?' + parts.join('&');
+      window.location.href = '{% url "index" %}?' + parts.join('&') + '#dash-pager';
     }
     pageJump.addEventListener('change', function () { goDashPage(pageJump.value); });
     pageJump.addEventListener('keydown', function (e) {

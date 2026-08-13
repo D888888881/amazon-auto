@@ -102,7 +102,7 @@ class AsinDashboardRow(models.Model):
 
 
 class AsinFolderAssignment(models.Model):
-    """ASIN 文件夹（media/file/<ASIN>/）分配给哪些用户；由超级管理员维护。"""
+    """ASIN 文件夹分配（历史表；产品已取消分配门控，保留以免丢数据）。"""
 
     asin = models.CharField(max_length=32, unique=True, db_index=True)
     assignees = models.ManyToManyField(
@@ -129,25 +129,83 @@ class AsinFolderAssignment(models.Model):
 
 
 class AsinRoiPackVerification(models.Model):
-    """用户在 Excel 中对某 ASIN 目录下 ROI-US-pack 表点击「确认校验」后记录；用于看板/数据审核展示「是否校验」。"""
+    """用户对某站点 ASIN 的 ROI 校验（按人独立；看板展示所有已校验用户）。"""
 
-    asin = models.CharField(max_length=32, unique=True, db_index=True)
-    verified_at = models.DateTimeField(auto_now=True)
-    verified_by = models.ForeignKey(
+    class Marketplace(models.TextChoices):
+        US = 'US', '美国站'
+        UK = 'UK', '英国站'
+
+    user = models.ForeignKey(
         User,
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
+        on_delete=models.CASCADE,
         related_name='roi_pack_verifications',
-        verbose_name='确认人',
+        verbose_name='校验人',
     )
+    asin = models.CharField(max_length=32, db_index=True)
+    marketplace = models.CharField(
+        '站点',
+        max_length=8,
+        choices=Marketplace.choices,
+        default=Marketplace.US,
+        db_index=True,
+    )
+    verified_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         verbose_name = 'ROI 表校验确认'
         verbose_name_plural = 'ROI 表校验确认'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'asin', 'marketplace'],
+                name='uniq_roi_verify_user_asin_mp',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['asin', 'marketplace'], name='idx_roi_verify_asin_mp'),
+            models.Index(fields=['user', 'marketplace'], name='idx_roi_verify_user_mp'),
+        ]
 
     def __str__(self) -> str:
-        return self.asin
+        return f'{self.asin} · {self.marketplace} · {self.user_id}'
+
+
+class AsinPassedFlag(models.Model):
+    """ASIN 已通过标记（全局：一人标记，全员可见）。"""
+
+    class Marketplace(models.TextChoices):
+        US = 'US', '美国站'
+        UK = 'UK', '英国站'
+
+    asin = models.CharField(max_length=32, db_index=True)
+    marketplace = models.CharField(
+        '站点',
+        max_length=8,
+        choices=Marketplace.choices,
+        default=Marketplace.US,
+        db_index=True,
+    )
+    passed_by = models.ForeignKey(
+        User,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='asin_passed_flags',
+        verbose_name='标记人',
+    )
+    passed_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'ASIN 已通过'
+        verbose_name_plural = 'ASIN 已通过'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['asin', 'marketplace'],
+                name='uniq_asin_passed_asin_mp',
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f'{self.asin} · {self.marketplace}'
 
 
 class AsinDataUpdateStamp(models.Model):

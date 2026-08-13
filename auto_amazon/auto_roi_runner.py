@@ -157,11 +157,34 @@ def run_auto_roi(run_id: int) -> None:
 
 
 def _auto_roi_loop(run_id: int, *, mp: str, cfg, defaults: dict, parity: float) -> None:
+    from .credentials_config import assert_sif_authorization_usable
     from .views import _merge_cost_overrides_from_db
+
+    try:
+        assert_sif_authorization_usable(for_auto_roi=True)
+    except ValueError as exc:
+        RoiAutoRun.objects.filter(pk=run_id).update(
+            status=RoiAutoRun.Status.ERROR,
+            error_message=str(exc),
+            finished_at=_now(),
+            current_asin='',
+        )
+        return
 
     while True:
         run = _refresh(run_id)
         if run.status != RoiAutoRun.Status.RUNNING:
+            return
+
+        try:
+            assert_sif_authorization_usable(for_auto_roi=True)
+        except ValueError as exc:
+            RoiAutoRun.objects.filter(pk=run_id).update(
+                status=RoiAutoRun.Status.ERROR,
+                error_message=str(exc),
+                finished_at=_now(),
+                current_asin='',
+            )
             return
 
         cfg = ensure_site_config(mp)

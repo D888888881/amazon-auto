@@ -5,10 +5,10 @@
 {% block content %}
 <div class="fs-excel-studio fs-excel-studio--page" id="excel-editor-root">
     <header class="fs-studio__titlebar">
-{#        <a href="{% url 'excel' %}" class="fs-studio__back fs-studio__back--link" title="返回文件库">#}
-{#            <span class="fs-studio__back-ic">←</span>#}
-{#            <span>文件库</span>#}
-{#        </a>#}
+        <a href="{{ back_url|default:'/' }}" class="fs-studio__back fs-studio__back--link" id="studio-back" title="{{ back_label|default:'返回' }}">
+            <span class="fs-studio__back-ic">←</span>
+            <span>{{ back_label|default:'返回' }}</span>
+        </a>
         <div class="fs-studio__doc">
             <span class="fs-studio__doc-ic" aria-hidden="true">📗</span>
             <div class="fs-studio__doc-meta">
@@ -71,6 +71,24 @@
   const relPath = "{{ rel_path|escapejs }}";
   const localMode = {% if local_mode %}true{% else %}false{% endif %};
   const readOnlyExcel = {% if read_only_excel|default:False %}true{% else %}false{% endif %};
+
+  // 返回首页时带回离开前的筛选/分页，并由首页脚本恢复滚动位置
+  (function wireBackToDashboard() {
+    var back = document.getElementById('studio-back');
+    if (!back) return;
+    var KEY = 'dash_roi_return';
+    var FLAG = 'dash_roi_do_restore';
+    try {
+      var raw = sessionStorage.getItem(KEY);
+      if (raw) {
+        var o = JSON.parse(raw);
+        if (o && o.url) back.setAttribute('href', o.url);
+      }
+    } catch (e) {}
+    back.addEventListener('click', function () {
+      try { sessionStorage.setItem(FLAG, '1'); } catch (e) {}
+    });
+  })();
 
   const grid = document.querySelector('#grid tbody');
   const errEl = document.getElementById('excel-error');

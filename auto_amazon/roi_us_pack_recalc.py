@@ -282,8 +282,8 @@ def recalc_roi_us_pack_rows(rows: list[list[Any]]) -> tuple[bool, str]:
     total_traffic = ad_clicks = nat = ad_budget = None
     if daily_orders is not None and conv_frac is not None and conv_frac > 1e-9:
         total_traffic = daily_orders / conv_frac
-        ad_clicks = total_traffic / 2.0
-        nat = total_traffic / 2.0
+        ad_clicks = total_traffic * 0.7
+        nat = total_traffic * 0.3
         if ad_cpc > 0:
             ad_budget = ad_clicks * ad_cpc
         else:

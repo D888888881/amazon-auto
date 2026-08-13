@@ -1,5 +1,7 @@
 import asyncio
 import os
+from pathlib import Path
+
 import aiohttp
 import time
 from sif_set_cookie import get_sif_cookie
@@ -415,23 +417,50 @@ class AsyncSifAPI:
 
 
 
-# ==================== 使用示例 ====================
-async def sif_main(asins: list[str], country: str = "US"):
-    # 优先从环境变量读取 JWT，避免把 token 写死在仓库里
-    country_code = str(country or "US").strip().upper() or "US"
-    if country_code not in ("US", "UK"):
-        country_code = "US"
-    with open("config_file/sif_token.txt", "r") as f:
-        sif_token = f.read().strip()
-    auth_token = sif_token
-    print(auth_token)
-    print(f"[SIF] country={country_code}")
+def _agg_has_usable_cpc(agg: Dict[str, Any] | None) -> bool:
+    if not isinstance(agg, dict):
+        return False
+    cpc = agg.get('cpc') if isinstance(agg.get('cpc'), dict) else {}
+    median = _coerce_float(cpc.get('median'))
+    ratio = _coerce_float(agg.get('clickPurchaseRatio'))
+    return (median is not None and median > 0) or (ratio is not None and ratio > 0)
+
+
+def _read_sif_token() -> str:
+    path = Path('config_file/sif_token.txt')
+    if not path.is_file():
+        raise FileNotFoundError(
+            f'未找到 {path.resolve()}，请在「凭证配置」保存 SIF authorization 并刷新 token'
+        )
+    token = path.read_text(encoding='utf-8').strip()
+    if not token or token == '未找到 sif_token':
+        raise ValueError('sif_token 无效或未生成，请在「凭证配置」刷新 SIF Token')
+    return token
+
+
+async def sif_main(
+    asins: list[str],
+    country: str = 'US',
+    *,
+    _retried: bool = False,
+):
+    """
+    批量拉取 SIF 反查关键词并聚合 CPC / 转化率。
+    若全部无可用 CPC（常见于 token 过期），自动刷新 sif_token 后重试一次。
+    """
+    country_code = str(country or 'US').strip().upper() or 'US'
+    if country_code not in ('US', 'UK'):
+        country_code = 'US'
+
+    auth_token = _read_sif_token()
+    print(f'[SIF] country={country_code} asins={len(asins)} token_len={len(auth_token)}')
     cookies = {
-        "Hm_lvt_8d71bef53342fdb284ff83594f3b97ff": "1773713262",
-        "HMACCOUNT": "1B0FE40093B498DF",
-        "sif_token": auth_token,
+        'Hm_lvt_8d71bef53342fdb284ff83594f3b97ff': '1773713262',
+        'HMACCOUNT': '1B0FE40093B498DF',
+        'sif_token': auth_token,
     }
 
+    request_failures = 0
     async with AsyncSifAPI(
         authorization_token=auth_token,
         cookies=cookies,
@@ -440,35 +469,58 @@ async def sif_main(asins: list[str], country: str = "US"):
         multi_asin_results = await api.fetch_multiple_asins(asins, country=country_code)
         result: List[Dict[str, Any]] = []
         keyword_groups_dict: Dict[str, List[str]] = {}
+        usable = 0
         for asin in asins:
             asin_key = str(asin).strip().upper()
             rows = multi_asin_results.get(asin) or multi_asin_results.get(asin_key)
             try:
                 if not rows:
-                    print(f"{asin_key}: 0 个关键词（SIF 无数据，ROI 将使用广告默认值）")
+                    print(f'{asin_key}: 0 个关键词（SIF 无数据，ROI 将使用广告默认值）')
                     keyword_groups_dict[asin_key] = []
                     result.append({asin_key: aggregate_sif_keyword_rows([], top_n=10)})
                     continue
-                print(f"{asin_key}: {len(rows)} 个关键词")
+                print(f'{asin_key}: {len(rows)} 个关键词')
                 for row in rows[:3]:
-                    kw = row.get("keyword")
+                    kw = row.get('keyword')
                     if kw:
                         keyword_groups_dict.setdefault(asin_key, []).append(kw)
                 agg = aggregate_sif_keyword_rows(rows, top_n=10)
                 result.append({asin_key: agg})
+                if _agg_has_usable_cpc(agg):
+                    usable += 1
                 print({asin_key: agg})
             except Exception as e:
-                print(f"{asin_key}: {e}")
+                print(f'{asin_key}: {e}')
                 keyword_groups_dict.setdefault(asin_key, [])
                 result.append({asin_key: aggregate_sif_keyword_rows([], top_n=10)})
-        print("<准备关键词>", keyword_groups_dict)
-        if result == [] and keyword_groups_dict == {}:
-            get_sif_cookie(country=country_code)
-            return await sif_main(asins, country=country_code)
+
+        for asin in asins:
+            asin_key = str(asin).strip().upper()
+            if asin not in multi_asin_results and asin_key not in multi_asin_results:
+                request_failures += 1
+
+        print(
+            f'[SIF] 可用 CPC {usable}/{len(asins)}，'
+            f'请求缺失 {request_failures}/{len(asins)}'
+        )
+        print('<准备关键词>', keyword_groups_dict)
+
+        need_refresh = (not _retried) and len(asins) > 0 and usable == 0
+        if need_refresh:
+            print('[SIF] 全部无可用 CPC，尝试刷新 sif_token 后重试…')
+            try:
+                token = get_sif_cookie(country=country_code)
+            except Exception as e:
+                print(f'[SIF] 刷新 token 失败: {e}')
+                return result, keyword_groups_dict
+            if not token:
+                print('[SIF] 刷新 token 未返回 sif_token')
+                return result, keyword_groups_dict
+            return await sif_main(asins, country=country_code, _retried=True)
+
         return result, keyword_groups_dict
 
 
-
-if __name__ == "__main__":
-    asins = ["B0GQVXM199"]
+if __name__ == '__main__':
+    asins = ['B0GQVXM199']
     print(asyncio.run(sif_main(asins)))

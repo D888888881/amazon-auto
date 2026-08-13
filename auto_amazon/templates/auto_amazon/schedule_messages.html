@@ -55,7 +55,7 @@
         <thead>
             <tr>
                 <th>发送时间</th>
-                <th>ASIN</th>
+                <th>产品</th>
                 <th>上传人</th>
                 <th>当前去广告投产比</th>
                 <th>最新去广告投产比</th>
@@ -73,7 +73,21 @@
             {% for m in page_obj %}
             <tr class="{% if m.alert_status == 'eliminate' %}msg-row--eliminate{% elif m.alert_status == 'alert' %}msg-row--alert{% endif %}">
                 <td>{{ m.sent_at|date:"Y-m-d H:i" }}</td>
-                <td><code>{{ m.asin }}</code></td>
+                <td class="msg-product-cell">
+                    <div class="msg-product">
+                        {% if m.product_image_url %}
+                        <button type="button" class="msg-product__thumb-btn js-msg-image-open"
+                                data-image-url="{{ m.product_image_url }}"
+                                title="查看 {{ m.asin }} 产品图" aria-label="查看 {{ m.asin }} 产品图">
+                            <img src="{{ m.product_image_url }}" alt="" class="msg-product__thumb"
+                                 loading="lazy" decoding="async" width="44" height="44">
+                        </button>
+                        {% else %}
+                        <span class="msg-product__thumb msg-product__thumb--ph" aria-hidden="true">无图</span>
+                        {% endif %}
+                        <code class="msg-product__asin">{{ m.asin }}</code>
+                    </div>
+                </td>
                 <td>{{ m.uploader_display }}</td>
                 <td>{% if m.curr_ad_roi is not None %}{{ m.curr_ad_roi|floatformat:2 }}%{% else %}—{% endif %}</td>
                 <td>{% if m.latest_ad_roi is not None %}{{ m.latest_ad_roi|floatformat:2 }}%{% else %}—{% endif %}</td>
@@ -132,32 +146,69 @@
     </div>
 </nav>
 {% endif %}
+
+<div id="msg-image-lightbox" class="msg-image-lightbox" hidden>
+    <button type="button" class="msg-image-lightbox__backdrop js-msg-image-close" aria-label="关闭"></button>
+    <div class="msg-image-lightbox__panel" role="dialog" aria-modal="true" aria-label="产品图预览">
+        <button type="button" class="msg-image-lightbox__close js-msg-image-close" aria-label="关闭">&times;</button>
+        <img src="" alt="" class="msg-image-lightbox__img" id="msg-image-lightbox-img">
+    </div>
+</div>
 {% endblock %}
 
 {% block page_scripts %}
 <script>
 (function () {
   var pageJump = document.getElementById('msg-page-jump');
-  if (!pageJump) return;
-  var maxPage = parseInt(pageJump.getAttribute('max'), 10) || 1;
-  var filterQs = '{{ filter_qs|escapejs }}';
-  function goMsgPage(n) {
-    n = parseInt(n, 10);
-    if (isNaN(n) || n < 1) n = 1;
-    if (n > maxPage) n = maxPage;
-    pageJump.value = String(n);
-    var url = '{% url "schedule_messages" %}?';
-    if (filterQs) url += filterQs + '&';
-    url += 'page=' + n;
-    window.location.href = url;
-  }
-  pageJump.addEventListener('change', function () { goMsgPage(pageJump.value); });
-  pageJump.addEventListener('keydown', function (e) {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      goMsgPage(pageJump.value);
+  if (pageJump) {
+    var maxPage = parseInt(pageJump.getAttribute('max'), 10) || 1;
+    var filterQs = '{{ filter_qs|escapejs }}';
+    function goMsgPage(n) {
+      n = parseInt(n, 10);
+      if (isNaN(n) || n < 1) n = 1;
+      if (n > maxPage) n = maxPage;
+      pageJump.value = String(n);
+      var url = '{% url "schedule_messages" %}?';
+      if (filterQs) url += filterQs + '&';
+      url += 'page=' + n;
+      window.location.href = url;
     }
-  });
+    pageJump.addEventListener('change', function () { goMsgPage(pageJump.value); });
+    pageJump.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        goMsgPage(pageJump.value);
+      }
+    });
+  }
+
+  var lightbox = document.getElementById('msg-image-lightbox');
+  var lightboxImg = document.getElementById('msg-image-lightbox-img');
+  if (lightbox && lightboxImg) {
+    function closeLightbox() {
+      lightbox.hidden = true;
+      lightboxImg.removeAttribute('src');
+      document.body.classList.remove('msg-image-lightbox-open');
+    }
+    function openLightbox(url) {
+      if (!url) return;
+      lightboxImg.src = url;
+      lightbox.hidden = false;
+      document.body.classList.add('msg-image-lightbox-open');
+    }
+    document.addEventListener('click', function (e) {
+      var btn = e.target.closest('.js-msg-image-open');
+      if (btn) {
+        e.preventDefault();
+        openLightbox(btn.getAttribute('data-image-url'));
+        return;
+      }
+      if (e.target.closest('.js-msg-image-close')) closeLightbox();
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && !lightbox.hidden) closeLightbox();
+    });
+  }
 })();
 </script>
 {% endblock %}
