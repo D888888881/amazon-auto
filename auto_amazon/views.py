@@ -2158,6 +2158,23 @@ def credentials_config_page(request):
                 messages.success(request, f'SIF Token 刷新成功：{preview}')
             else:
                 messages.error(request, f'刷新失败：{msg}')
+        elif action == 'clear_bulk_cooldown':
+            from .credentials_config import clear_bulk_account_cooldown
+
+            account_key = (request.POST.get('account_key') or '').strip()
+            ok, msg = clear_bulk_account_cooldown(account_key)
+            if ok:
+                messages.success(request, msg)
+            else:
+                messages.error(request, msg)
+        elif action == 'clear_all_bulk_cooldown':
+            from .credentials_config import clear_all_bulk_account_cooldowns
+
+            count, msg = clear_all_bulk_account_cooldowns()
+            if count:
+                messages.success(request, msg)
+            else:
+                messages.info(request, msg)
         else:
             child_raw = (request.POST.get('child_ids') or '').strip()
             child_ids = [x.strip() for x in child_raw.replace('\n', ',').split(',') if x.strip()]

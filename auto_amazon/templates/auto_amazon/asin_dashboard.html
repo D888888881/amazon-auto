@@ -70,209 +70,199 @@
     </div>
 
     <form method="get" class="dash-filter-form" id="dash-filter-form">
-        <div class="dash-filter-head">
-            <div class="dash-filter-head__left">
-                <span class="dash-filter-head__icon" aria-hidden="true">
-                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3-3"/></svg>
+        <div class="dash-filter-bar">
+            <div class="dash-filter-bar__title">
+                <span class="dash-filter-bar__icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3-3"/></svg>
                 </span>
-                <div>
-                    <span class="dash-filter-head__title">筛选条件</span>
-                    <span class="dash-filter-head__sub">按 ASIN、财务指标与状态收窄列表</span>
-                </div>
+                <span class="dash-filter-bar__text">筛选</span>
             </div>
-            <div class="dash-filter-head__right">
-                <button type="submit" class="dash-btn dash-btn--primary">应用筛选</button>
-                <a href="{% url 'index' %}" class="dash-btn dash-btn--ghost">重置</a>
+            <div class="dash-filter-bar__actions">
+                <button type="submit" class="dash-btn dash-btn--primary dash-btn--sm">应用筛选</button>
+                <a href="{% url 'index' %}" class="dash-btn dash-btn--ghost dash-btn--sm">重置</a>
             </div>
         </div>
 
-        <div class="dash-filter-sections">
-            <section class="dash-filter-section">
-                <h3 class="dash-filter-section__title">搜索与状态</h3>
-                <div class="dash-filter-fields">
-                    <label class="dash-field dash-field--wide">
-                        <span class="dash-field__label">ASIN 搜索</span>
-                        <input type="text" name="asin_kw" class="dash-field__control" placeholder="输入 ASIN 关键字" value="{{ request.GET.asin_kw }}">
+        <div class="dash-filter-body">
+            <div class="dash-filter-row dash-filter-row--quick">
+                <label class="dash-filter-chip dash-filter-chip--asin">
+                    <span class="dash-filter-chip__label">ASIN</span>
+                    <input type="text" name="asin_kw" class="dash-filter-chip__input" placeholder="关键字" value="{{ request.GET.asin_kw }}">
+                </label>
+                {% if viewer_is_superuser %}
+                <label class="dash-filter-chip dash-filter-chip--uploader">
+                    <span class="dash-filter-chip__label">上传人</span>
+                    <select name="uploaded_by" class="dash-filter-chip__input dash-filter-chip__input--select">
+                        <option value="">不限</option>
+                        {% for u in uploader_choices %}
+                        <option value="{{ u }}" {% if request.GET.uploaded_by == u %}selected{% endif %}>{{ u }}</option>
+                        {% endfor %}
+                    </select>
+                </label>
+                {% endif %}
+                <label class="dash-filter-chip dash-filter-chip--tri">
+                    <span class="dash-filter-chip__label">校验</span>
+                    <select name="roi_verified" class="dash-filter-chip__input dash-filter-chip__input--select">
+                        <option value="" {% if filters.roi_verified != 'yes' and filters.roi_verified != 'no' %}selected{% endif %}>全部</option>
+                        <option value="yes" {% if filters.roi_verified == 'yes' %}selected{% endif %}>是</option>
+                        <option value="no" {% if filters.roi_verified == 'no' %}selected{% endif %}>否</option>
+                    </select>
+                </label>
+                <label class="dash-filter-chip dash-filter-chip--tri">
+                    <span class="dash-filter-chip__label">已通过</span>
+                    <select name="passed" class="dash-filter-chip__input dash-filter-chip__input--select">
+                        <option value="" {% if filters.passed != 'yes' and filters.passed != 'no' %}selected{% endif %}>全部</option>
+                        <option value="yes" {% if filters.passed == 'yes' %}selected{% endif %}>是</option>
+                        <option value="no" {% if filters.passed == 'no' %}selected{% endif %}>否</option>
+                    </select>
+                </label>
+                <label class="dash-filter-chip dash-filter-chip--tri">
+                    <span class="dash-filter-chip__label">关注</span>
+                    <select name="follow_filter" class="dash-filter-chip__input dash-filter-chip__input--select">
+                        <option value="" {% if not filters.follow_filter %}selected{% endif %}>全部</option>
+                        <option value="normal" {% if filters.follow_filter == 'normal' %}selected{% endif %}>未关注</option>
+                        <option value="priority" {% if filters.follow_filter == 'priority' %}selected{% endif %}>重点</option>
+                    </select>
+                </label>
+                <label class="dash-filter-chip dash-filter-chip--per-page">
+                    <span class="dash-filter-chip__label">每页</span>
+                    <span class="dash-filter-chip__inline">
+                        <select name="per_page" class="dash-filter-chip__input dash-filter-chip__input--select">
+                            <option value="10" {% if per_page == 10 %}selected{% endif %}>10</option>
+                            <option value="20" {% if per_page == 20 %}selected{% endif %}>20</option>
+                            <option value="40" {% if per_page == 40 %}selected{% endif %}>40</option>
+                            <option value="100" {% if per_page == 100 %}selected{% endif %}>100</option>
+                            <option value="custom" {% if request.GET.per_page == 'custom' %}selected{% endif %}>自定义</option>
+                        </select>
+                        <input type="number" name="per_page_custom" class="dash-filter-chip__input dash-filter-chip__input--num" min="1" max="500" placeholder="≤500" value="{{ request.GET.per_page_custom }}">
+                    </span>
+                </label>
+            </div>
+
+            <details class="dash-filter-advanced" id="dash-filter-advanced">
+                <summary class="dash-filter-advanced__summary">
+                    <span class="dash-filter-advanced__title">财务指标与时间</span>
+                    <span class="dash-filter-advanced__hint">毛利率 · 投产比 · 体量 · 更新时间</span>
+                </summary>
+                <div class="dash-filter-row dash-filter-row--metrics">
+                    <div class="dash-filter-chip dash-filter-chip--range">
+                        <span class="dash-filter-chip__label">毛利率 %</span>
+                        <span class="dash-filter-chip__range">
+                            <input type="number" step="0.01" name="profit_margin_min" class="dash-filter-chip__input dash-filter-chip__input--num" placeholder="最小" value="{{ request.GET.profit_margin_min }}">
+                            <span class="dash-filter-chip__sep" aria-hidden="true">–</span>
+                            <input type="number" step="0.01" name="profit_margin_max" class="dash-filter-chip__input dash-filter-chip__input--num" placeholder="最大" value="{{ request.GET.profit_margin_max }}">
+                        </span>
+                    </div>
+                    <div class="dash-filter-chip dash-filter-chip--range">
+                        <span class="dash-filter-chip__label">投产比 %</span>
+                        <span class="dash-filter-chip__range">
+                            <input type="number" step="0.01" name="ad_removed_roi_min" class="dash-filter-chip__input dash-filter-chip__input--num" placeholder="最小" value="{{ request.GET.ad_removed_roi_min }}">
+                            <span class="dash-filter-chip__sep" aria-hidden="true">–</span>
+                            <input type="number" step="0.01" name="ad_removed_roi_max" class="dash-filter-chip__input dash-filter-chip__input--num" placeholder="最大" value="{{ request.GET.ad_removed_roi_max }}">
+                        </span>
+                    </div>
+                    <div class="dash-filter-chip dash-filter-chip--range dash-filter-chip--range-narrow">
+                        <span class="dash-filter-chip__label">体量</span>
+                        <span class="dash-filter-chip__range">
+                            <input type="number" step="1" name="monthly_results_min" class="dash-filter-chip__input dash-filter-chip__input--num" placeholder="最小" value="{{ request.GET.monthly_results_min }}">
+                            <span class="dash-filter-chip__sep" aria-hidden="true">–</span>
+                            <input type="number" step="1" name="monthly_results_max" class="dash-filter-chip__input dash-filter-chip__input--num" placeholder="最大" value="{{ request.GET.monthly_results_max }}">
+                        </span>
+                    </div>
+                    <div class="dash-filter-chip dash-filter-chip--range">
+                        <span class="dash-filter-chip__label">利润额 ￥</span>
+                        <span class="dash-filter-chip__range">
+                            <input type="number" step="0.01" name="profit_per_order_min" class="dash-filter-chip__input dash-filter-chip__input--num" placeholder="最小" value="{{ request.GET.profit_per_order_min }}">
+                            <span class="dash-filter-chip__sep" aria-hidden="true">–</span>
+                            <input type="number" step="0.01" name="profit_per_order_max" class="dash-filter-chip__input dash-filter-chip__input--num" placeholder="最大" value="{{ request.GET.profit_per_order_max }}">
+                        </span>
+                    </div>
+                    <div class="dash-filter-chip dash-filter-chip--range dash-filter-chip--range-wide">
+                        <span class="dash-filter-chip__label">体量×利润 $</span>
+                        <span class="dash-filter-chip__range">
+                            <input type="number" step="0.01" name="monthly_sales_total_min" class="dash-filter-chip__input dash-filter-chip__input--num" placeholder="最小" value="{{ request.GET.monthly_sales_total_min }}">
+                            <span class="dash-filter-chip__sep" aria-hidden="true">–</span>
+                            <input type="number" step="0.01" name="monthly_sales_total_max" class="dash-filter-chip__input dash-filter-chip__input--num" placeholder="最大" value="{{ request.GET.monthly_sales_total_max }}">
+                        </span>
+                    </div>
+                    <div class="dash-filter-chip dash-filter-chip--range">
+                        <span class="dash-filter-chip__label">采购价 ￥</span>
+                        <span class="dash-filter-chip__range">
+                            <input type="number" step="0.01" name="unit_purchase_min" class="dash-filter-chip__input dash-filter-chip__input--num" placeholder="最小" value="{{ request.GET.unit_purchase_min }}">
+                            <span class="dash-filter-chip__sep" aria-hidden="true">–</span>
+                            <input type="number" step="0.01" name="unit_purchase_max" class="dash-filter-chip__input dash-filter-chip__input--num" placeholder="最大" value="{{ request.GET.unit_purchase_max }}">
+                        </span>
+                    </div>
+                    <div class="dash-filter-chip dash-filter-chip--range dash-filter-chip--range-wide">
+                        <span class="dash-filter-chip__label">采购+头程 ￥</span>
+                        <span class="dash-filter-chip__range">
+                            <input type="number" step="0.01" name="head_actual_total_min" class="dash-filter-chip__input dash-filter-chip__input--num" placeholder="最小" value="{{ request.GET.head_actual_total_min }}">
+                            <span class="dash-filter-chip__sep" aria-hidden="true">–</span>
+                            <input type="number" step="0.01" name="head_actual_total_max" class="dash-filter-chip__input dash-filter-chip__input--num" placeholder="最大" value="{{ request.GET.head_actual_total_max }}">
+                        </span>
+                    </div>
+                    <div class="dash-filter-chip dash-filter-chip--range">
+                        <span class="dash-filter-chip__label">广告难度 %</span>
+                        <span class="dash-filter-chip__range">
+                            <input type="number" step="0.001" name="ranking_percent_min" class="dash-filter-chip__input dash-filter-chip__input--num" placeholder="最小" value="{{ request.GET.ranking_percent_min }}">
+                            <span class="dash-filter-chip__sep" aria-hidden="true">–</span>
+                            <input type="number" step="0.001" name="ranking_percent_max" class="dash-filter-chip__input dash-filter-chip__input--num" placeholder="最大" value="{{ request.GET.ranking_percent_max }}">
+                        </span>
+                    </div>
+                    <label class="dash-filter-chip dash-filter-chip--datetime">
+                        <span class="dash-filter-chip__label">更新时间</span>
+                        <span class="dash-filter-chip__datetime">
+                            <input type="datetime-local" name="updated_from" class="dash-filter-chip__input dash-filter-chip__input--dt" value="{{ filters.updated_from }}" aria-label="起">
+                            <span class="dash-filter-chip__sep" aria-hidden="true">–</span>
+                            <input type="datetime-local" name="updated_to" class="dash-filter-chip__input dash-filter-chip__input--dt" value="{{ filters.updated_to }}" aria-label="止">
+                        </span>
                     </label>
-                    {% if viewer_is_superuser %}
-                    <label class="dash-field">
-                        <span class="dash-field__label">上传人</span>
-                        <select name="uploaded_by" class="dash-field__control">
-                            <option value="">不限</option>
-                            {% for u in uploader_choices %}
-                            <option value="{{ u }}" {% if request.GET.uploaded_by == u %}selected{% endif %}>{{ u }}</option>
+                </div>
+            </details>
+
+            <div class="dash-filter-row dash-filter-row--extra">
+                <div class="dash-filter-chip dash-filter-chip--grades" role="group" aria-label="产品等级">
+                    <span class="dash-filter-chip__label">等级</span>
+                    <div class="dash-grade-chips">
+                        {% for g in 'ABCDE' %}
+                        <label class="dash-grade-chip dash-grade-chip--{{ g|lower }}">
+                            <input type="checkbox" name="product_grade" value="{{ g }}" {% if g in filters.selected_grades %}checked{% endif %}>
+                            <span>{{ g }}</span>
+                        </label>
+                        {% endfor %}
+                    </div>
+                </div>
+                <div class="dash-filter-chip dash-filter-chip--ops">
+                    <span class="dash-filter-chip__label">运营难度</span>
+                    <span class="dash-filter-chip__ops">
+                        <select name="ops_slot" class="dash-filter-chip__input dash-filter-chip__input--select dash-filter-chip__input--ops">
+                            <option value="any" {% if filters.ops_slot == 'any' %}selected{% endif %}>不限列</option>
+                            <option value="1" {% if filters.ops_slot == '1' %}selected{% endif %}>难度1</option>
+                            <option value="2" {% if filters.ops_slot == '2' %}selected{% endif %}>难度2</option>
+                            <option value="3" {% if filters.ops_slot == '3' %}selected{% endif %}>难度3</option>
+                        </select>
+                        <select name="ops_range" class="dash-filter-chip__input dash-filter-chip__input--select dash-filter-chip__input--ops">
+                            <option value="all" {% if filters.ops_range == 'all' %}selected{% endif %}>区间不限</option>
+                            <option value="0-5" {% if filters.ops_range == '0-5' %}selected{% endif %}>0–5%</option>
+                            <option value="5-10" {% if filters.ops_range == '5-10' %}selected{% endif %}>5–10%</option>
+                            <option value="10-20" {% if filters.ops_range == '10-20' %}selected{% endif %}>10–20%</option>
+                            <option value="30-100" {% if filters.ops_range == '30-100' %}selected{% endif %}>30–100%</option>
+                            <option value="custom" {% if filters.ops_range == 'custom' %}selected{% endif %}>自定义</option>
+                        </select>
+                        <span class="dash-filter-chip__range dash-filter-chip__range--ops">
+                            <input type="number" step="0.01" name="ops_custom_min" class="dash-filter-chip__input dash-filter-chip__input--num" placeholder="最小%" value="{{ request.GET.ops_custom_min }}">
+                            <span class="dash-filter-chip__sep" aria-hidden="true">–</span>
+                            <input type="number" step="0.01" name="ops_custom_max" class="dash-filter-chip__input dash-filter-chip__input--num" placeholder="最大%" value="{{ request.GET.ops_custom_max }}">
+                        </span>
+                        <select name="ops_review_interval" class="dash-filter-chip__input dash-filter-chip__input--select dash-filter-chip__input--ops" title="评价数量">
+                            <option value="all" {% if filters.ops_review_interval == 'all' %}selected{% endif %}>评价不限</option>
+                            {% for opt in ops_review_interval_choices %}
+                            <option value="{{ opt }}" {% if filters.ops_review_interval == opt %}selected{% endif %}>评价 {{ opt }}</option>
                             {% endfor %}
                         </select>
-                    </label>
-                    {% endif %}
-                    <label class="dash-field">
-                        <span class="dash-field__label">是否校验（我）</span>
-                        <select name="roi_verified" class="dash-field__control">
-                            <option value="" {% if filters.roi_verified != 'yes' and filters.roi_verified != 'no' %}selected{% endif %}>全部</option>
-                            <option value="yes" {% if filters.roi_verified == 'yes' %}selected{% endif %}>是</option>
-                            <option value="no" {% if filters.roi_verified == 'no' %}selected{% endif %}>否</option>
-                        </select>
-                    </label>
-                    <label class="dash-field">
-                        <span class="dash-field__label">已通过</span>
-                        <select name="passed" class="dash-field__control">
-                            <option value="" {% if filters.passed != 'yes' and filters.passed != 'no' %}selected{% endif %}>全部</option>
-                            <option value="yes" {% if filters.passed == 'yes' %}selected{% endif %}>是</option>
-                            <option value="no" {% if filters.passed == 'no' %}selected{% endif %}>否</option>
-                        </select>
-                    </label>
-                    <label class="dash-field">
-                        <span class="dash-field__label">关注</span>
-                        <select name="follow_filter" class="dash-field__control">
-                            <option value="" {% if not filters.follow_filter %}selected{% endif %}>全部</option>
-                            <option value="normal" {% if filters.follow_filter == 'normal' %}selected{% endif %}>未关注</option>
-                            <option value="priority" {% if filters.follow_filter == 'priority' %}selected{% endif %}>重点关注</option>
-                        </select>
-                    </label>
-                    <label class="dash-field">
-                        <span class="dash-field__label">更新时间（起）</span>
-                        <input type="datetime-local" name="updated_from" class="dash-field__control" value="{{ filters.updated_from }}">
-                    </label>
-                    <label class="dash-field">
-                        <span class="dash-field__label">更新时间（止）</span>
-                        <input type="datetime-local" name="updated_to" class="dash-field__control" value="{{ filters.updated_to }}">
-                    </label>
-                    <label class="dash-field">
-                        <span class="dash-field__label">每页条数</span>
-                        <div class="dash-field__split">
-                            <select name="per_page" class="dash-field__control">
-                                <option value="10" {% if per_page == 10 %}selected{% endif %}>10</option>
-                                <option value="20" {% if per_page == 20 %}selected{% endif %}>20</option>
-                                <option value="40" {% if per_page == 40 %}selected{% endif %}>40</option>
-                                <option value="100" {% if per_page == 100 %}selected{% endif %}>100</option>
-                                <option value="custom" {% if request.GET.per_page == 'custom' %}selected{% endif %}>自定义</option>
-                            </select>
-                            <input type="number" name="per_page_custom" class="dash-field__control" min="1" max="500" placeholder="自定义≤500" value="{{ request.GET.per_page_custom }}">
-                        </div>
-                    </label>
+                    </span>
                 </div>
-            </section>
-
-            <section class="dash-filter-section">
-                <h3 class="dash-filter-section__title">财务与难度指标</h3>
-                <div class="dash-filter-fields">
-                    <div class="dash-field">
-                        <span class="dash-field__label">去广告毛利率 %</span>
-                        <div class="dash-range">
-                            <input type="number" step="0.01" name="profit_margin_min" class="dash-field__control" placeholder="最小" value="{{ request.GET.profit_margin_min }}">
-                            <span class="dash-range__sep" aria-hidden="true">–</span>
-                            <input type="number" step="0.01" name="profit_margin_max" class="dash-field__control" placeholder="最大" value="{{ request.GET.profit_margin_max }}">
-                        </div>
-                    </div>
-                    <div class="dash-field">
-                        <span class="dash-field__label">去广告投产比 %</span>
-                        <div class="dash-range">
-                            <input type="number" step="0.01" name="ad_removed_roi_min" class="dash-field__control" placeholder="最小" value="{{ request.GET.ad_removed_roi_min }}">
-                            <span class="dash-range__sep" aria-hidden="true">–</span>
-                            <input type="number" step="0.01" name="ad_removed_roi_max" class="dash-field__control" placeholder="最大" value="{{ request.GET.ad_removed_roi_max }}">
-                        </div>
-                    </div>
-                    <div class="dash-field">
-                        <span class="dash-field__label">体量</span>
-                        <div class="dash-range">
-                            <input type="number" step="1" name="monthly_results_min" class="dash-field__control" placeholder="最小" value="{{ request.GET.monthly_results_min }}">
-                            <span class="dash-range__sep" aria-hidden="true">–</span>
-                            <input type="number" step="1" name="monthly_results_max" class="dash-field__control" placeholder="最大" value="{{ request.GET.monthly_results_max }}">
-                        </div>
-                    </div>
-                    <div class="dash-field">
-                        <span class="dash-field__label">利润额 ￥</span>
-                        <div class="dash-range">
-                            <input type="number" step="0.01" name="profit_per_order_min" class="dash-field__control" placeholder="最小" value="{{ request.GET.profit_per_order_min }}">
-                            <span class="dash-range__sep" aria-hidden="true">–</span>
-                            <input type="number" step="0.01" name="profit_per_order_max" class="dash-field__control" placeholder="最大" value="{{ request.GET.profit_per_order_max }}">
-                        </div>
-                    </div>
-                    <div class="dash-field">
-                        <span class="dash-field__label">体量 × 利润 $</span>
-                        <div class="dash-range">
-                            <input type="number" step="0.01" name="monthly_sales_total_min" class="dash-field__control" placeholder="最小" value="{{ request.GET.monthly_sales_total_min }}">
-                            <span class="dash-range__sep" aria-hidden="true">–</span>
-                            <input type="number" step="0.01" name="monthly_sales_total_max" class="dash-field__control" placeholder="最大" value="{{ request.GET.monthly_sales_total_max }}">
-                        </div>
-                    </div>
-                    <div class="dash-field">
-                        <span class="dash-field__label">采购价 ￥</span>
-                        <div class="dash-range">
-                            <input type="number" step="0.01" name="unit_purchase_min" class="dash-field__control" placeholder="最小" value="{{ request.GET.unit_purchase_min }}">
-                            <span class="dash-range__sep" aria-hidden="true">–</span>
-                            <input type="number" step="0.01" name="unit_purchase_max" class="dash-field__control" placeholder="最大" value="{{ request.GET.unit_purchase_max }}">
-                        </div>
-                    </div>
-                    <div class="dash-field">
-                        <span class="dash-field__label">采购价 + 头程 ￥</span>
-                        <div class="dash-range">
-                            <input type="number" step="0.01" name="head_actual_total_min" class="dash-field__control" placeholder="最小" value="{{ request.GET.head_actual_total_min }}">
-                            <span class="dash-range__sep" aria-hidden="true">–</span>
-                            <input type="number" step="0.01" name="head_actual_total_max" class="dash-field__control" placeholder="最大" value="{{ request.GET.head_actual_total_max }}">
-                        </div>
-                    </div>
-                    <div class="dash-field">
-                        <span class="dash-field__label">广告难度 %</span>
-                        <div class="dash-range">
-                            <input type="number" step="0.001" name="ranking_percent_min" class="dash-field__control" placeholder="最小" value="{{ request.GET.ranking_percent_min }}">
-                            <span class="dash-range__sep" aria-hidden="true">–</span>
-                            <input type="number" step="0.001" name="ranking_percent_max" class="dash-field__control" placeholder="最大" value="{{ request.GET.ranking_percent_max }}">
-                        </div>
-                    </div>
-                </div>
-            </section>
-
-            <section class="dash-filter-section dash-filter-section--footer">
-                <h3 class="dash-filter-section__title">产品等级与运营难度</h3>
-                <div class="dash-filter-footer">
-                    <div class="dash-grade-filter" role="group" aria-label="产品等级">
-                        <span class="dash-filter-footer__label">产品等级</span>
-                        <div class="dash-grade-chips">
-                            {% for g in 'ABCDE' %}
-                            <label class="dash-grade-chip dash-grade-chip--{{ g|lower }}">
-                                <input type="checkbox" name="product_grade" value="{{ g }}" {% if g in filters.selected_grades %}checked{% endif %}>
-                                <span>{{ g }}</span>
-                            </label>
-                            {% endfor %}
-                        </div>
-                    </div>
-                    <div class="dash-ops-filter">
-                        <span class="dash-filter-footer__label">运营难度</span>
-                        <div class="dash-ops-controls">
-                            <select name="ops_slot" class="dash-field__control">
-                                <option value="any" {% if filters.ops_slot == 'any' %}selected{% endif %}>不限列</option>
-                                <option value="1" {% if filters.ops_slot == '1' %}selected{% endif %}>运营难度1</option>
-                                <option value="2" {% if filters.ops_slot == '2' %}selected{% endif %}>运营难度2</option>
-                                <option value="3" {% if filters.ops_slot == '3' %}selected{% endif %}>运营难度3</option>
-                            </select>
-                            <select name="ops_range" class="dash-field__control">
-                                <option value="all" {% if filters.ops_range == 'all' %}selected{% endif %}>难度区间不限</option>
-                                <option value="0-5" {% if filters.ops_range == '0-5' %}selected{% endif %}>0%–5%</option>
-                                <option value="5-10" {% if filters.ops_range == '5-10' %}selected{% endif %}>5%–10%</option>
-                                <option value="10-20" {% if filters.ops_range == '10-20' %}selected{% endif %}>10%–20%</option>
-                                <option value="30-100" {% if filters.ops_range == '30-100' %}selected{% endif %}>30%–100%</option>
-                                <option value="custom" {% if filters.ops_range == 'custom' %}selected{% endif %}>自定义</option>
-                            </select>
-                            <div class="dash-range dash-range--ops">
-                                <input type="number" step="0.01" name="ops_custom_min" class="dash-field__control" placeholder="最小%" value="{{ request.GET.ops_custom_min }}">
-                                <span class="dash-range__sep" aria-hidden="true">–</span>
-                                <input type="number" step="0.01" name="ops_custom_max" class="dash-field__control" placeholder="最大%" value="{{ request.GET.ops_custom_max }}">
-                            </div>
-                            <select name="ops_review_interval" class="dash-field__control" title="评价数量">
-                                <option value="all" {% if filters.ops_review_interval == 'all' %}selected{% endif %}>评价数量不限</option>
-                                {% for opt in ops_review_interval_choices %}
-                                <option value="{{ opt }}" {% if filters.ops_review_interval == opt %}selected{% endif %}>评价 {{ opt }}</option>
-                                {% endfor %}
-                            </select>
-                        </div>
-                    </div>
-                    <div class="dash-filter-actions">
-                        <button type="submit" class="dash-btn dash-btn--primary">应用筛选</button>
-                        <a href="{% url 'index' %}" class="dash-btn">重置全部</a>
-                    </div>
-                </div>
-            </section>
+            </div>
         </div>
     </form>
 
@@ -500,6 +490,29 @@
       }
     }
   } catch (e) {}
+
+  (function openDashFilterAdvancedIfNeeded() {
+    var el = document.getElementById('dash-filter-advanced');
+    if (!el) return;
+    var keys = [
+      'profit_margin_min', 'profit_margin_max',
+      'ad_removed_roi_min', 'ad_removed_roi_max',
+      'monthly_results_min', 'monthly_results_max',
+      'profit_per_order_min', 'profit_per_order_max',
+      'monthly_sales_total_min', 'monthly_sales_total_max',
+      'unit_purchase_min', 'unit_purchase_max',
+      'head_actual_total_min', 'head_actual_total_max',
+      'ranking_percent_min', 'ranking_percent_max',
+      'updated_from', 'updated_to'
+    ];
+    var params = new URLSearchParams(window.location.search);
+    for (var i = 0; i < keys.length; i++) {
+      if ((params.get(keys[i]) || '').trim()) {
+        el.open = true;
+        return;
+      }
+    }
+  })();
 
   // 从 ROI 表返回时：恢复筛选/分页 URL 对应页，并滚回离开前的位置
   (function restoreDashPositionFromRoi() {

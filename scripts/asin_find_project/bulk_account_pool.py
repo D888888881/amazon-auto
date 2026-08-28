@@ -408,3 +408,35 @@ def write_accounts_from_form(
     if not _find_account(pool, active) and normalized:
         pool['runtime']['active_key'] = normalized[0]['key']
     save_pool(pool)
+
+
+def clear_account_cooldown(key: str) -> tuple[bool, str]:
+    """手动解除单个批量账号的冷却期。"""
+    k = str(key or '').strip()
+    if not k:
+        return False, '缺少账号标识'
+    pool = load_pool()
+    acc = _find_account(pool, k)
+    if not acc:
+        return False, f'未找到账号（key={k}）'
+    username = acc.get('username') or k
+    if not _is_in_cooldown(acc):
+        return True, f'账号 {username} 当前不在冷却中'
+    acc['cooldown_until'] = None
+    save_pool(pool)
+    return True, f'已解除账号 {username} 的冷却'
+
+
+def clear_all_account_cooldowns() -> tuple[int, str]:
+    """手动解除全部批量账号的冷却期。"""
+    pool = load_pool()
+    now = _utc_now()
+    cleared = 0
+    for acc in pool.get('accounts') or []:
+        if _is_in_cooldown(acc, now):
+            acc['cooldown_until'] = None
+            cleared += 1
+    if cleared:
+        save_pool(pool)
+        return cleared, f'已解除 {cleared} 个账号的冷却'
+    return 0, '当前没有处于冷却中的账号'

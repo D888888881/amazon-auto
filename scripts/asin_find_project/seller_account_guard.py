@@ -67,6 +67,35 @@ class SellerAccountBannedError(Exception):
         ]
 
 
+class SellerSpriteTransientError(Exception):
+    """限流、会话半失效等可恢复错误（应刷新登录/换号后重试）。"""
+
+
+def looks_like_rate_limit_message(text: str) -> bool:
+    if not text:
+        return False
+    lowered = str(text).lower()
+    markers = (
+        'too many request',
+        'too many requests',
+        'rate limit',
+        'ratelimit',
+        'throttl',
+        '请求过于频繁',
+        '访问过于频繁',
+        '操作过于频繁',
+        '请稍后再试',
+        '稍后重试',
+        '频繁',
+        '限流',
+        'http 429',
+        ' 429',
+        '429',
+        'quota',
+        'exceeded',
+    )
+    return any(m in lowered for m in markers)
+
 def looks_like_seller_auth_message(text: str) -> bool:
     """API/登录响应文本是否像会话失效或子账号被禁。"""
     if not text:
@@ -103,6 +132,8 @@ def parse_sellersprite_api_payload(
         err_text = str(payload.get('error'))
         if looks_like_seller_auth_message(err_text):
             raise SellerAccountBannedError(f'{api} ASIN {asin}: {err_text}')
+        if looks_like_rate_limit_message(err_text):
+            raise SellerSpriteTransientError(f'{api} ASIN {asin}: {err_text}')
         print(f'{api} ASIN {asin} 业务错误（非禁号）: {err_text[:200]}')
         return {}
 
@@ -111,9 +142,14 @@ def parse_sellersprite_api_payload(
     ok_codes = {None, 0, '0', 200, '200', 'OK', 'ok', True}
     if code not in ok_codes and str(code) not in ('0', '200', 'OK', 'ok'):
         detail = msg or str(payload.get('data') or '')
-        if looks_like_seller_auth_message(f'{code} {detail}'):
+        combined = f'{code} {detail}'
+        if looks_like_seller_auth_message(combined):
             raise SellerAccountBannedError(
                 f'{api} ASIN {asin} 会话失效(code={code}): {detail[:300]}'
+            )
+        if looks_like_rate_limit_message(combined):
+            raise SellerSpriteTransientError(
+                f'{api} ASIN {asin} 限流(code={code}): {detail[:300]}'
             )
         print(f'{api} ASIN {asin} 业务 code={code}: {detail[:200]}')
         return {}

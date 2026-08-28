@@ -7,9 +7,11 @@ from typing import List, Dict, Any
 # from async_read_config import read_main
 from seller_account_guard import (
     SellerAccountBannedError,
+    SellerSpriteTransientError,
     apply_login_config,
     apply_login_headers,
     ensure_seller_login,
+    looks_like_rate_limit_message,
     looks_like_seller_auth_message,
     parse_sellersprite_api_payload,
 )
@@ -97,8 +99,8 @@ data_totalUnits = {
 
 
 async def random_sleep():
-    """批量模式下默认不延迟；可通过 ROI_AD_REQUEST_DELAY_SEC 恢复节流。"""
-    delay = float(os.environ.get('ROI_AD_REQUEST_DELAY_SEC', '0'))
+    """批量/自动 ROI 请求间隔；默认 1s，可通过 ROI_AD_REQUEST_DELAY_SEC=0 关闭。"""
+    delay = float(os.environ.get('ROI_AD_REQUEST_DELAY_SEC', '1'))
     if delay > 0:
         await asyncio.sleep(delay)
 
@@ -129,7 +131,10 @@ async def fetch_source(
                     if attempt < retries:
                         await asyncio.sleep(0.5 * (attempt + 1))
                         continue
-                    return {"error": f"HTTP {resp.status}", "asin": asin}
+                    err = f"HTTP {resp.status}"
+                    if resp.status == 429 or looks_like_rate_limit_message(err):
+                        return {"error": err, "asin": asin, "transient": True}
+                    return {"error": err, "asin": asin}
 
                 try:
                     data = await resp.json()
@@ -147,6 +152,87 @@ async def fetch_source(
             return {"error": f"Request failed: {str(e)}", "asin": asin}
     return {"error": "Max retries exceeded", "asin": asin}
 
+
+def _pick_image_url_from_items(items: list, *, marketplace: str | None = None) -> str:
+    """从 competing-lookup / 广告 items 中提取第一条有效 imageUrl。"""
+    mp = normalize_sellersprite_marketplace(marketplace or get_sellersprite_marketplace())
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        if not response_matches_sellersprite_marketplace(item, mp):
+            continue
+        cand = str(item.get('imageUrl') or item.get('image') or '').strip()
+        if cand and cand.upper() not in ('N/A', 'NA', 'NAN'):
+            return cand
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        cand = str(item.get('imageUrl') or item.get('image') or '').strip()
+        if cand and cand.upper() not in ('N/A', 'NA', 'NAN'):
+            return cand
+    return ''
+
+
+async def supplement_image_urls_from_lookup(
+    asin_info_dict: dict,
+    asins: list[str],
+    *,
+    max_concurrent: int = 3,
+    marketplace: str | None = None,
+) -> dict:
+    """广告反查无 imageUrl 时，从 competing-lookup 补主图链接。"""
+    mp = normalize_sellersprite_marketplace(marketplace or get_sellersprite_marketplace())
+    out = dict(asin_info_dict or {})
+    need: list[str] = []
+    for raw in asins or []:
+        key = str(raw or '').strip().upper()
+        if not key:
+            continue
+        info = out.get(key)
+        if isinstance(info, dict) and str(info.get('imageUrl') or '').strip():
+            continue
+        need.append(key)
+    if not need:
+        return out
+
+    config = await ensure_seller_login()
+    apply_login_config(COOKIES, config)
+    apply_login_headers(HEADERS, config)
+    semaphore = asyncio.Semaphore(max(1, max_concurrent))
+
+    async def _one(asin: str):
+        async with semaphore:
+            async with aiohttp.ClientSession(headers=HEADERS, cookies=COOKIES) as session:
+                payload = await fetch_source_totalUnits(session, asin, marketplace=mp)
+            if isinstance(payload, dict) and payload.get('error'):
+                err = str(payload['error'])
+                if looks_like_seller_auth_message(err) or 'HTTP 401' in err or 'HTTP 403' in err:
+                    raise SellerAccountBannedError(f'销量补图 ASIN {asin}: {err}')
+                if looks_like_rate_limit_message(err) or 'HTTP 429' in err:
+                    raise SellerSpriteTransientError(f'销量补图限流 ASIN {asin}: {err}')
+                print(f'ASIN {asin} competing-lookup 补图失败: {err}')
+                return asin, ''
+            data_content = parse_sellersprite_api_payload(payload, asin=asin, api='销量补图')
+            url = _pick_image_url_from_items(data_content.get('items') or [], marketplace=mp)
+            await random_sleep()
+            return asin, url
+
+    results = await asyncio.gather(*[_one(a) for a in need], return_exceptions=True)
+    for item in results:
+        if isinstance(item, Exception):
+            if isinstance(item, (SellerAccountBannedError, SellerSpriteTransientError)):
+                raise item
+            print(f'competing-lookup 补图异常: {item}')
+            continue
+        asin, url = item
+        if not url:
+            continue
+        row = dict(out.get(asin) or {})
+        row['imageUrl'] = url
+        row['_image_source'] = 'competing_lookup'
+        out[asin] = row
+        print(f'ASIN {asin} 已从 competing-lookup 补到 imageUrl')
+    return out
 
 
 
@@ -201,6 +287,8 @@ async def fetch_multiple_asins(
             err = str(data['error'])
             if looks_like_seller_auth_message(err) or 'HTTP 401' in err or 'HTTP 403' in err:
                 raise SellerAccountBannedError(f'广告 API ASIN {asin}: {err}')
+            if data.get('transient') or looks_like_rate_limit_message(err) or 'HTTP 429' in err:
+                raise SellerSpriteTransientError(f'广告 API ASIN {asin}: {err}')
             print(f"ASIN {asin} 请求失败: {err}")
             continue
 
@@ -239,18 +327,7 @@ async def fetch_multiple_asins(
         avg_price = 0
         avg_reviews = 0
         item_count = len(items_list)
-        image_url = ''
-        try:
-            # 取第一条非空 imageUrl（首条常为广告位，可能无图）
-            for item in items_list:
-                if not isinstance(item, dict):
-                    continue
-                cand = str(item.get('imageUrl') or '').strip()
-                if cand and cand.upper() not in ('N/A', 'NA', 'NAN'):
-                    image_url = cand
-                    break
-        except Exception as e:
-            print(f"ASIN {asin} 解析 imageUrl 失败: {e}")
+        image_url = _pick_image_url_from_items(items_list, marketplace=mp)
         try:
             for item in items_list:
                 counter = item.get('counter', {})
@@ -279,6 +356,7 @@ async def fetch_multiple_asins(
             'avg_reviews': avg_reviews,
             'item_count': item_count,  # 可选，便于调试
             'imageUrl': image_url,
+            '_image_source': 'ad_api' if image_url else 'none',
         }
 
     return results_dict

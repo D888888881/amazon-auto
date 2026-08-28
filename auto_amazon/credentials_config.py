@@ -325,6 +325,7 @@ def read_bulk_accounts_form() -> dict:
     active_key = str(pool.get('runtime', {}).get('active_key') or '').strip()
     accounts: list[dict] = []
     ready_count = 0
+    cooldown_count = 0
     for acc in pool.get('accounts') or []:
         ao_raw = acc.get('ao_lo_to_n') or ''
         from credentials_loader import resolve_ao_lo_to_n_for_cookie
@@ -337,6 +338,9 @@ def read_bulk_accounts_form() -> dict:
         if ready:
             ready_count += 1
         cooldown_until = acc.get('cooldown_until')
+        in_cooldown = _is_in_cooldown(acc)
+        if in_cooldown:
+            cooldown_count += 1
         accounts.append(
             {
                 'key': acc.get('key') or '',
@@ -352,7 +356,7 @@ def read_bulk_accounts_form() -> dict:
                 'cooldown_until': cooldown_until,
                 'cooldown_label': _format_pool_dt(cooldown_until),
                 'last_banned_at': acc.get('last_banned_at'),
-                'in_cooldown': _is_in_cooldown(acc),
+                'in_cooldown': in_cooldown,
             }
         )
 
@@ -364,6 +368,7 @@ def read_bulk_accounts_form() -> dict:
         'ad_ban_pending_count': len(get_ban_pending_asins(task='ad')),
         'ready_count': ready_count,
         'total_count': len(accounts),
+        'cooldown_count': cooldown_count,
     }
 
 
@@ -376,6 +381,20 @@ def write_bulk_accounts_from_form(
     from bulk_account_pool import write_accounts_from_form
 
     write_accounts_from_form(accounts, cooldown_days_value=cooldown_days_value)
+
+
+def clear_bulk_account_cooldown(account_key: str) -> tuple[bool, str]:
+    _ensure_script_path()
+    from bulk_account_pool import clear_account_cooldown
+
+    return clear_account_cooldown(account_key)
+
+
+def clear_all_bulk_account_cooldowns() -> tuple[int, str]:
+    _ensure_script_path()
+    from bulk_account_pool import clear_all_account_cooldowns
+
+    return clear_all_account_cooldowns()
 
 
 def read_seller_credentials_form(profile: CredentialProfile = 'single') -> dict:

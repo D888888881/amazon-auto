@@ -102,6 +102,10 @@ def user_can_view_asin_product_image(user, asin: str) -> bool:
     return False
 
 
+def asin_has_local_image(asin: str) -> bool:
+    return find_asin_image_file(asin) is not None
+
+
 def guess_image_content_type(path: Path) -> str:
     guessed, _ = mimetypes.guess_type(str(path))
     return guessed or 'image/jpeg'

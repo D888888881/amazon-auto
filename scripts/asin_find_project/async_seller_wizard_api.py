@@ -2709,6 +2709,67 @@ async def _download_asin_images(
     return out
 
 
+def _build_image_meta(
+    target_asins: list[str],
+    asin_info_dict: dict,
+    asin_to_image_path: dict | None,
+) -> dict[str, dict]:
+    """供自动 ROI 校验本地主图与数据来源。"""
+    meta: dict[str, dict] = {}
+    for raw in target_asins or []:
+        key = str(raw).strip().upper()
+        if not key:
+            continue
+        info = asin_info_dict.get(key) if isinstance(asin_info_dict, dict) else None
+        path = (asin_to_image_path or {}).get(key, '')
+        has_local = bool(path and Path(path).is_file()) or asin_image_file(key).is_file()
+        src = 'none'
+        image_url = ''
+        ad_data = isinstance(info, dict) and bool(info)
+        if isinstance(info, dict):
+            image_url = str(info.get('imageUrl') or '')[:240]
+            src = str(info.get('_image_source') or ('ad_api' if image_url else 'none'))
+        if has_local and src == 'none':
+            src = 'local_existing'
+        meta[key] = {
+            'has_local_image': has_local,
+            'image_source': src,
+            'ad_data': ad_data,
+            'image_url': image_url,
+        }
+    return meta
+
+
+async def _prepare_asin_images(
+    target_asins: list[str],
+    asin_info_dict: dict,
+    asin_to_image_path: dict | None,
+    *,
+    max_concurrent: int,
+    marketplace: str,
+) -> tuple[dict, dict[str, str]]:
+    """competing-lookup 补 imageUrl 并下载到 media/images。"""
+    from async_advertisement_api import supplement_image_urls_from_lookup
+
+    info = await supplement_image_urls_from_lookup(
+        asin_info_dict,
+        target_asins,
+        max_concurrent=max_concurrent,
+        marketplace=marketplace,
+    )
+    paths = await _download_asin_images(info, asin_to_image_path)
+    missing = [
+        str(a).strip().upper()
+        for a in target_asins
+        if str(a).strip().upper() not in paths
+        and not asin_image_file(str(a).strip().upper()).is_file()
+    ]
+    if missing:
+        emit_progress(f'主图下载缺口 {len(missing)}，重试一次…')
+        paths = await _download_asin_images(info, paths)
+    return info, paths
+
+
 async def _refill_missing_sellersprite(
     target_asins: list[str],
     fba_info_dict: dict,
@@ -2728,6 +2789,7 @@ async def _refill_missing_sellersprite(
     from async_fba_api import async_fba_batch
     from seller_account_guard import (
         SellerAccountBannedError,
+        SellerSpriteTransientError,
         bulk_rotate_if_available,
         clear_seller_login_cache,
         is_seller_account_banned_error,
@@ -3139,6 +3201,7 @@ async def _seller_wizard_main_body(
 
     from seller_account_guard import (
         SellerAccountBannedError,
+        SellerSpriteTransientError,
         bulk_rotate_if_available,
         clear_seller_login_cache,
         ensure_seller_login,
@@ -3164,6 +3227,8 @@ async def _seller_wizard_main_body(
                         ),
                     )
             except Exception as e:
+                if isinstance(e, SellerSpriteTransientError):
+                    raise
                 if not is_seller_account_banned_error(e):
                     raise RuntimeError(f'卖家精灵 FBA/广告批量获取失败: {e}') from e
                 emit_progress('卖家精灵会话失效或子账号被禁，正在解禁并切换批量账号…')
@@ -3228,14 +3293,13 @@ async def _seller_wizard_main_body(
         f'广告 {len(asin_info_dict)}/{len(target_asins)}'
     )
 
-    asin_to_image_path = await _download_asin_images(asin_info_dict)
-    missing_img = [
-        a for a in target_asins
-        if a in asin_info_dict and a not in asin_to_image_path
-    ]
-    if missing_img:
-        emit_progress(f'主图下载缺口 {len(missing_img)}，重试一次…')
-        asin_to_image_path = await _download_asin_images(asin_info_dict, asin_to_image_path)
+    asin_info_dict, asin_to_image_path = await _prepare_asin_images(
+        target_asins,
+        asin_info_dict,
+        {},
+        max_concurrent=max_ss,
+        marketplace=mp,
+    )
 
     # 2. SIF：CPC 等（关键词以本地扫描为准；英国站 country=UK）
     emit_progress(f'正在请求 SIF 广告 CPC / 转化率（站点 {mp}，{len(target_asins)} 个 ASIN）…')
@@ -3547,7 +3611,13 @@ async def _seller_wizard_main_body(
                 pending_task='roi',
                 marketplace=mp,
             )
-            asin_to_image_path = await _download_asin_images(asin_info_dict, asin_to_image_path)
+            asin_info_dict, asin_to_image_path = await _prepare_asin_images(
+                ban_pending,
+                asin_info_dict,
+                asin_to_image_path,
+                max_concurrent=max_ss,
+                marketplace=mp,
+            )
             remaining_roi = ban_pending
             continue
         break
@@ -3558,6 +3628,9 @@ async def _seller_wizard_main_body(
     if not isinstance(merging_data, dict):
         merging_data = {}
     merging_data['__roi_failures__'] = roi_failures
+    merging_data['__image_meta__'] = _build_image_meta(
+        target_asins, asin_info_dict, asin_to_image_path
+    )
     ok_n = len(info_result)
     fail_n = len(roi_failures)
     emit_progress(f'全部完成：成功 {ok_n} 个，失败 {fail_n} 个')

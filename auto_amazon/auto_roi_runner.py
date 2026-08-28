@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import random
 import time
 import traceback
@@ -9,6 +10,7 @@ import traceback
 from django.db import close_old_connections, transaction
 from django.utils import timezone
 
+from .asin_product_image import asin_has_local_image
 from .asin_wizard import run_seller_wizard
 from .marketplace import MARKETPLACE_US, normalize_marketplace
 from .models import RoiAutoRun, RoiAutoRunLog
@@ -17,6 +19,8 @@ from .roi_site_defaults import ensure_site_config, roi_defaults_dict
 from .seller_unlock import is_seller_account_banned_error, unlock_seller_sub_account
 
 logger = logging.getLogger(__name__)
+
+_MAX_IMAGE_RETRIES = max(1, int(os.environ.get('AUTO_ROI_IMAGE_MAX_RETRIES', '3')))
 
 
 def _now():
@@ -60,6 +64,62 @@ def _rotate_bulk_account(pending_asins: list[str], banned_username: str | None =
         return bool(ok), str(msg or '')
     except Exception as exc:
         return False, f'{type(exc).__name__}: {exc}'
+
+
+def _clear_seller_session() -> None:
+    try:
+        import sys
+        from pathlib import Path
+
+        from django.conf import settings
+
+        script = str(Path(settings.BASE_DIR) / 'scripts' / 'asin_find_project')
+        if script not in sys.path:
+            sys.path.insert(0, script)
+        from seller_account_guard import clear_seller_login_cache
+
+        clear_seller_login_cache()
+    except Exception:
+        pass
+
+
+def _is_transient_seller_error(exc: BaseException) -> bool:
+    try:
+        import sys
+        from pathlib import Path
+
+        from django.conf import settings
+
+        script = str(Path(settings.BASE_DIR) / 'scripts' / 'asin_find_project')
+        if script not in sys.path:
+            sys.path.insert(0, script)
+        from seller_account_guard import SellerSpriteTransientError
+
+        return isinstance(exc, SellerSpriteTransientError)
+    except Exception:
+        return 'SellerSpriteTransientError' in type(exc).__name__
+
+
+def _extract_image_meta(part: dict | None, asin: str) -> dict:
+    if not isinstance(part, dict):
+        return {}
+    meta_all = part.get('__image_meta__') or {}
+    if not isinstance(meta_all, dict):
+        return {}
+    key = str(asin).strip().upper()
+    row = meta_all.get(key) or meta_all.get(asin) or {}
+    return row if isinstance(row, dict) else {}
+
+
+def _image_miss_summary(meta: dict) -> str:
+    parts = [
+        f"ad_data={'是' if meta.get('ad_data') else '否'}",
+        f"source={meta.get('image_source') or 'none'}",
+    ]
+    url = str(meta.get('image_url') or '').strip()
+    if url:
+        parts.append(f'url={url[:120]}')
+    return '主图缺失（' + '，'.join(parts) + '）'
 
 
 def _write_log(
@@ -159,6 +219,8 @@ def run_auto_roi(run_id: int) -> None:
 def _auto_roi_loop(run_id: int, *, mp: str, cfg, defaults: dict, parity: float) -> None:
     from .credentials_config import assert_sif_authorization_usable
     from .views import _merge_cost_overrides_from_db
+
+    os.environ.setdefault('ROI_AD_REQUEST_DELAY_SEC', '1')
 
     try:
         assert_sif_authorization_usable(for_auto_roi=True)
@@ -269,6 +331,7 @@ def _process_one_asin(
     max_ban = max(1, int(cfg.max_ban_retries_per_asin or 3))
     attempt = 0
     ban_attempts = 0
+    image_miss = 0
 
     while True:
         attempt += 1
@@ -289,7 +352,60 @@ def _process_one_asin(
                 roi_defaults=defaults,
             )
             duration_ms = int((time.monotonic() - t0) * 1000)
+            img_meta = _extract_image_meta(part if isinstance(part, dict) else {}, asin)
+            if not asin_has_local_image(asin):
+                image_miss += 1
+                miss_summary = _image_miss_summary(img_meta)
+                _clear_seller_session()
+                if image_miss >= 2:
+                    unlock_seller_sub_account()
+                    _rotate_bulk_account([asin], banned_username=account or None)
+                if image_miss >= _MAX_IMAGE_RETRIES:
+                    raise RuntimeError(
+                        f'{miss_summary}；已重试 {_MAX_IMAGE_RETRIES} 次仍无本地主图'
+                    )
+                with transaction.atomic():
+                    run = RoiAutoRun.objects.select_for_update().get(pk=run_id)
+                    run.consecutive_fails = int(run.consecutive_fails or 0) + 1
+                    run.last_account = account or run.last_account
+                    run.current_asin = asin
+                    pause_now = run.consecutive_fails >= int(cfg.consecutive_fail_pause or 10)
+                    if pause_now:
+                        run.status = RoiAutoRun.Status.PAUSED
+                        run.error_message = (
+                            f'连续 {run.consecutive_fails} 次主图/接口异常，已自动暂停。'
+                        )
+                    run.save(
+                        update_fields=[
+                            'consecutive_fails',
+                            'last_account',
+                            'current_asin',
+                            'status',
+                            'error_message',
+                            'updated_at',
+                        ]
+                    )
+                _write_log(
+                    run,
+                    asin=asin,
+                    status=RoiAutoRunLog.Status.RETRY,
+                    attempt=attempt,
+                    duration_ms=duration_ms,
+                    error_summary=f'{miss_summary}；刷新会话后重试（{image_miss}/{_MAX_IMAGE_RETRIES}）',
+                    account_username=account,
+                )
+                run = _refresh(run_id)
+                if run.status != RoiAutoRun.Status.RUNNING:
+                    return False
+                time.sleep(min(3.0, 1.0 + image_miss * 0.5))
+                continue
+
             _persist_one(run.user_id, asin, part if isinstance(part, dict) else {}, parity, marketplace)
+
+            ok_note = ''
+            src = str(img_meta.get('image_source') or '').strip()
+            if src and src not in ('none', 'ad_api', 'local_existing'):
+                ok_note = f'主图来源: {src}'
 
             with transaction.atomic():
                 run = RoiAutoRun.objects.select_for_update().get(pk=run_id)
@@ -317,6 +433,7 @@ def _process_one_asin(
                 status=RoiAutoRunLog.Status.SUCCESS,
                 attempt=attempt,
                 duration_ms=duration_ms,
+                error_summary=ok_note,
                 account_username=account,
             )
             return True
@@ -324,6 +441,22 @@ def _process_one_asin(
             duration_ms = int((time.monotonic() - t0) * 1000)
             detail = traceback.format_exc()
             summary = f'{type(exc).__name__}: {exc}'
+
+            if _is_transient_seller_error(exc):
+                _clear_seller_session()
+                run = _refresh(run_id)
+                _write_log(
+                    run,
+                    asin=asin,
+                    status=RoiAutoRunLog.Status.RETRY,
+                    attempt=attempt,
+                    duration_ms=duration_ms,
+                    error_summary=f'卖家精灵限流/会话异常：{summary}'[:500],
+                    error_detail=detail,
+                    account_username=account,
+                )
+                time.sleep(2.5)
+                continue
 
             if is_seller_account_banned_error(exc):
                 ban_attempts += 1
